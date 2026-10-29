@@ -165,6 +165,12 @@ $link.TargetPath = "$env:USERPROFILE\.cargo\bin\lemonstudio.exe"
 $link.Save()
 ```
 
+**Installer:** `tools\installer\build.bat` (cmd) or `tools/installer/build.sh` (Git Bash) installs any missing
+prerequisites with winget (rustup, LLVM, the Visual Studio Build Tools, Inno Setup), builds Lemon Studio and its
+plugins, and writes `dist\LemonStudio-Setup-<version>-<commit>.exe`: a per-user installer (an all-users install is
+offered) with a Start menu entry, an uninstaller, and the plugins as an optional component. `--no-plugins` leaves
+them out.
+
 **Plugins:** `cargo run -p os-app --release` installs Lemon Studio's plugins in `%LOCALAPPDATA%\Programs\Common\VST3`
 and `...\CLAP`, where DAWs find them. To build and install them without starting Lemon Studio, run
 `cargo run -p bundle-plugins -- --install`.

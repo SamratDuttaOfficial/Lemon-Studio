@@ -1,2 +1,5 @@
 # Preset files are read byte for byte (a saved state is binary): no line-end conversion on checkout.
 *.ospreset -text
+# cmd reads batch files with Windows line ends; shell scripts keep Unix ones.
+*.bat text eol=crlf
+*.sh text eol=lf

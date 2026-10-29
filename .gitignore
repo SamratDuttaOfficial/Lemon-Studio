@@ -13,3 +13,9 @@ CLAUDE.md
 
 # macOS Finder metadata
 .DS_Store
+
+# Installers written by tools/installer/build.sh and build.bat
+/dist/
+
+# Local agent rules
+agent.md
