@@ -17,6 +17,15 @@ os-plugkit = { path = "../../crates/os-plugkit" }
 os-ui = { path = "../../crates/os-ui" }
 os-theme = { path = "../../crates/os-theme" }
 serde_json = "1"
+# Lemon Voice's AI denoise: DeepFilterNet 3 (MIT / Apache-2.0), its model built in, run on the CPU by tract.
+deep_filter = { git = "https://github.com/Rikorose/DeepFilterNet", rev = "d375b2d8309e0935d165700c91da9de862a99c31", default-features = false, features = ["tract", "default-model"] }
+ndarray = "0.15"
+rubato = "0.14"
+# DeepFilterNet is written for tract 0.21.4 (its own lock): later 0.21 releases changed the API and moved to ndarray 0.16.
+tract-core = "=0.21.4"
+tract-hir = "=0.21.4"
+tract-onnx = "=0.21.4"
+tract-pulse = "=0.21.4"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Controls", "Win32_System_LibraryLoader"] }

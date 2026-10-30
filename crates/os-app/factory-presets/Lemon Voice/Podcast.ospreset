@@ -1,8 +1,9 @@
 OSPRESET 1
 plugin=Lemon Voice	id=clap:org.openstudio.lemon-voice	format=clap	body=params
-# 60%, 40%, 80%, 80%, broadcast.
-Denoise = 60
+# AI 80%, 20%, 40%, 80%, 80%, broadcast.
+Denoise = 20
 Room = 40
 Tone = 80
 Level = 80
 Sound = 1
+AI denoise = 80

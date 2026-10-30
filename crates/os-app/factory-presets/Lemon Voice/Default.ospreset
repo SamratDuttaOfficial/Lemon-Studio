@@ -1,8 +1,9 @@
 OSPRESET 1
 plugin=Lemon Voice	id=clap:org.openstudio.lemon-voice	format=clap	body=params
-# 50%, 30%, 60%, 50%, natural: the start of a new Lemon Voice.
-Denoise = 50
+# AI 70%, 20%, 30%, 60%, 50%, natural: the start of a new Lemon Voice.
+Denoise = 20
 Room = 30
 Tone = 60
 Level = 50
 Sound = 0
+AI denoise = 70

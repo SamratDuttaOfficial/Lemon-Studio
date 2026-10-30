@@ -1,6 +1,6 @@
 [package]
 name = "lemon-voice"
-description = "Lemon Voice: Lemon Studio's vocal enhancer: less noise and room, a studio vocal's tone, a steady level as a VST3 / CLAP plugin"
+description = "Lemon Voice: Lemon Studio's vocal enhancer: AI denoise (DeepFilterNet 3), less room, a studio vocal's tone, a steady level as a VST3 / CLAP plugin"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

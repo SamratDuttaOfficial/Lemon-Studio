@@ -6,7 +6,8 @@
 //! take: it lowers the background noise and the room, evens out the tone of a mic too close (boomy) or too far (thin,
 //! distant), and brings the level up to a steady one.
 //!
-//! How (classic speech enhancement, light enough for any computer, nothing to download):
+//! First, the AI denoise ([`crate::neural`]): DeepFilterNet 3, a neural network that keeps the voice and takes the
+//! noise away, however it sounds. Then classic speech enhancement, light enough for any computer:
 //! - The sound is analysed in overlapping frames (about 21 ms, a quarter apart) and every frequency gets a gain.
 //! - Noise: the noise floor of each frequency is tracked as the minimum of its smoothed level over the last 1.5 s
 //!   (minimum statistics: speech pauses often, noise does not); the room's late reverberation is predicted from the
@@ -26,6 +27,7 @@ use std::collections::VecDeque;
 use nih_plug::prelude::*;
 use os_ui::Rect;
 
+use crate::neural::Denoiser;
 use crate::params::leading_number;
 use crate::spectral::{hann, Fft};
 use crate::{Card, Control, Kind, Mark, Setting, SmallFx, Sound, Spec};
@@ -35,34 +37,39 @@ pub const ROOM: usize = 1;
 pub const TONE: usize = 2;
 pub const LEVEL: usize = 3;
 pub const TARGET: usize = 4;
+pub const AI: usize = 5;
 
-/// The settings: denoise, room, tone and level in %, and the target sound ([`TARGETS`]).
-pub const SETTINGS: [Setting; 5] = [
-    Setting { id: "denoise", name: "Denoise", range: (0, 100), start: 50, magnet: None },
+/// The settings: denoise, room, tone and level in %, the target sound ([`TARGETS`]) and the AI denoise in % (last, so
+/// that the others keep their places).
+pub const SETTINGS: [Setting; 6] = [
+    Setting { id: "denoise", name: "Denoise", range: (0, 100), start: 20, magnet: None },
     Setting { id: "room", name: "Room", range: (0, 100), start: 30, magnet: None },
     Setting { id: "tone", name: "Tone", range: (0, 100), start: 60, magnet: None },
     Setting { id: "level", name: "Level", range: (0, 100), start: 50, magnet: None },
     Setting { id: "target", name: "Sound", range: (0, 2), start: 0, magnet: None },
+    Setting { id: "ai", name: "AI denoise", range: (0, 100), start: 70, magnet: None },
 ];
 
 /// The target sounds: name, the fall above 500 Hz (dB an octave), a presence lift around 3.5 kHz and an air lift
 /// above 8 kHz (dB).
 pub const TARGETS: [(&str, f32, f32, f32); 3] = [("Natural", 4.5, 0.0, 0.0), ("Broadcast", 4.0, 2.5, 0.0), ("Bright", 3.0, 1.5, 3.0)];
 
-const CARDS: [Card; 5] = [
-    Card { x0: 8.0, x1: 100.0, y0: 28.0, y1: 136.0, heading: "DENOISE" },
-    Card { x0: 106.0, x1: 198.0, y0: 28.0, y1: 136.0, heading: "ROOM" },
-    Card { x0: 204.0, x1: 296.0, y0: 28.0, y1: 136.0, heading: "TONE" },
-    Card { x0: 302.0, x1: 394.0, y0: 28.0, y1: 136.0, heading: "LEVEL" },
-    Card { x0: 400.0, x1: 492.0, y0: 28.0, y1: 136.0, heading: "SOUND" },
+const CARDS: [Card; 6] = [
+    Card { x0: 8.0, x1: 100.0, y0: 28.0, y1: 136.0, heading: "AI DENOISE" },
+    Card { x0: 106.0, x1: 198.0, y0: 28.0, y1: 136.0, heading: "DENOISE" },
+    Card { x0: 204.0, x1: 296.0, y0: 28.0, y1: 136.0, heading: "ROOM" },
+    Card { x0: 302.0, x1: 394.0, y0: 28.0, y1: 136.0, heading: "TONE" },
+    Card { x0: 400.0, x1: 492.0, y0: 28.0, y1: 136.0, heading: "LEVEL" },
+    Card { x0: 498.0, x1: 590.0, y0: 28.0, y1: 136.0, heading: "SOUND" },
 ];
 
-const CONTROLS: [Control; 5] = [
-    Control::Knob { id: "denoise", cx: 54.0, cy: 76.0, r: 24.0, caption: "", bipolar: false },
-    Control::Knob { id: "room", cx: 152.0, cy: 76.0, r: 24.0, caption: "", bipolar: false },
-    Control::Knob { id: "tone", cx: 250.0, cy: 76.0, r: 24.0, caption: "", bipolar: false },
-    Control::Knob { id: "level", cx: 348.0, cy: 76.0, r: 24.0, caption: "", bipolar: false },
-    Control::Choice { id: "target", x: 418.0, top: 56.0, names: &["NATURAL", "BROADCAST", "BRIGHT"] },
+const CONTROLS: [Control; 6] = [
+    Control::Knob { id: "ai", cx: 54.0, cy: 76.0, r: 24.0, caption: "", bipolar: false },
+    Control::Knob { id: "denoise", cx: 152.0, cy: 76.0, r: 24.0, caption: "", bipolar: false },
+    Control::Knob { id: "room", cx: 250.0, cy: 76.0, r: 24.0, caption: "", bipolar: false },
+    Control::Knob { id: "tone", cx: 348.0, cy: 76.0, r: 24.0, caption: "", bipolar: false },
+    Control::Knob { id: "level", cx: 446.0, cy: 76.0, r: 24.0, caption: "", bipolar: false },
+    Control::Choice { id: "target", x: 516.0, top: 56.0, names: &["NATURAL", "BROADCAST", "BRIGHT"] },
 ];
 
 pub const SPEC: &Spec = &Spec {
@@ -76,12 +83,12 @@ pub const SPEC: &Spec = &Spec {
     tail: &[],
     blank: None,
     locate: None,
-    size: (500, 174),
+    size: (598, 174),
     cards: &CARDS,
     controls: &CONTROLS,
     display: None,
-    mark: Mark { x: 492.0, y: 155.0, anchor: 1.0, stacked: false },
-    hint: Some(Rect::new(8.0, 144.0, 484.0, 22.0)),
+    mark: Mark { x: 590.0, y: 155.0, anchor: 1.0, stacked: false },
+    hint: Some(Rect::new(8.0, 144.0, 582.0, 22.0)),
     labels: &[],
     text,
     parse,
@@ -92,6 +99,7 @@ pub const SPEC: &Spec = &Spec {
 fn text(k: usize, v: i32) -> String {
     match k {
         TARGET => TARGETS[v.clamp(0, 2) as usize].0.into(),
+        AI if v <= 0 => "Off".into(),
         _ => format!("{v}%"),
     }
 }
@@ -101,6 +109,7 @@ fn parse(k: usize, s: &str) -> Option<i32> {
     let low = s.trim().to_ascii_lowercase();
     match k {
         TARGET => TARGETS.iter().position(|t| !low.is_empty() && t.0.to_ascii_lowercase().starts_with(&low)).map(|i| i as i32),
+        AI if low == "off" => Some(0),
         _ => leading_number(&low).map(|x| (x.round() as i32).clamp(min, max)),
     }
 }
@@ -120,6 +129,10 @@ const DD: f32 = 0.98;
 const DEEPEST: f32 = 25.0;
 /// A frame is voice when it stands this far over the noise (power ratio).
 const VOICE_SNR: f32 = 4.0;
+/// A frame below this (its power over its length) is digital silence, and the frames the floor search waits after it
+/// while the smoothed level settles.
+const SILENT: f32 = 1e-9;
+const SETTLE: usize = 10;
 /// The tone EQ: how long the spectrum is learned over (s), how long it takes to move (s), its limits (dB) and how
 /// much voice it hears before it acts fully (s).
 const LEARN_S: f32 = 4.0;
@@ -150,7 +163,9 @@ fn target_db(f: f32, t: usize) -> f32 {
 
 pub struct VoiceFix {
     rate: f32,
-    v: [i32; 5],
+    v: [i32; 6],
+    /// The AI denoise, before the rest.
+    ai: Denoiser,
     n: usize,
     hop: usize,
     fft: Fft,
@@ -180,6 +195,9 @@ pub struct VoiceFix {
     /// Frames seen (the noise search warms up), whether the last frame was voice.
     frames: usize,
     voice: bool,
+    /// Whether the last frame was digital silence, and frames to go before the floor is searched again after it.
+    quiet: bool,
+    settle: usize,
     /// The tone EQ: each bin's band position, the learned spectrum per band, voice heard (s), the EQ (dB).
     pos: Vec<f32>,
     ltas: [f32; BANDS],
@@ -192,6 +210,11 @@ pub struct VoiceFix {
 
 impl VoiceFix {
     pub fn new(rate: u32, v: &[i32]) -> VoiceFix {
+        VoiceFix::with(rate, v, Denoiser::new(rate, v[AI]))
+    }
+
+    /// With the AI denoise `ai` (its model kept across a new sample rate or a reset).
+    fn with(rate: u32, v: &[i32], ai: Denoiser) -> VoiceFix {
         let rate = rate.max(1);
         let n = (1024 * (rate as usize).div_ceil(48000)).next_power_of_two();
         let hop = n / 4;
@@ -207,7 +230,8 @@ impl VoiceFix {
             .collect();
         let mut s = VoiceFix {
             rate: r,
-            v: [0; 5],
+            v: [0; 6],
+            ai,
             n,
             hop,
             fft: Fft::new(n),
@@ -232,6 +256,8 @@ impl VoiceFix {
             gain: vec![1.0; bins],
             frames: 0,
             voice: false,
+            quiet: true,
+            settle: SETTLE,
             pos,
             ltas: [0.0; BANDS],
             heard: 0.0,
@@ -239,13 +265,13 @@ impl VoiceFix {
             env: 0.0,
             lvl: 0.0,
         };
-        s.v.copy_from_slice(&v[..5]);
+        s.v.copy_from_slice(&v[..6]);
         s
     }
 
-    /// The latency (samples): one frame.
+    /// The latency (samples): the AI denoise's, then one frame.
     pub fn delay(&self) -> usize {
-        self.n - 1
+        self.ai.latency() + self.n - 1
     }
 
     /// One frame: analyse, work out the gains, apply them and add the frame back.
@@ -295,15 +321,22 @@ impl VoiceFix {
     /// The noise floor (minimum statistics) and whether this frame is voice.
     fn track_noise(&mut self) {
         self.frames += 1;
-        // The first frames still hold the silence before the start: they are not searched for the floor.
-        let filling = self.frames * self.hop < self.n;
+        // Digital silence is not searched for the floor (the first frames still hold the silence before the start, the
+        // AI denoise's delay is silent at first, a part can be muted), nor are the frames after it while the smoothed
+        // level settles: a floor of nothing would take every noise for the voice. The level starts again from the
+        // first frame after it.
+        let p = self.power.iter().sum::<f32>();
+        let quiet = self.frames * self.hop < self.n || p <= SILENT * self.n as f32;
+        let search = !quiet && self.settle == 0;
         for k in 0..self.power.len() {
-            let s = if filling { self.power[k] } else { SMOOTH * self.smooth[k] + (1.0 - SMOOTH) * self.power[k] };
+            let s = if quiet || self.quiet { self.power[k] } else { SMOOTH * self.smooth[k] + (1.0 - SMOOTH) * self.power[k] };
             self.smooth[k] = s;
-            if !filling {
+            if search {
                 self.cur_min[k] = self.cur_min[k].min(s);
             }
         }
+        self.settle = if quiet { SETTLE } else { self.settle.saturating_sub(1) };
+        self.quiet = quiet;
         self.sub_at += 1;
         if self.sub_at >= self.sub_len {
             self.sub_at = 0;
@@ -311,14 +344,18 @@ impl VoiceFix {
             if self.mins.len() > SUBS {
                 self.mins.pop_front();
             }
-            self.cur_min.copy_from_slice(&self.smooth);
+            if search {
+                self.cur_min.copy_from_slice(&self.smooth);
+            } else {
+                self.cur_min.fill(f32::MAX);
+            }
         }
         for k in 0..self.noise.len() {
             let m = self.mins.iter().fold(self.cur_min[k], |m, w| m.min(w[k]));
             self.noise[k] = if m == f32::MAX { self.smooth[k] } else { BIAS * m };
         }
-        let (p, q) = (self.power.iter().sum::<f32>(), self.noise.iter().sum::<f32>());
-        self.voice = !filling && p > VOICE_SNR * q && p > 1e-9 * self.n as f32;
+        let q = self.noise.iter().sum::<f32>();
+        self.voice = !quiet && p > VOICE_SNR * q;
         let mut keep = if self.past.len() >= self.late { self.past.pop_front().unwrap_or_default() } else { Vec::new() };
         keep.clear();
         keep.extend_from_slice(&self.smooth);
@@ -417,18 +454,23 @@ impl VoiceFix {
 
 impl Sound for VoiceFix {
     fn set(&mut self, v: &[i32]) {
-        self.v.copy_from_slice(&v[..5]);
+        self.v.copy_from_slice(&v[..6]);
+        self.ai.set(v[AI]);
     }
 
     fn set_sample_rate(&mut self, rate: u32) {
-        *self = VoiceFix::new(rate, &self.v.clone());
+        let ai = self.ai.renew(rate);
+        *self = VoiceFix::with(rate, &self.v.clone(), ai);
     }
 
     fn reset(&mut self) {
-        *self = VoiceFix::new(self.rate as u32, &self.v.clone());
+        let rate = self.rate as u32;
+        let ai = self.ai.renew(rate);
+        *self = VoiceFix::with(rate, &self.v.clone(), ai);
     }
 
     fn process(&mut self, left: &mut [f32], right: &mut [f32]) {
+        self.ai.process(left, right);
         let level = self.v[LEVEL].clamp(0, 100) as f32 / 100.0;
         let rms_follow = 1.0 - (-1.0 / (LEVEL_RMS_S * self.rate)).exp();
         let move_follow = 1.0 - (-1.0 / (LEVEL_MOVE_S * self.rate)).exp();
@@ -494,7 +536,7 @@ mod tests {
     use super::*;
 
     const RATE: u32 = 48000;
-    const OFF: [i32; 5] = [0, 0, 0, 0, 0];
+    const OFF: [i32; 6] = [0, 0, 0, 0, 0, 0];
 
     fn rng(seed: &mut u32) -> f32 {
         *seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
@@ -518,7 +560,11 @@ mod tests {
     }
 
     fn run(v: &[i32], x: &[f32]) -> (Vec<f32>, usize) {
-        let mut s = VoiceFix::new(RATE, v);
+        run_at(RATE, v, x)
+    }
+
+    fn run_at(rate: u32, v: &[i32], x: &[f32]) -> (Vec<f32>, usize) {
+        let mut s = VoiceFix::new(rate, v);
         let (mut l, mut r) = (x.to_vec(), x.to_vec());
         for (a, b) in l.chunks_mut(256).zip(r.chunks_mut(256)) {
             s.process(a, b);
@@ -557,6 +603,8 @@ mod tests {
     #[test]
     fn value_texts_and_typed_values() {
         assert_eq!(text(DENOISE, 50), "50%");
+        assert_eq!(text(AI, 0), "Off");
+        assert_eq!(parse(AI, "off"), Some(0));
         assert_eq!(text(TARGET, 1), "Broadcast");
         assert_eq!(parse(TARGET, "bri"), Some(2));
         assert_eq!(parse(LEVEL, "150"), Some(100));
@@ -681,5 +729,214 @@ mod tests {
         let (y, d) = run(&v, &hiss);
         let up = db(energy(&y[from + d..]), energy(&hiss[from..len - d]));
         assert!(up < 1.0, "noise raised {up} dB");
+    }
+
+    /// Speech-like syllables (a glottal buzz through the formants of five vowels, four syllables a second) in the first
+    /// half of every second, under steady noise at `rate`: the voice, and the voice with the noise.
+    fn noisy(rate: u32, secs: usize, noise: f32) -> (Vec<f32>, Vec<f32>) {
+        const VOWELS: [[f32; 3]; 5] = [[730.0, 1090.0, 2440.0], [270.0, 2290.0, 3010.0], [530.0, 1840.0, 2480.0], [300.0, 870.0, 2240.0], [570.0, 840.0, 2410.0]];
+        let r = rate as f32;
+        let len = secs * rate as usize;
+        let mut clean = vec![0.0f32; len];
+        let (mut phase, mut tilt) = (0.0f32, 0.0f32);
+        let mut res = [[0.0f32; 2]; 3];
+        let mut seed = 23u32;
+        for (t, out) in clean.iter_mut().enumerate() {
+            let s = t as f32 / r;
+            let (sec, at) = (s.floor() as usize, s % 1.0);
+            if at >= 0.5 {
+                continue;
+            }
+            let syl = (at / 0.125) as usize;
+            let k = at % 0.125 / 0.11;
+            let env = if k < 1.0 { (std::f32::consts::PI * k).sin().powf(0.6) } else { 0.0 };
+            let f0 = 140.0 * (1.0 + 0.03 * (std::f32::consts::TAU * 0.7 * s).sin() + 0.05 * (syl as f32 - 1.5) / 1.5);
+            phase += f0 / r;
+            let pulse = if phase >= 1.0 {
+                phase -= 1.0;
+                1.0
+            } else {
+                0.0
+            };
+            // A glottal pulse falls about 12 dB an octave; a little breath on top.
+            tilt += (pulse + 0.02 * rng(&mut seed) - tilt) * (std::f32::consts::TAU * 300.0 / r).min(1.0);
+            let f = VOWELS[(sec * 4 + syl) % VOWELS.len()];
+            let mut y = 0.0;
+            for (i, &hz) in f.iter().enumerate() {
+                let (bw, rr) = (60.0 + 40.0 * i as f32, 0.0);
+                let rr = rr + (-std::f32::consts::PI * bw / r).exp();
+                let a1 = 2.0 * rr * (std::f32::consts::TAU * hz / r).cos();
+                let a2 = -rr * rr;
+                let z = a1 * res[i][0] + a2 * res[i][1] + tilt * (1.0 - rr) * [1.0, 0.6, 0.3][i];
+                res[i] = [z, res[i][0]];
+                y += z;
+            }
+            *out = 0.3 * env * y;
+        }
+        let peak = clean.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+        clean.iter_mut().for_each(|v| *v *= 0.5 / peak);
+        let mut seed = 11u32;
+        let x = clean.iter().map(|c| c + noise * rng(&mut seed)).collect();
+        (clean, x)
+    }
+
+    /// In the pauses (`pause`) or the voice: the input's and the output's energy, the clean voice's and the error's.
+    fn measure(rate: u32, clean: &[f32], x: &[f32], y: &[f32], d: usize, from: usize) -> (f32, f32, f32, f32) {
+        let (mut gap_in, mut gap_out, mut on_clean, mut on_err) = (0.0, 0.0, 0.0, 0.0);
+        for t in from * rate as usize..x.len() - d {
+            let p = (t as f32 / rate as f32) % 1.0;
+            if p > 0.55 && p < 0.95 {
+                gap_in += x[t] * x[t];
+                gap_out += y[t + d] * y[t + d];
+            }
+            if p > 0.05 && p < 0.45 {
+                on_clean += clean[t] * clean[t];
+                on_err += (y[t + d] - clean[t]).powi(2);
+            }
+        }
+        (gap_in, gap_out, on_clean, on_err)
+    }
+
+    /// The AI denoise alone, at 48 and 44.1 kHz: the noise in the pauses goes far down, the voice keeps most of its
+    /// level (the model reshapes a made-up voice more than a real one: `real_speech`), and the output lines up with the
+    /// input at the reported latency.
+    #[test]
+    fn the_ai_takes_the_noise_away() {
+        for rate in [48000u32, 44100] {
+            let (clean, x) = noisy(rate, 5, 0.03);
+            let mut v = OFF;
+            v[AI] = 100;
+            let (y, d) = run_at(rate, &v, &x);
+            let (gap_in, gap_out, on_clean, on_err) = measure(rate, &clean, &x, &y, d, 2);
+            let on_out = voice_energy(rate, &y, d, x.len());
+            println!("{rate}: noise {:.1} dB, voice level {:.1} dB, error {:.1} dB", db(gap_out, gap_in), db(on_out, on_clean), db(on_err, on_clean));
+            assert!(db(gap_out, gap_in) < -20.0, "{rate}: noise down only {} dB", db(gap_out, gap_in));
+            assert!(db(on_out, on_clean) > -10.0, "{rate}: voice down {} dB", db(on_out, on_clean));
+            // The voice comes out where the latency says: the best lag within 2 ms of it is the latency itself.
+            let at = |lag: usize| (2 * rate as usize..x.len() - d - 200).map(|t| clean[t] * y[t + lag]).sum::<f32>();
+            let best = (d - 100..=d + 100).max_by(|&a, &b| at(a).total_cmp(&at(b))).unwrap();
+            assert!(best.abs_diff(d) <= 2, "{rate}: lined up at {best}, latency {d}");
+        }
+    }
+
+    /// The output's energy where the voice is (as `measure` takes it).
+    fn voice_energy(rate: u32, y: &[f32], d: usize, len: usize) -> f32 {
+        (2 * rate as usize..len - d)
+            .filter(|&t| {
+                let p = (t as f32 / rate as f32) % 1.0;
+                p > 0.05 && p < 0.45
+            })
+            .map(|t| y[t + d] * y[t + d])
+            .sum()
+    }
+
+    /// Turned on while playing, the AI is built on a thread of its own and fades in; turned off, it fades out.
+    #[test]
+    fn the_ai_comes_in_while_playing() {
+        let (_, x) = noisy(RATE, 1, 0.03);
+        let mut s = VoiceFix::new(RATE, &OFF);
+        let (mut l, mut r) = (vec![0.0f32; 480], vec![0.0f32; 480]);
+        let mut block = |s: &mut VoiceFix, at: usize| {
+            let at = at % (x.len() - 480);
+            l.copy_from_slice(&x[at..at + 480]);
+            r.copy_from_slice(&x[at..at + 480]);
+            s.process(&mut l, &mut r);
+        };
+        for n in 0..100 {
+            block(&mut s, n * 480);
+        }
+        assert!(!s.ai.active());
+        let mut v = OFF;
+        v[AI] = 100;
+        s.set(&v);
+        let t = std::time::Instant::now();
+        let mut n = 100;
+        while !s.ai.active() {
+            assert!(t.elapsed().as_secs() < 20, "the AI never came in");
+            block(&mut s, n * 480);
+            n += 1;
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        s.set(&OFF);
+        for _ in 0..20 {
+            block(&mut s, n * 480);
+            n += 1;
+        }
+        assert!(!s.ai.active(), "the AI fades out");
+    }
+
+    /// A recording of speech (16-bit PCM WAV, `OS_VOICE_WAV`) under noise through the AI denoise alone and through
+    /// the default Lemon Voice: what is left of the noise where nobody speaks and of the speech (`cargo test -p
+    /// lemon-small-fx --release -- --ignored real_speech --nocapture`).
+    #[test]
+    #[ignore]
+    fn real_speech() {
+        let Some(path) = std::env::var_os("OS_VOICE_WAV") else { return };
+        let b = std::fs::read(path).expect("reads");
+        let rate = u32::from_le_bytes(b[24..28].try_into().unwrap());
+        let chans = usize::from(u16::from_le_bytes(b[22..24].try_into().unwrap()));
+        let data = b.windows(4).position(|w| w == b"data").expect("data") + 8;
+        let clean: Vec<f32> = b[data..].chunks_exact(2 * chans).map(|f| f32::from(i16::from_le_bytes([f[0], f[1]])) / 32768.0 * 0.7).collect();
+        // Where speech is (a 20 ms envelope over a tenth of its peak) and where it is not.
+        let win = rate as usize / 50;
+        let env: Vec<f32> = clean.chunks(win).map(|c| c.iter().map(|v| v * v).sum::<f32>() / c.len() as f32).collect();
+        let top = env.iter().copied().fold(0.0f32, f32::max);
+        let speech = |t: usize| env[t / win] > 0.01 * top;
+        // A pause: no speech within 100 ms either way.
+        let pause = |t: usize| {
+            let w = t / win;
+            env[w.saturating_sub(5)..(w + 6).min(env.len())].iter().all(|&e| e < 1e-5 * top)
+        };
+        let (n_speech, n_pause) = (0..clean.len()).fold((0, 0), |(a, b), t| (a + usize::from(speech(t)), b + usize::from(pause(t))));
+        println!("{:.1} s of speech, {:.1} s of pauses", n_speech as f32 / rate as f32, n_pause as f32 / rate as f32);
+        for (name, noise) in [("hiss", 0), ("hum and fan", 1)] {
+            let mut seed = 7u32;
+            let mut lp = 0.0f32;
+            let x: Vec<f32> = clean
+                .iter()
+                .enumerate()
+                .map(|(t, c)| {
+                    let n = match noise {
+                        0 => 0.02 * rng(&mut seed),
+                        _ => {
+                            lp += (rng(&mut seed) - lp) * 0.05;
+                            let s = t as f32 / rate as f32;
+                            0.01 * (std::f32::consts::TAU * 50.0 * s).sin() + 0.004 * (std::f32::consts::TAU * 150.0 * s).sin() + 0.15 * lp
+                        }
+                    };
+                    c + n
+                })
+                .collect();
+            let mut ai = OFF;
+            ai[AI] = 100;
+            let mut classic = OFF;
+            classic[DENOISE] = 100;
+            for (what, v) in [("AI denoise 100%", ai), ("classic denoise 100%", classic), ("Default", SPEC.start().try_into().unwrap())] {
+                let (y, d) = run_at(rate, &v, &x);
+                let (mut gap_in, mut gap_out, mut on_clean, mut on_out, mut on_err) = (0.0, 0.0, 0.0, 0.0, 0.0);
+                for t in 2 * rate as usize..x.len() - d {
+                    if speech(t) {
+                        on_clean += clean[t] * clean[t];
+                        on_out += y[t + d] * y[t + d];
+                    } else if pause(t) {
+                        gap_in += x[t] * x[t];
+                        gap_out += y[t + d] * y[t + d];
+                    }
+                }
+                // The error with the output at its best level against the speech (the leveller's gain left out).
+                let g = (2 * rate as usize..x.len() - d).map(|t| clean[t] * y[t + d]).sum::<f32>() / on_out.max(1e-12);
+                for t in (2 * rate as usize..x.len() - d).filter(|&t| speech(t)) {
+                    on_err += (g * y[t + d] - clean[t]).powi(2);
+                }
+                let (in_err, _) = (2 * rate as usize..x.len() - d).filter(|&t| speech(t)).fold((0.0f32, 0), |(e, n), t| (e + (x[t] - clean[t]).powi(2), n + 1));
+                println!(
+                    "{name}, {what}: noise where nobody speaks {:.1} dB, speech level {:.1} dB, speech SNR {:.1} dB (was {:.1} dB)",
+                    db(gap_out, gap_in),
+                    db(on_out, on_clean),
+                    db(on_clean, on_err),
+                    db(on_clean, in_err)
+                );
+            }
+        }
     }
 }

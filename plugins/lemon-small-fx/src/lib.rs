@@ -29,6 +29,7 @@ pub mod params;
 pub mod peak_controller;
 pub mod phaser;
 pub mod mouth;
+pub mod neural;
 pub mod phrase;
 pub mod pitch;
 pub mod soft_clipper;
@@ -559,7 +560,7 @@ mod tests {
         assert_eq!(all(mouth::SPEC).len(), 6);
         assert_eq!(read(phrase::SPEC, "Tight pop"), [0, 1, 1, 1, 100, 50, 20]);
         assert_eq!(all(phrase::SPEC).len(), 7);
-        assert_eq!(read(voice::SPEC, "Phone or laptop mic"), [80, 40, 90, 70, 1]);
+        assert_eq!(read(voice::SPEC, "Phone or laptop mic"), [30, 40, 90, 70, 1, 90]);
         assert_eq!(all(voice::SPEC).len(), 6);
         // FL's 27 Flanger and 27 Phaser presets. Their Default presets are not what a new instance holds: the Flanger's has
         // the phase at 119 and the feedback at 24 (a new one 118 and 23), the Phaser's is a slower, all-wet sweep.

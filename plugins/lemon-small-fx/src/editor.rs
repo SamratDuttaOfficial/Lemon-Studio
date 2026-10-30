@@ -1180,7 +1180,7 @@ mod tests {
             (crate::vocoder::SPEC, "vocoder", &[("car", 8000), ("noise", 6400), ("mod_input", 1), ("car_input", 0), ("rms", 1), ("order", 4), ("bands", 16), ("lr", 1)]),
             (spritz::SPEC, "spritz", &[("freq", 7500), ("threshold", -220), ("depth", 180), ("speed", 90), ("mode", 1), ("listen", 1)]),
             (pitch::SPEC, "pitch", &[("key", 9), ("scale", 2), ("auto", 1), ("voice", 0), ("retune", 0), ("humanize", 40), ("flex", 30), ("vib_depth", 25), ("transpose", -3), ("notes", 0b100_0000_0100)]),
-            (voice::SPEC, "voice", &[("denoise", 70), ("room", 40), ("tone", 80), ("level", 60), ("target", 1)]),
+            (voice::SPEC, "voice", &[("denoise", 70), ("room", 40), ("tone", 80), ("level", 60), ("target", 1), ("ai", 50)]),
             (phrase::SPEC, "phrase", &[("key", 9), ("scale", 2), ("auto", 0), ("voice", 0), ("amount", 80), ("tighten", 25), ("glide", 60)]),
             (mouth::SPEC, "mouth", &[("sensitivity", 70), ("amount", 90), ("length", 25), ("low", 900), ("listen", 1)]),
         ];
