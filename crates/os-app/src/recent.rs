@@ -25,6 +25,9 @@ pub const KEYS: [&str; SHOWN] = ["Alt+1", "Alt+2", "Alt+3", "Alt+4", "Alt+5", "A
 pub const HEADING: &str = "Recent projects";
 /// The ▸ row with the older ones.
 pub const MORE: &str = "More";
+/// Open recent ▸ while the list is empty, and its row that empties it.
+pub const NONE: &str = "No recent projects";
+pub const CLEAR: &str = "Clear recent projects";
 
 /// The settings key of entry `n`.
 fn key(n: usize) -> String {
@@ -72,6 +75,22 @@ pub fn label(path: &Path) -> String {
 /// More ▸: the projects after the tenth, by name, without keys.
 pub(crate) fn more_items(_: &State) -> Vec<PItem> {
     list().iter().enumerate().skip(SHOWN).map(|(n, p)| PItem::new(label(p), Cmd::OpenRecent(n))).collect()
+}
+
+/// FILE ▸ Open recent ▸: the ten newest with their keys, More ▸ with the older ones, then Clear recent projects; a
+/// greyed-out No recent projects while the list is empty.
+pub(crate) fn items(s: &State) -> Vec<PItem> {
+    let list = list();
+    if list.is_empty() {
+        return vec![PItem::new(NONE, Cmd::Nothing).off()];
+    }
+    let mut items: Vec<PItem> = list.iter().take(SHOWN).enumerate().map(|(n, p)| PItem::new(label(p), Cmd::OpenRecent(n)).key(KEYS[n])).collect();
+    if list.len() > SHOWN {
+        items.push(PItem::sub(MORE, more_items(s)));
+    }
+    items.push(PItem::sep());
+    items.push(PItem::new(CLEAR, Cmd::ClearRecent));
+    items
 }
 
 /// The row Alt+`c` opens: 1 .. 9 the first nine, 0 the tenth.
@@ -215,5 +234,39 @@ mod tests {
         assert_eq!((bar.rows[at + 10].shortcut, bar.rows[at + 11].label.as_str(), bar.rows[at + 11].enabled), ("Alt+0", MORE, false));
         assert_eq!(bar.rows[at + 12].kind, Kind::Sep);
         assert_eq!(menus::pick(0, RECENT_PICK + 3), Action::MenuItem(0, RECENT_PICK + 3));
+    }
+
+    /// FILE ▸ Open recent ▸, under Open...: always there; No recent projects (greyed out) while the list is empty, else
+    /// the ten newest with their keys, More ▸ with the older ones, and Clear recent projects, which empties the list.
+    #[test]
+    fn open_recent_submenu() {
+        use crate::app::Action;
+        use crate::views::menus::{self, FILE_OPEN, OPEN_RECENT_LABEL};
+        let Ok(mut c) = os_ui::Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        assert_eq!(menus::item_at(0, FILE_OPEN + 1).map(|it| it.label), Some(OPEN_RECENT_LABEL));
+        let shown = |app: &App| items(&app.state).iter().map(|i| (i.label.to_string(), i.key, i.enabled)).collect::<Vec<_>>();
+        assert_eq!(shown(&app), [(NONE.to_string(), "", false)], "an empty list");
+        for n in 0..12 {
+            add(&std::env::temp_dir().join(format!("o{n}.flp")));
+        }
+        let it = items(&app.state);
+        assert_eq!(it.len(), SHOWN + 3, "ten, More, a line, Clear");
+        assert_eq!((it[0].label.as_ref(), it[0].key, &it[0].cmd), ("o11.flp", "Alt+1", &Cmd::OpenRecent(0)));
+        assert_eq!(it[9].key, "Alt+0");
+        assert_eq!(it[SHOWN].children.iter().map(|i| i.label.to_string()).collect::<Vec<_>>(), ["o1.flp", "o0.flp"]);
+        assert!(it[SHOWN + 1].sep);
+        // The FILE row opens the submenu beside it.
+        app.state.menu_open = Some(0);
+        app.paint(&mut c, None);
+        let r = app.hits.iter().rev().find(|h| h.action == Action::MenuSub(0, FILE_OPEN + 1)).expect("Open recent").rect;
+        app.mouse_move(r.cx(), r.cy());
+        app.mouse_down();
+        app.mouse_up();
+        let p = app.state.playlist.popup.as_ref().expect("Open recent opens its submenu");
+        assert_eq!(p.items.last().map(|i| i.label.to_string()).as_deref(), Some(CLEAR));
+        crate::playlist::run(&mut app, Cmd::ClearRecent);
+        assert!(list().is_empty());
+        assert_eq!(shown(&app)[0].0, NONE);
     }
 }

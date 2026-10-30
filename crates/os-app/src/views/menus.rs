@@ -73,18 +73,20 @@ pub struct Menu {
 // Flat item indices (columns in order) used by the app; `tests::indices` checks them.
 pub const FILE_NEW: usize = 0;
 pub const FILE_OPEN: usize = 2;
-pub const FILE_SAVE: usize = 4;
-pub const FILE_SAVE_AS: usize = 5;
-pub const FILE_SAVE_VERSION: usize = 6;
+pub const FILE_SAVE: usize = 5;
+pub const FILE_SAVE_AS: usize = 6;
+pub const FILE_SAVE_VERSION: usize = 7;
 /// FILE > Export audio (Ctrl+R; the toolbar's render button) and Export MP3 (Shift+Ctrl+R): the Export form (spec:
 /// audio/export.md §2).
-pub const FILE_EXPORT: usize = 12;
-pub const FILE_EXPORT_MP3: usize = 13;
+pub const FILE_EXPORT: usize = 13;
+pub const FILE_EXPORT_MP3: usize = 14;
 /// FILE > Export MIDI... (Shift+Ctrl+M; spec: ui/midi-files.md §10.1).
-pub const FILE_EXPORT_MIDI: usize = 14;
+pub const FILE_EXPORT_MIDI: usize = 15;
+/// FILE > Open recent ▸: every recent project, the ten newest with their Alt keys (`crate::recent::items`).
+pub const OPEN_RECENT_LABEL: &str = "Open recent";
 /// FILE > Export zipped project...: the project and its samples in one .zip (`crate::zipped`).
 pub const EXPORT_ZIP_LABEL: &str = "Export zipped project...";
-pub const FILE_EXIT: usize = 19;
+pub const FILE_EXIT: usize = 20;
 /// OPTIONS > Theme settings (flat index: header counts).
 #[cfg(test)]
 pub const OPT_THEME: usize = 5;
@@ -143,6 +145,7 @@ const FILE: &[Item] = &[
     it("New", "").on(),
     it("New from template", "").sub(),
     it("Open...", "Ctrl+O").on(),
+    it(OPEN_RECENT_LABEL, "").sub(),
     SEP,
     it("Save", "Ctrl+S").on(),
     it("Save as...", "Shift+Ctrl+S").on(),
@@ -504,6 +507,7 @@ pub fn submenu(menu: usize, label: &str) -> Option<fn(&State) -> Vec<crate::play
         (0, "Import") => Some(|_| vec![crate::playlist::PItem::new("MIDI file...", crate::playlist::Cmd::MidiImport(false))]),
         // spec: ui/project-templates.md
         (0, "New from template") => Some(crate::project_files::template_items),
+        (0, OPEN_RECENT_LABEL) => Some(crate::recent::items),
         // spec: ui/plugin-menu.md §1: the effects, a pick into the selected mixer track's first empty slot as from F8.
         (ADD_MENU, "Effect") => Some(|s| crate::plugin_menu::items(s, crate::plugin_menu::Target::Fx(None), true)),
         (TOOLS_MENU, EDITORS_LABEL) => Some(|_| crate::rack::editor_items()),
@@ -927,6 +931,7 @@ mod tests {
         let l = |i| item_at(0, i).map(|it| it.label);
         assert_eq!(l(FILE_NEW), Some("New"));
         assert_eq!(l(FILE_OPEN), Some("Open..."));
+        assert_eq!(l(FILE_OPEN + 1), Some(OPEN_RECENT_LABEL));
         assert_eq!(l(FILE_SAVE), Some("Save"));
         assert_eq!(l(FILE_SAVE_AS), Some("Save as..."));
         assert_eq!(l(FILE_EXPORT), Some("Export audio..."));
@@ -999,7 +1004,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(built, ["New from template", "Import", "Effect", "Toolbars", ONE_CLICK_LABEL, DUMP_LOG_LABEL, CLIPS_ALL_LABEL, CLIPS_SEL_LABEL, EDITORS_LABEL, DECLICK_LABEL]);
+        assert_eq!(built, ["New from template", OPEN_RECENT_LABEL, "Import", "Effect", "Toolbars", ONE_CLICK_LABEL, DUMP_LOG_LABEL, CLIPS_ALL_LABEL, CLIPS_SEL_LABEL, EDITORS_LABEL, DECLICK_LABEL]);
         let labels = |menu, label| submenu(menu, label).unwrap()(&app.state).iter().map(|p| p.label.to_string()).collect::<Vec<_>>();
         let modes = ["Out only (no bleeding)", "Transient (no bleeding)", "Transient (bleeding)", "Generic (bleeding)", "Smooth (bleeding)", "Crossfade (bleeding)"];
         assert_eq!(labels(TOOLS_MENU, DECLICK_LABEL), modes, "the six declick modes in order (spec: audio/declick.md)");

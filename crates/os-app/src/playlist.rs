@@ -355,6 +355,8 @@ pub enum Cmd {
     Arp(crate::arpeggiate::ACmd),
     /// FILE ▸ Recent projects ▸ More: open recent project `n` (spec: ui/recent-projects.md §2).
     OpenRecent(usize),
+    /// FILE ▸ Open recent ▸ Clear recent projects.
+    ClearRecent,
     /// The Flam dialog's Options ▸ presets (spec: ui/piano-flam.md §5).
     FlamPreset(crate::flam::Preset),
     /// The Limit dialog's Key, scale and Snap ▸ menus (spec: ui/piano-limit.md §1).
@@ -3850,6 +3852,10 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             app.open_recent(n);
             return None;
         }
+        Cmd::ClearRecent => {
+            crate::recent::restore(&[]);
+            return None;
+        }
         Cmd::MidiImport(piano) => {
             app.import_midi_dialog(piano);
             return None;
@@ -4460,7 +4466,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
         Cmd::Genre(_) => None,
         Cmd::Theme(_) => None,
         Cmd::Template(_) | Cmd::NewTemplate(_) => None,
-        Cmd::Arp(_) | Cmd::MidiImport(_) | Cmd::MidiExport(_) | Cmd::OpenRecent(_) => None,
+        Cmd::Arp(_) | Cmd::MidiImport(_) | Cmd::MidiExport(_) | Cmd::OpenRecent(_) | Cmd::ClearRecent => None,
         Cmd::FlamPreset(_) => None,
         Cmd::Limit(_) => None,
         Cmd::Claw(_) => None,
