@@ -14,7 +14,7 @@ use crate::app::{Action, State, Ui};
 use crate::icons::{self, Icon};
 
 /// Row pitch and indent per depth level (spec: ui/browser.md §2).
-pub const ROW_H: f32 = 23.0;
+pub const ROW_H: f32 = 20.0;
 const INDENT: f32 = 13.0;
 /// Top of the list area.
 pub const LIST_Y: f32 = 142.0;

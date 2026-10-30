@@ -477,23 +477,37 @@ fn time(ui: &mut Ui, c: &Ctx) {
     let step_s = format!("{step:02}");
     let tick_s = format!("{tick:02}");
     let (bw, sw, kw) = (ui.c.text_width(big, &bar_s), ui.c.text_width(big, &step_s), ui.c.text_width(small, &tick_s));
+    // The digits stand on one baseline whatever size the fonts are drawn at (`os_ui::text::tight`); each colon's dots
+    // sit at the middle and the foot of the digits beside it.
+    const BASE: f32 = 31.5;
+    let (asc, cap) = (1.08, 0.7);
+    let (bs, ss) = (f32::from(big.size), f32::from(small.size));
+    // `text` lowers a shrunk font by its `drop`: these places are already measured from the baseline.
+    let (bd, sd) = (f32::from(big.drop), f32::from(small.drop));
+    let gap = (bs / 4.0).round();
     let right = a.x(863.0);
     let tick_x = right - kw;
-    let step_x = tick_x - 8.0 - sw;
-    let bar_x = (step_x - 8.0 - bw).max(tp.x + 2.0);
+    let step_x = tick_x - gap - sw;
+    let bar_x = (step_x - gap - bw).max(tp.x + 2.0);
+    let dots = |x: f32, size: f32, d: f32| {
+        let mid = BASE - cap * size / 2.0;
+        [Rect::new(x, a.y(mid - d / 2.0), 2.0, d), Rect::new(x, a.y(BASE - 1.5 - d), 2.0, d)]
+    };
     ui.c.push_clip(tp.inset(1.0));
     let g = if lemon { t.pill } else { t.glyph };
     if let Some(c) = s.rec.count.filter(|c| c.left() > 0) {
         // A recording count-in (spec: ui/recording.md §3): the beats left.
         ui.c.text_center(Font::light(22, 8), Rect::new(tp.x, tp.y + 2.0, tp.w, tp.h - 2.0), g, &format!("REC IN {}", c.left()));
     } else {
-        ui.c.text(big, bar_x, a.y(-3.0), g, &bar_s);
-        ui.c.fill_rect(Rect::new(step_x - 5.5, a.y(20.0), 2.0, 2.5), g);
-        ui.c.fill_rect(Rect::new(step_x - 5.5, a.y(30.0), 2.0, 2.5), g);
-        ui.c.text(big, step_x, a.y(-3.0), g, &step_s);
-        ui.c.fill_rect(Rect::new(tick_x - 5.0, a.y(21.0), 2.0, 2.0), g);
-        ui.c.fill_rect(Rect::new(tick_x - 5.0, a.y(29.5), 2.0, 2.0), g);
-        ui.c.text(small, tick_x, a.y(9.0), g, &tick_s);
+        ui.c.text(big, bar_x, a.y(BASE - asc * bs) - bd, g, &bar_s);
+        for r in dots(step_x - gap / 2.0 - 1.5, bs, 2.5) {
+            ui.c.fill_rect(r, g);
+        }
+        ui.c.text(big, step_x, a.y(BASE - asc * bs) - bd, g, &step_s);
+        for r in dots(tick_x - gap / 2.0 - 1.0, ss, 2.0) {
+            ui.c.fill_rect(r, g);
+        }
+        ui.c.text(small, tick_x, a.y(BASE + 1.0 - asc * ss) - sd, g, &tick_s);
     }
     ui.c.pop_clip();
     let label = s.clock.label();

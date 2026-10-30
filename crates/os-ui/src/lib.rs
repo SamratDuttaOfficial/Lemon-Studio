@@ -862,9 +862,10 @@ impl Canvas {
         self.text.metrics(f, self.scale).1 as f32 / self.scale
     }
 
-    /// Draw `s` with its text cell's top-left at (x, y). Returns the advance width.
+    /// Draw `s` with its text cell's top-left at (x, y) (lower by the font's `drop`). Returns the advance width.
     pub fn text(&mut self, f: Font, x: f32, y: f32, c: Color, s: &str) -> f32 {
         let k = self.scale;
+        let y = y + f32::from(f.drop);
         let (xi, yi) = ((x * k).round() as i32, (y * k).round() as i32);
         let (w, h) = self.text.extent(f, k, s);
         for i in 0..self.clip_count() {
@@ -883,7 +884,7 @@ impl Canvas {
     pub fn text_center(&mut self, f: Font, r: Rect, c: Color, s: &str) {
         let w = self.text_width(f, s);
         let h = self.line_height(f);
-        self.text(f, (r.cx() - w / 2.0).round(), (r.cy() - h / 2.0).round(), c, s);
+        self.text(f, (r.cx() - w / 2.0).round(), (r.cy() - h / 2.0).round() - f32::from(f.drop), c, s);
     }
 
     /// `f`, horizontally condensed step by step (then shrunk) until `s` fits in `max_w`.
@@ -922,6 +923,7 @@ impl Canvas {
     /// with the glyph tops facing left at `x`. Returns the advance (upward extent).
     pub fn text_vertical(&mut self, f: Font, x: f32, y_bottom: f32, c: Color, s: &str) -> f32 {
         let k = self.scale;
+        let x = x + f32::from(f.drop);
         let (xi, yi) = ((x * k).round() as i32, (y_bottom * k).round() as i32);
         let (w, h) = self.text.extent(f, k, s);
         for i in 0..self.clip_count() {

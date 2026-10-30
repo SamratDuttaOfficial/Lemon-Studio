@@ -60,20 +60,42 @@ pub struct Font {
     pub italic: bool,
     /// ClearType "natural" advances; `false` = GDI-compatible (hinted, whole-pixel) advances.
     pub natural: bool,
+    /// Logical px the text is drawn lower than asked: half of what [`tight`] took off the size, so a smaller font keeps
+    /// the vertical centre its place was laid out for.
+    pub drop: u8,
+}
+
+/// Sizes up to this are drawn as asked; larger ones are drawn smaller ([`tight`]).
+pub const TIGHT_FROM: u16 = 14;
+
+/// The size a font asked for at `size` px is drawn at: up to [`TIGHT_FROM`] as it is, above it only three fifths of the
+/// rest, so titles, the song position and other big text stay compact (17 px is drawn at 15, 22 at 18, 32 at 24).
+pub const fn tight(size: u16) -> u16 {
+    if size <= TIGHT_FROM { size } else { TIGHT_FROM + (size - TIGHT_FROM) * 3 / 5 }
+}
+
+/// [`Font::drop`] for a font asked for at `size`.
+const fn tight_drop(size: u16) -> u8 {
+    ((size - tight(size)) / 2) as u8
+}
+
+/// A character width asked for with `size`, for the size [`tight`] draws it at (0 stays the face's own).
+const fn tight_width(size: u16, width: u16) -> u16 {
+    if size == 0 { width } else { ((width as u32 * tight(size) as u32 + size as u32 / 2) / size as u32) as u16 }
 }
 
 impl Font {
-    /// Cuprum at `size` px with natural ClearType advances.
+    /// Cuprum at `size` px ([`tight`]) with natural ClearType advances.
     pub const fn new(size: u16) -> Font {
-        Font { face: Face::Ui, size, width: 0, bold: false, italic: false, natural: true }
+        Font { face: Face::Ui, size: tight(size), width: 0, bold: false, italic: false, natural: true, drop: tight_drop(size) }
     }
-    /// Horizontally condensed: `width` is the average character width in px.
+    /// Horizontally condensed: `width` is the average character width in px (both [`tight`]).
     pub const fn condensed(size: u16, width: u16) -> Font {
-        Font { face: Face::Ui, size, width, bold: false, italic: false, natural: false }
+        Font { face: Face::Ui, size: tight(size), width: tight_width(size, width), bold: false, italic: false, natural: false, drop: tight_drop(size) }
     }
-    /// The light display face (song position digits).
+    /// The light display face (song position digits), [`tight`].
     pub const fn light(size: u16, width: u16) -> Font {
-        Font { face: Face::Light, size, width, bold: false, italic: false, natural: false }
+        Font { face: Face::Light, size: tight(size), width: tight_width(size, width), bold: false, italic: false, natural: false, drop: tight_drop(size) }
     }
     pub const fn natural(self) -> Font {
         Font { natural: true, ..self }
@@ -698,10 +720,20 @@ mod portable {
         fn cell_and_baseline_follow_the_win_metrics() {
             let mut fd = Fd::new().unwrap();
             // Cuprum: win ascent 910, descent 210 of 1000 units.
-            assert_eq!(fd.metrics(Font::new(20), 1.0), (22, 18));
-            assert_eq!(fd.metrics(Font::new(20), 1.5), (33, 27));
+            assert_eq!(fd.metrics(Font { size: 20, ..Font::new(12) }, 1.0), (22, 18));
+            assert_eq!(fd.metrics(Font { size: 20, ..Font::new(12) }, 1.5), (33, 27));
             // The light face sits on Segoe UI's baseline.
-            assert_eq!(fd.metrics(Font::light(32, 13), 1.0).1, 35);
+            assert_eq!(fd.metrics(Font { size: 32, ..Font::light(12, 0) }, 1.0).1, 35);
+        }
+
+        /// Big sizes are drawn three fifths of the way above 14 px, lowered by half of what they lose; widths follow.
+        #[test]
+        fn big_sizes_are_drawn_tight() {
+            assert_eq!([crate::text::tight(12), crate::text::tight(14), crate::text::tight(15), crate::text::tight(17), crate::text::tight(22), crate::text::tight(32)], [12, 14, 14, 15, 18, 24]);
+            let f = Font::condensed(18, 6);
+            assert_eq!((f.size, f.width, f.drop), (16, 5, 1));
+            assert_eq!((Font::new(13).size, Font::new(13).drop), (13, 0));
+            assert_eq!(Font::light(32, 13).drop, 4);
         }
 
         #[test]
