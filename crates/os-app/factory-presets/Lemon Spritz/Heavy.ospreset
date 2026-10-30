@@ -1,0 +1,9 @@
+OSPRESET 1
+plugin=Lemon Spritz	id=clap:org.openstudio.lemon-spritz	format=clap	body=params
+# 6000 Hz, -22 dB, -20 dB, 40 ms, wide: for harsh, close-miked takes.
+Frequency = 4000
+Threshold = 180
+Depth = 200
+Release = 30
+Mode = 1
+Listen = 0

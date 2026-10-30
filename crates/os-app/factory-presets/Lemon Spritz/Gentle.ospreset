@@ -1,0 +1,9 @@
+OSPRESET 1
+plugin=Lemon Spritz	id=clap:org.openstudio.lemon-spritz	format=clap	body=params
+# 6500 Hz, -10 dB, -6 dB, 80 ms, split: takes the edge off.
+Frequency = 4500
+Threshold = 300
+Depth = 60
+Release = 70
+Mode = 0
+Listen = 0

@@ -2046,6 +2046,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "lemon-spritz"
+version = "0.0.1"
+dependencies = [
+ "lemon-small-fx",
+ "nih_plug",
+ "os-plugkit",
+]
+
+[[package]]
 name = "lemon-stereo-enhancer"
 version = "0.0.1"
 dependencies = [
@@ -2883,6 +2892,7 @@ dependencies = [
  "lemon-sampler",
  "lemon-small-fx",
  "lemon-soft-clipper",
+ "lemon-spritz",
  "lemon-stereo-enhancer",
  "lemon-stereo-shaper",
  "lemon-transient-processor",

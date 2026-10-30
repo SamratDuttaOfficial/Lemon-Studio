@@ -1,0 +1,9 @@
+OSPRESET 1
+plugin=Lemon Spritz	id=clap:org.openstudio.lemon-spritz	format=clap	body=params
+# Listen to what is taken out while tuning the frequency.
+Frequency = 4000
+Threshold = 250
+Depth = 120
+Release = 50
+Mode = 0
+Listen = 1
