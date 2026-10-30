@@ -2158,6 +2158,30 @@ impl Engine {
         }
     }
 
+    /// The audio clips carried over from the engine this one replaces (`continue_from`) made to follow this one's song
+    /// at `tick`, as if playback had started there: a clip sounding that no longer plays here (its track or the clip
+    /// muted, moved or deleted) fades out, and one that plays here but was not sounding (its track or the clip turned
+    /// back on, or moved under the position) starts on `tick` from where its sample has got to (`clips_under_way`).
+    /// Each clip under way is matched to one sounding voice or waiting late start of its channel ending where it ends.
+    fn follow_clips(&mut self, tick: u64) {
+        let mut under = self.clips_under_way(tick);
+        let mut take = |channel: usize, cut: Option<u64>| match under.iter().position(|t| t.channel == channel && t.cut == cut) {
+            Some(i) => {
+                under.swap_remove(i);
+                true
+            }
+            None => false,
+        };
+        let fade = ((f64::from(self.rate) * RELEASE_SECONDS) as u32).max(1);
+        for v in &mut self.voices {
+            if v.cut.is_some() && v.live.is_none() && v.release.is_none() && !take(v.channel, v.cut) {
+                v.release = Some((fade, fade));
+            }
+        }
+        self.late.retain(|t| t.cut.is_none() || take(t.channel, t.cut));
+        self.late.extend(under);
+    }
+
     /// Audio clips that started before `tick` and are not over at it, moved to `tick` with their sample position
     /// advanced by the time since their start; a clip whose sample has run out by then stays silent (spec:
     /// audio/audio-clips.md, "Starting inside a clip"). Notes of pattern clips are not started late.
@@ -2306,6 +2330,7 @@ impl Engine {
             let (c, b) = (self.late[i].channel, self.late[i].buf);
             self.late[i].buf = self.adopt(&old.channels, c, b);
         }
+        self.follow_clips(tick);
         self.sounding = std::mem::take(&mut old.sounding);
         self.inst_live = std::mem::take(&mut old.inst_live);
         self.inst_midi = std::mem::take(&mut old.inst_midi);
@@ -5892,6 +5917,43 @@ mod tests {
         e3.continue_from(&mut e2);
         e3.render_ticks(48, &mut out);
         assert_eq!(log.lock().unwrap().0, vec![(60, 3.0), (60, 0.0)], "back to its own pitch");
+    }
+
+    /// A playlist track turned off while the song plays silences its audio clip at once (a short fade), and turned back
+    /// on starts the clip again from where the song is, without stopping playback.
+    #[test]
+    fn audio_clips_follow_their_track_while_playing() {
+        use os_model::{Clip, ClipSource};
+        let wav = Sines::new("track-switch", &[(440.0, 4.0)]);
+        let mut p = song(vec![], vec![Clip::new(0, 384 * 4, 0, ClipSource::Channel(0))]);
+        p.channels[0].kind = ChannelKind::AudioClip;
+        p.channels[0].sample_path = wav.path();
+        let mut lib = SampleLibrary::new(None);
+        let mut e = Engine::new(&p, &mut lib, 48000, PlayMode::Song);
+        let mut out = Vec::new();
+        e.render_ticks(96, &mut out);
+        assert!(rms(&out[out.len() - 9600..]) > 0.1, "the clip plays");
+        // Off: the playing engine is rebuilt from the edited project.
+        p.arrangements[0].tracks[0].enabled = false;
+        let mut e2 = Engine::new(&p, &mut lib, 48000, PlayMode::Song);
+        e2.continue_from(&mut e);
+        let mut off = Vec::new();
+        e2.render_ticks(96, &mut off);
+        assert!(rms(&off[2400..]) < 1e-4, "silent after the fade: {}", rms(&off[2400..]));
+        // On again: the clip starts from where the song is.
+        p.arrangements[0].tracks[0].enabled = true;
+        let mut e3 = Engine::new(&p, &mut lib, 48000, PlayMode::Song);
+        e3.continue_from(&mut e2);
+        let mut on = Vec::new();
+        e3.render_ticks(96, &mut on);
+        assert!(rms(&on[on.len() - 9600..]) > 0.1, "playing again");
+        // An edit elsewhere leaves a sounding clip alone: no fade, no second voice.
+        let mut e4 = Engine::new(&p, &mut lib, 48000, PlayMode::Song);
+        e4.continue_from(&mut e3);
+        let mut same = Vec::new();
+        e4.render_ticks(24, &mut same);
+        let peak = same.iter().fold(0.0f32, |m, x| m.max(x.abs()));
+        assert!(rms(&same) > 0.3 && peak < 0.51, "one voice, unbroken: rms {} peak {peak}", rms(&same));
     }
 
     // spec: audio/audio-clips.md "Starting inside a clip"
