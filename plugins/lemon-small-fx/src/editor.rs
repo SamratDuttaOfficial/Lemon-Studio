@@ -896,7 +896,7 @@ mod gui {
 mod tests {
     use super::*;
     use crate::tests::SPECS;
-    use crate::{balance, chorus, fast_distortion, filter, flanger, phaser, pitch, soft_clipper, spritz, stereo_enhancer, stereo_shaper, transient_processor, Control};
+    use crate::{balance, chorus, fast_distortion, filter, flanger, mouth, phaser, pitch, soft_clipper, spritz, stereo_enhancer, stereo_shaper, transient_processor, Control};
 
     fn logic(spec: &'static Spec) -> Logic {
         let mut l = Logic::new(spec, Arc::new(FxParams::new(spec)), Arc::new(Shared::default()), None);
@@ -1096,7 +1096,7 @@ mod tests {
             }
             pm.save_png(std::path::Path::new(&dir).join(format!("{name}.png"))).unwrap();
         };
-        let settings: [(&Spec, &str, &[(&str, i32)]); 12] = [
+        let settings: [(&Spec, &str, &[(&str, i32)]); 13] = [
             (soft_clipper::SPEC, "soft_clipper", &[("threshold", 64), ("post", 150)]),
             (fast_distortion::SPEC, "fast_distortion", &[("pre", 192), ("threshold", 3), ("type", 1), ("mix", 100), ("post", 110)]),
             (balance::SPEC, "balance", &[("balance", -70), ("volume", 220)]),
@@ -1113,6 +1113,7 @@ mod tests {
             (phaser::SPEC, "phaser", &[("sweep", 4000), ("range", 1024), ("stages", 15), ("feedback", 850), ("dry_wet", 0), ("gain", 2500)]),
             (spritz::SPEC, "spritz", &[("freq", 7500), ("threshold", -220), ("depth", 180), ("speed", 90), ("mode", 1), ("listen", 1)]),
             (pitch::SPEC, "pitch", &[("key", 9), ("scale", 2), ("auto", 1), ("voice", 0), ("retune", 0), ("humanize", 40), ("flex", 30), ("vib_depth", 25), ("transpose", -3), ("notes", 0b100_0000_0100)]),
+            (mouth::SPEC, "mouth", &[("sensitivity", 70), ("amount", 90), ("length", 25), ("low", 900), ("listen", 1)]),
         ];
         for (spec, name, values) in settings {
             let mut l = logic(spec);

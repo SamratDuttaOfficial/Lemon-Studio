@@ -1,0 +1,8 @@
+OSPRESET 1
+plugin=Lemon Mouth	id=clap:org.openstudio.lemon-mouth	format=clap	body=params
+# 30%, 80%: only the loudest clicks, softened.
+Sensitivity = 30
+Amount = 80
+Click length = 25
+Low limit = 500
+Listen = 0

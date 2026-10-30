@@ -1,0 +1,8 @@
+OSPRESET 1
+plugin=Lemon Mouth	id=clap:org.openstudio.lemon-mouth	format=clap	body=params
+# 75%, 100%, 4.0 ms, 500 Hz: for slurpy, crackly takes.
+Sensitivity = 75
+Amount = 100
+Click length = 35
+Low limit = 300
+Listen = 0

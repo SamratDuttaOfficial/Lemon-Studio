@@ -1965,6 +1965,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "lemon-mouth"
+version = "0.0.1"
+dependencies = [
+ "lemon-small-fx",
+ "nih_plug",
+ "os-plugkit",
+]
+
+[[package]]
 name = "lemon-parametric-eq-2"
 version = "0.0.1"
 dependencies = [
@@ -2895,6 +2904,7 @@ dependencies = [
  "lemon-filter",
  "lemon-flanger",
  "lemon-limiter",
+ "lemon-mouth",
  "lemon-parametric-eq-2",
  "lemon-phaser",
  "lemon-pitch",

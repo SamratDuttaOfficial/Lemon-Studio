@@ -1,0 +1,8 @@
+OSPRESET 1
+plugin=Lemon Mouth	id=clap:org.openstudio.lemon-mouth	format=clap	body=params
+# 55%, 100%, 3.0 ms, 500 Hz: podcasts, voice-over, audiobooks.
+Sensitivity = 55
+Amount = 100
+Click length = 25
+Low limit = 300
+Listen = 0

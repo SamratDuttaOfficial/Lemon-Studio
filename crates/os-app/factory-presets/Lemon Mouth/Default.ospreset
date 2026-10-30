@@ -1,0 +1,8 @@
+OSPRESET 1
+plugin=Lemon Mouth	id=clap:org.openstudio.lemon-mouth	format=clap	body=params
+# 50%, 100%, 3.0 ms, 700 Hz: the start of a new Lemon Mouth.
+Sensitivity = 50
+Amount = 100
+Click length = 25
+Low limit = 500
+Listen = 0

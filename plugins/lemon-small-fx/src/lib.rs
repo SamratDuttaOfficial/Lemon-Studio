@@ -4,8 +4,8 @@
 
 //! Lemon Studio's small effects as VST3 / CLAP plugins (nih-plug): Lemon Soft Clipper, Lemon Fast Distortion, Lemon
 //! Balance, Lemon Stereo Enhancer, Lemon Transient Processor, Lemon Chorus, Lemon Stereo Shaper, Lemon Filter, Lemon
-//! Flanger, Lemon Phaser, Lemon Spritz and Lemon Pitch. Each is a handful of settings over a sound, so they share
-//! everything but their description: the plugin, its parameters and saved state ([`params`]), the Pith editor
+//! Flanger, Lemon Phaser, Lemon Spritz, Lemon Pitch and Lemon Mouth. Each is a handful of settings over a sound, so
+//! they share everything but their description: the plugin, its parameters and saved state ([`params`]), the Pith editor
 //! ([`editor`], [`view`]). A description ([`Spec`]) gives the settings, their value texts, the editor's cards and
 //! controls, and the sound. The plugin modules (`plugins/lemon-soft-clipper` and the others) export one each.
 //!
@@ -23,8 +23,10 @@ pub mod filter;
 pub mod flanger;
 pub mod params;
 pub mod phaser;
+pub mod mouth;
 pub mod pitch;
 pub mod soft_clipper;
+pub mod spectral;
 pub mod spritz;
 pub mod stereo_enhancer;
 pub mod stereo_shaper;
@@ -356,7 +358,7 @@ impl<K: Kind> Vst3Plugin for SmallFx<K> {
 mod tests {
     use super::*;
 
-    pub const SPECS: [&Spec; 12] = [
+    pub const SPECS: [&Spec; 13] = [
         soft_clipper::SPEC,
         fast_distortion::SPEC,
         balance::SPEC,
@@ -369,6 +371,7 @@ mod tests {
         phaser::SPEC,
         spritz::SPEC,
         pitch::SPEC,
+        mouth::SPEC,
     ];
 
     /// Every effect: ids unique, starts inside the ranges, a control per setting, the plugin ids distinct.
@@ -405,6 +408,7 @@ mod tests {
             <phaser::LemonPhaser as ClapPlugin>::CLAP_ID,
             <spritz::LemonSpritz as ClapPlugin>::CLAP_ID,
             <pitch::LemonPitch as ClapPlugin>::CLAP_ID,
+            <mouth::LemonMouth as ClapPlugin>::CLAP_ID,
         ];
         let classes = [
             <soft_clipper::LemonSoftClipper as Vst3Plugin>::VST3_CLASS_ID,
@@ -419,6 +423,7 @@ mod tests {
             <phaser::LemonPhaser as Vst3Plugin>::VST3_CLASS_ID,
             <spritz::LemonSpritz as Vst3Plugin>::VST3_CLASS_ID,
             <pitch::LemonPitch as Vst3Plugin>::VST3_CLASS_ID,
+            <mouth::LemonMouth as Vst3Plugin>::VST3_CLASS_ID,
         ];
         for i in 0..ids.len() {
             for j in i + 1..ids.len() {
@@ -487,7 +492,7 @@ mod tests {
             }
             v.into_iter().map(|x| x.expect("every parameter listed")).collect()
         };
-        for spec in [soft_clipper::SPEC, fast_distortion::SPEC, stereo_enhancer::SPEC, transient_processor::SPEC, chorus::SPEC, stereo_shaper::SPEC, filter::SPEC, spritz::SPEC, pitch::SPEC] {
+        for spec in [soft_clipper::SPEC, fast_distortion::SPEC, stereo_enhancer::SPEC, transient_processor::SPEC, chorus::SPEC, stereo_shaper::SPEC, filter::SPEC, spritz::SPEC, pitch::SPEC, mouth::SPEC] {
             for name in all(spec) {
                 read(spec, &name);
             }
@@ -521,6 +526,8 @@ mod tests {
         assert_eq!(all(spritz::SPEC).len(), 6);
         assert_eq!(read(pitch::SPEC, "Hard tune")[pitch::RETUNE], 0);
         assert_eq!(all(pitch::SPEC).len(), 8);
+        assert_eq!(read(mouth::SPEC, "Wet mouth"), [75, 100, 40, 500, 0]);
+        assert_eq!(all(mouth::SPEC).len(), 6);
         // FL's 27 Flanger and 27 Phaser presets. Their Default presets are not what a new instance holds: the Flanger's has
         // the phase at 119 and the feedback at 24 (a new one 118 and 23), the Phaser's is a slower, all-wet sweep.
         for spec in [flanger::SPEC, phaser::SPEC] {

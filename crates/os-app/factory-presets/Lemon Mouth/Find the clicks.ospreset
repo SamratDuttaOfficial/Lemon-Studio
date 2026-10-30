@@ -1,0 +1,8 @@
+OSPRESET 1
+plugin=Lemon Mouth	id=clap:org.openstudio.lemon-mouth	format=clap	body=params
+# Listen: hear only what is taken out, to set Sensitivity.
+Sensitivity = 50
+Amount = 100
+Click length = 25
+Low limit = 500
+Listen = 1
