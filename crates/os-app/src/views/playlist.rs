@@ -763,8 +763,8 @@ fn grid_lines(ui: &mut Ui, g: &PGeom, bar_w: f32, sb: i32) {
     }
     let first_bar = ((g.scroll_x / bar_w) as i32 / bar_step) * bar_step;
     let n = (grid.w / bar_w).ceil() as i32 + bar_step + 1;
-    // Lines at the theme's line strength (spec: ui/flstheme.md §3, PLGridContrast).
-    let beat = t.pl_line(t.grid_gap.mix(t.grid, 0.4));
+    // Lines at the theme's line strength (spec: ui/flstheme.md §3, PLGridContrast), boosted (`os_theme::LINE_BOOST`).
+    let beat = t.pl_line(t.grid_gap.mix(t.grid, 0.2));
     let bar_line = t.pl_line(t.grid_bar);
     let unit = pl::grid_ticks(g.ppq, bar_w) as f32 * g.ppt;
     let per_bar = ((bar_w / unit).round() as i32).max(1);
@@ -786,6 +786,9 @@ fn grid_lines(ui: &mut Ui, g: &PGeom, bar_w: f32, sb: i32) {
         b += bar_step;
     }
 }
+
+/// How opaque a clip's body is (of 255): the grid lines show through it.
+const CLIP_BODY_ALPHA: u8 = 170;
 
 /// `c` with `d` added to each component, clamped (spec: ui/playlist.md §2, "Channel-colour rule").
 fn offset(c: Color, d: i16) -> Color {
@@ -842,11 +845,11 @@ fn clip_paint(ui: &mut Ui, s: &State, g: &PGeom, i: usize, c: &Clip) {
     let outline = dim(t.s(0x03090d));
     let narrow = r.w < 8.0;
     let lemon = super::lemon(ui);
-    // Rect fills with the top corners knocked out (cheaper than rounded paths for hundreds of clips).
-    if lemon {
-        ui.c.fill_rrect(r, lk::r_btn(t).min(r.w / 2.0).min(r.h / 2.0), outline);
-    } else {
+    // Only the edge: the body is see-through, so the grid lines show behind it.
+    if narrow {
         ui.c.fill_rect(r, outline);
+    } else {
+        ui.c.stroke_rrect(r, if lemon { lk::r_btn(t).min(r.w / 2.0).min(r.h / 2.0) } else { 0.0 }, 1.0, outline);
     }
     let row = if track_on { t.grid } else { t.grid.mix(t.grid_gap, 0.5) };
     if !narrow && !lemon {
@@ -859,8 +862,13 @@ fn clip_paint(ui: &mut Ui, s: &State, g: &PGeom, i: usize, c: &Clip) {
     // Edge colour behind the strip (its top corners in the outline's colour), then the highlight row and the gradient.
     // Lemon (spec: ui/lemon-design.md §7): a rounded tile with a flat title strip.
     let ir = (lk::r_btn(t) - 1.0).min(inner.w / 2.0).min(inner.h / 2.0);
+    let body_r = g.body(c);
+    let body_r = Rect::new(inner.x, body_r.y, inner.w, inner.bottom() - body_r.y);
     if lemon {
+        // The strip alone (rounded at the top): the body under it is see-through.
+        ui.c.push_clip(Rect::span(inner.x, inner.right(), inner.y, body_r.y));
         ui.c.fill_rrect(inner, ir, dim(top));
+        ui.c.pop_clip();
     } else {
         ui.c.fill_rect(Rect::new(inner.x, inner.y, inner.w, title_h + 1.0), dim(edge));
     }
@@ -872,18 +880,21 @@ fn clip_paint(ui: &mut Ui, s: &State, g: &PGeom, i: usize, c: &Clip) {
         ui.c.fill_rect(Rect::new(inner.x + 1.0, inner.y + 1.0, inner.w - 2.0, 1.0), dim(high));
         ui.c.fill_rect_gradient(Rect::new(inner.x + 1.0, inner.y + 2.0, inner.w - 2.0, title_h - 3.0), dim(top), dim(bottom), 0.0);
     }
-    // Body: a slightly darker first row and a darker last row.
-    let body_r = g.body(c);
-    let body_r = Rect::new(inner.x, body_r.y, inner.w, inner.bottom() - body_r.y);
+    // Body, see-through (`CLIP_BODY_ALPHA`): a slightly darker first row and a darker last row.
     // The content is measured from the body's true edges (the drawn ones may be pulled in, `clip_draw_rect`).
     let body_at = Body { r: body_r, x: clip_x + f64::from(side), w: f64::from((full_w - 2.0 * side).max(1.0)) };
+    let see = |col: Color| dim(col).with_alpha(CLIP_BODY_ALPHA);
     if lemon {
-        ui.c.fill_rrect(body_r, ir, dim(body));
-        ui.c.fill_rect(Rect::new(body_r.x, body_r.y, body_r.w, ir.min(body_r.h)), dim(body));
+        // Square at the top (under the strip), rounded at the bottom: one fill, so no part is laid on twice.
+        ui.c.push_clip(body_r);
+        ui.c.fill_rrect(Rect::new(body_r.x, body_r.y - ir, body_r.w, body_r.h + ir), ir, see(body));
+        ui.c.pop_clip();
+    } else if body_r.h > 2.0 {
+        ui.c.fill_rect(Rect::new(body_r.x, body_r.y + 1.0, body_r.w, body_r.h - 2.0), see(body));
+        ui.c.fill_rect(Rect::new(body_r.x, body_r.y, body_r.w, 1.0), see(body.shade(-0.08)));
+        ui.c.fill_rect(Rect::new(body_r.x, body_r.bottom() - 1.0, body_r.w, 1.0), see(body.shade(-0.3)));
     } else {
-        ui.c.fill_rect(body_r, dim(body));
-        ui.c.fill_rect(Rect::new(body_r.x, body_r.y, body_r.w, 1.0), dim(body.shade(-0.08)));
-        ui.c.fill_rect(Rect::new(body_r.x, body_r.bottom() - 1.0, body_r.w, 1.0), dim(body.shade(-0.3)));
+        ui.c.fill_rect(body_r, see(body));
     }
 
     ui.c.push_clip(inner.intersect(&g.grid));

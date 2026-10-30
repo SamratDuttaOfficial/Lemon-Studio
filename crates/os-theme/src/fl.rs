@@ -632,10 +632,12 @@ WaveClr3=65280
         assert_eq!(lines("PLGridContrast=-20\n"), (0.0, 1.0));
         let strong = p("PLGridContrast=200\nPLGridCustom=1\nPLGridback=-13884384\n");
         assert_eq!((strong.grid_gap, strong.grid_bar), (strong.grid.shade(-0.25), strong.grid.shade(-0.6)), "the tokens stay");
-        assert_eq!(strong.pl_line(strong.grid_bar), strong.grid.mix(strong.grid_bar, 2.0));
+        // Drawn `LINE_BOOST` times as strong as the theme asks.
+        let b = crate::LINE_BOOST;
+        assert_eq!(strong.pl_line(strong.grid_bar), strong.grid.mix(strong.grid_bar, 2.0 * b));
         assert_eq!(p("PLGridContrast=0\n").pl_line(base.grid_bar), base.grid_bar.with_alpha(0));
-        assert_eq!(p("PRGridContrast=50\n").pr_line(base.pr_bar), base.pr_bar.with_alpha(128));
-        assert_eq!((base.pl_line(base.grid_bar), base.pr_line(base.pr_bar)), (base.grid_bar, base.pr_bar));
+        assert_eq!(p("PRGridContrast=50\n").pr_line(base.pr_bar), base.pr_bar.with_alpha((255.0 * 0.5 * b).round() as u8));
+        assert_eq!((base.pl_line(base.grid_bar), base.pr_line(base.pr_bar)), (base.grid.mix(base.grid_bar, b), base.pr_row.mix(base.pr_bar, b)));
     }
 
     // spec: ui/flstheme.md §3 (BackMode, BackPicFilename)

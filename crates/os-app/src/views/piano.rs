@@ -30,9 +30,9 @@ pub fn is_black(key: i32) -> bool {
 }
 
 /// `c` minus `d` on every channel (the grid's line colors are the row fill minus a constant, §3), the constant scaled by
-/// the theme's grid line strength (`PRGridContrast`, spec: ui/flstheme.md §3).
+/// the theme's grid line strength (`PRGridContrast`, spec: ui/flstheme.md §3) and `os_theme::LINE_BOOST`.
 fn sub(t: &os_theme::Palette, c: Color, d: u8) -> Color {
-    let d = (f32::from(d) * t.pr_lines).round().clamp(0.0, 255.0) as u8;
+    let d = (f32::from(d) * t.pr_lines * os_theme::LINE_BOOST).round().clamp(0.0, 255.0) as u8;
     Color { r: c.r.saturating_sub(d), g: c.g.saturating_sub(d), b: c.b.saturating_sub(d), a: c.a }
 }
 

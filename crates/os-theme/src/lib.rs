@@ -206,16 +206,20 @@ macro_rules! tokens {
             /// Playlist line colour `c` at the theme's line strength (`line_at` over `grid`; spec: ui/flstheme.md §3,
             /// §7).
             pub fn pl_line(&self, c: Color) -> Color {
-                line_at(self.grid, c, self.pl_lines)
+                line_at(self.grid, c, self.pl_lines * LINE_BOOST)
             }
 
             /// Piano roll line colour `c` at the theme's line strength (`line_at` over `pr_row`).
             pub fn pr_line(&self, c: Color) -> Color {
-                line_at(self.pr_row, c, self.pr_lines)
+                line_at(self.pr_row, c, self.pr_lines * LINE_BOOST)
             }
         }
     };
 }
+
+/// How much stronger Lemon Studio draws the playlist's and piano roll's grid lines than a theme's line strength asks:
+/// the lines stay visible on the dark grids and through the see-through clips.
+pub const LINE_BOOST: f32 = 1.6;
 
 /// Grid line colour `c` at strength `k` (a theme's `*GridContrast` / 100) over a grid of colour `grid`: up to 1 the line
 /// is laid over what is under it at `k` of its opacity (on the plain grid that is `grid.mix(c, k)`; 0 leaves no line),
