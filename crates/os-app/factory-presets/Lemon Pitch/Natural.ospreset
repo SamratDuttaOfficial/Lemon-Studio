@@ -1,0 +1,17 @@
+OSPRESET 1
+plugin=Lemon Pitch	id=clap:org.openstudio.lemon-pitch	format=clap	body=params
+# Slower retune, humanize and flex keep the voice's own movement.
+Key = 0
+Scale = 1
+Key detection = 0
+Input = 1
+Retune speed = 80
+Humanize = 60
+Flex = 20
+Amount = 100
+Vibrato rate = 45
+Vibrato depth = 0
+Vibrato onset = 300
+Transpose = 12
+A4 tuning = 100
+Notes off = 0

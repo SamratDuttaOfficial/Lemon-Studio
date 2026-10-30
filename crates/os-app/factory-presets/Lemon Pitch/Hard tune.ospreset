@@ -1,0 +1,17 @@
+OSPRESET 1
+plugin=Lemon Pitch	id=clap:org.openstudio.lemon-pitch	format=clap	body=params
+# Instant retune: the stepped, robotic effect.
+Key = 0
+Scale = 1
+Key detection = 0
+Input = 1
+Retune speed = 0
+Humanize = 0
+Flex = 0
+Amount = 100
+Vibrato rate = 45
+Vibrato depth = 0
+Vibrato onset = 300
+Transpose = 12
+A4 tuning = 100
+Notes off = 0

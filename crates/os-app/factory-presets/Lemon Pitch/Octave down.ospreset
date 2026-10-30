@@ -1,0 +1,17 @@
+OSPRESET 1
+plugin=Lemon Pitch	id=clap:org.openstudio.lemon-pitch	format=clap	body=params
+# A low double: the voice an octave lower, formants kept.
+Key = 0
+Scale = 0
+Key detection = 0
+Input = 1
+Retune speed = 20
+Humanize = 0
+Flex = 0
+Amount = 100
+Vibrato rate = 45
+Vibrato depth = 0
+Vibrato onset = 300
+Transpose = 0
+A4 tuning = 100
+Notes off = 0

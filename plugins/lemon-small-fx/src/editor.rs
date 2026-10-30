@@ -369,7 +369,8 @@ impl Logic {
     /// Paints the editor; `hint` is drawn when the host does not show it.
     pub fn paint(&mut self, c: &mut os_ui::Canvas, palette: &os_theme::Palette) {
         let hint = if self.hosted { String::new() } else { self.hint.clone() };
-        self.hits = view::paint(self.spec, c, palette, &self.vals, &self.view, &hint);
+        let live = self.shared.live();
+        self.hits = view::paint(self.spec, c, palette, &self.vals, &self.view, &hint, &live);
     }
 }
 
@@ -895,7 +896,7 @@ mod gui {
 mod tests {
     use super::*;
     use crate::tests::SPECS;
-    use crate::{balance, chorus, fast_distortion, filter, flanger, phaser, soft_clipper, spritz, stereo_enhancer, stereo_shaper, transient_processor, Control};
+    use crate::{balance, chorus, fast_distortion, filter, flanger, phaser, pitch, soft_clipper, spritz, stereo_enhancer, stereo_shaper, transient_processor, Control};
 
     fn logic(spec: &'static Spec) -> Logic {
         let mut l = Logic::new(spec, Arc::new(FxParams::new(spec)), Arc::new(Shared::default()), None);
@@ -1095,7 +1096,7 @@ mod tests {
             }
             pm.save_png(std::path::Path::new(&dir).join(format!("{name}.png"))).unwrap();
         };
-        let settings: [(&Spec, &str, &[(&str, i32)]); 11] = [
+        let settings: [(&Spec, &str, &[(&str, i32)]); 12] = [
             (soft_clipper::SPEC, "soft_clipper", &[("threshold", 64), ("post", 150)]),
             (fast_distortion::SPEC, "fast_distortion", &[("pre", 192), ("threshold", 3), ("type", 1), ("mix", 100), ("post", 110)]),
             (balance::SPEC, "balance", &[("balance", -70), ("volume", 220)]),
@@ -1111,6 +1112,7 @@ mod tests {
             (flanger::SPEC, "flanger", &[("delay", 300), ("depth", 4200), ("rate", 900), ("shape", 512), ("feed", 70), ("invert_feed", 0), ("damp", 1500), ("cross", 0)]),
             (phaser::SPEC, "phaser", &[("sweep", 4000), ("range", 1024), ("stages", 15), ("feedback", 850), ("dry_wet", 0), ("gain", 2500)]),
             (spritz::SPEC, "spritz", &[("freq", 7500), ("threshold", -220), ("depth", 180), ("speed", 90), ("mode", 1), ("listen", 1)]),
+            (pitch::SPEC, "pitch", &[("key", 9), ("scale", 2), ("auto", 1), ("voice", 0), ("retune", 0), ("humanize", 40), ("flex", 30), ("vib_depth", 25), ("transpose", -3), ("notes", 0b100_0000_0100)]),
         ];
         for (spec, name, values) in settings {
             let mut l = logic(spec);
@@ -1121,6 +1123,13 @@ mod tests {
                 l.vals.edit_plain(id, *v as f32);
             }
             save(&mut l, &format!("{name}_set"), 1.0);
+            if spec.name == pitch::SPEC.name {
+                // What the sound reports while a voice sings A3 a little flat, found to be in A minor.
+                for (a, v) in l.shared.live.iter().zip([1, 5682, 5698, 9, 1, 87, i32::from(pitch::scale_mask(9, pitch::MINOR)), 57]) {
+                    a.store(v, std::sync::atomic::Ordering::Relaxed);
+                }
+                save(&mut l, &format!("{name}_live"), 2.0);
+            }
         }
     }
 }

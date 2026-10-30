@@ -1,0 +1,17 @@
+OSPRESET 1
+plugin=Lemon Pitch	id=clap:org.openstudio.lemon-pitch	format=clap	body=params
+# Adds a 5.5 Hz vibrato to held notes after a quarter second.
+Key = 0
+Scale = 1
+Key detection = 0
+Input = 1
+Retune speed = 40
+Humanize = 20
+Flex = 0
+Amount = 100
+Vibrato rate = 45
+Vibrato depth = 30
+Vibrato onset = 250
+Transpose = 12
+A4 tuning = 100
+Notes off = 0

@@ -18,7 +18,7 @@ use os_ui::kit::lemon::{self, plug};
 use os_ui::kit::{inst, State};
 use os_ui::{Canvas, Color, Font, Rect};
 
-use crate::{Control, Mark, Spec, MAX};
+use crate::{Control, Mark, Spec, LIVE, MAX};
 
 /// Dials bigger than this get the thicker arc.
 const SMALL: f32 = 19.0;
@@ -112,7 +112,7 @@ pub fn values(spec: &Spec, m: &dyn Model) -> [i32; MAX] {
 
 /// Paints the editor; `hint` (empty when the host shows it) goes in the hint well, or over the display's top-left
 /// corner.
-pub fn paint(spec: &Spec, c: &mut Canvas, t: &Palette, m: &dyn Model, st: &ViewState, hint: &str) -> Vec<Hit> {
+pub fn paint(spec: &Spec, c: &mut Canvas, t: &Palette, m: &dyn Model, st: &ViewState, hint: &str, live: &[i32; LIVE]) -> Vec<Hit> {
     let mut ui = Ui { c, t, m, st, hits: Vec::new() };
     ui.c.begin_frame(None);
     ui.c.clear(plug::BG);
@@ -135,12 +135,15 @@ pub fn paint(spec: &Spec, c: &mut Canvas, t: &Palette, m: &dyn Model, st: &ViewS
                 shape(&mut ui, id, cx, cy, range);
             }
             Control::Tile { id, x0, y0, x1, y1, caption } => tile(&mut ui, id, Rect::span(x0, x1, y0, y1), caption),
+            Control::Keys { id, x0, y0, x1, y1, lit } => {
+                let lit = lit(&with_live(spec, m, live));
+                keys(&mut ui, id, Rect::span(x0, x1, y0, y1), lit);
+            }
         }
     }
     if let Some(d) = &spec.display {
         lemon::plug_well(ui.c, d.r, 6.0);
-        let v = values(spec, m);
-        (d.draw)(ui.c, d.r, &v[..spec.settings.len()]);
+        (d.draw)(ui.c, d.r, &with_live(spec, m, live));
     }
     for &(cx, top, s) in spec.labels {
         inst::caption(ui.c, ui.t, cx, top, s, false);
@@ -199,6 +202,41 @@ fn knob(ui: &mut Ui, id: &str, cx: f32, cy: f32, r: f32, cap: &str, bipolar: boo
 
 /// A radio list (as the original's): one row per position from `top` (the first is the range's minimum), a toggle
 /// lit lemon on the chosen one and the name beside it, in lemon when chosen.
+/// The settings shown followed by the sound's live values.
+fn with_live(spec: &Spec, m: &dyn Model, live: &[i32; LIVE]) -> Vec<i32> {
+    let v = values(spec, m);
+    v[..spec.settings.len()].iter().chain(live).copied().collect()
+}
+
+/// The note names of a [`Control::Keys`] strip.
+pub const NOTES: [&str; 12] = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+
+/// A strip of twelve note cells: lit (in lemon) where `lit` has the note and the mask leaves it on, crossed out where
+/// the mask turns it off; the sharps on a darker face. A click flips the note's bit.
+fn keys(ui: &mut Ui, id: &str, r: Rect, lit: u16) {
+    let mask = ui.m.plain(id).round() as i32;
+    let w = r.w / 12.0;
+    let lh = ui.c.line_height(LABEL);
+    for (k, name) in NOTES.iter().enumerate() {
+        let target = Target::Choice(id.into(), mask ^ (1 << k));
+        let cell = Rect::new((r.x + w * k as f32).round(), r.y, (w - 2.0).floor(), r.h);
+        let st = ui.state(cell, &target);
+        let off = mask & (1 << k) != 0;
+        let on = !off && lit & (1 << k) != 0;
+        let face = if on { brand::MAIN } else if name.len() > 1 { plug::WELL } else { RULE };
+        ui.c.fill_rrect(cell, 3.0, if st.hover && !on { face.with_alpha(200) } else { face });
+        let ink = if on { plug::BG } else if off { plug::FAINT } else { plug::DIM };
+        let tw = ui.c.text_width(LABEL, name);
+        ui.c.text(LABEL, (cell.cx() - tw / 2.0).round(), (cell.bottom() - lh - 4.0).round(), ink, name);
+        if off {
+            let (a, b) = (cell.cy() - 8.0, cell.cy());
+            ui.c.line(cell.cx() - 4.0, a, cell.cx() + 4.0, b, 1.5, plug::FAINT);
+            ui.c.line(cell.cx() + 4.0, a, cell.cx() - 4.0, b, 1.5, plug::FAINT);
+        }
+        ui.hit(cell, target);
+    }
+}
+
 fn choices(ui: &mut Ui, id: &str, x: f32, top: f32, min: i32, names: &[&str]) {
     let chosen = ui.m.plain(id).round() as i32;
     let lh = ui.c.line_height(LABEL);

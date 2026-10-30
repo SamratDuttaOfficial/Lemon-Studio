@@ -4,7 +4,7 @@
 
 //! Lemon Studio's small effects as VST3 / CLAP plugins (nih-plug): Lemon Soft Clipper, Lemon Fast Distortion, Lemon
 //! Balance, Lemon Stereo Enhancer, Lemon Transient Processor, Lemon Chorus, Lemon Stereo Shaper, Lemon Filter, Lemon
-//! Flanger, Lemon Phaser and Lemon Spritz. Each is a handful of settings over a sound of `os_engine::effects`, so they share
+//! Flanger, Lemon Phaser, Lemon Spritz and Lemon Pitch. Each is a handful of settings over a sound, so they share
 //! everything but their description: the plugin, its parameters and saved state ([`params`]), the Pith editor
 //! ([`editor`], [`view`]). A description ([`Spec`]) gives the settings, their value texts, the editor's cards and
 //! controls, and the sound. The plugin modules (`plugins/lemon-soft-clipper` and the others) export one each.
@@ -23,6 +23,7 @@ pub mod filter;
 pub mod flanger;
 pub mod params;
 pub mod phaser;
+pub mod pitch;
 pub mod soft_clipper;
 pub mod spritz;
 pub mod stereo_enhancer;
@@ -32,7 +33,7 @@ pub mod view;
 
 use std::marker::PhantomData;
 use std::num::NonZeroU32;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
 use std::sync::Arc;
 
 use nih_plug::prelude::*;
@@ -41,7 +42,9 @@ use os_ui::{Canvas, Color, Rect};
 use params::FxParams;
 
 /// The most settings an effect here has.
-pub const MAX: usize = 12;
+pub const MAX: usize = 16;
+/// The most values a sound reports to its editor while it plays ([`Sound::live`]).
+pub const LIVE: usize = 8;
 
 /// One setting: the original's saved state holds it as int `k` (its place in [`Spec::settings`], unless
 /// [`Spec::fields`] maps it).
@@ -74,6 +77,10 @@ pub enum Control {
     /// A tile (Lemon Chorus's grid): its own card over `x0..x1`, `y0..y1`, a small dial at the left, the caption in a
     /// field at the top right and the value text under it.
     Tile { id: &'static str, x0: f32, y0: f32, x1: f32, y1: f32, caption: &'static str },
+    /// A strip of the twelve notes (C to B) over `x0..x1`, `y0..y1` for a setting that is a mask of notes turned off
+    /// (bit k = note k); a click turns a note off or back on. `lit` gives the notes to light (bit k = note k) from the
+    /// settings followed by the sound's live values.
+    Keys { id: &'static str, x0: f32, y0: f32, x1: f32, y1: f32, lit: fn(&[i32]) -> u16 },
 }
 
 impl Control {
@@ -83,7 +90,8 @@ impl Control {
             | Control::Choice { id, .. }
             | Control::Fader { id, .. }
             | Control::Shape { id, .. }
-            | Control::Tile { id, .. } => id,
+            | Control::Tile { id, .. }
+            | Control::Keys { id, .. } => id,
         }
     }
 }
@@ -106,7 +114,8 @@ pub struct Card {
     pub heading: &'static str,
 }
 
-/// A well that pictures the settings (a transfer curve, the output balance).
+/// A well that pictures the settings (a transfer curve, the output balance). `draw` gets the settings followed by the
+/// sound's live values ([`Sound::live`]), so it can show what the sound hears while it plays.
 pub struct Display {
     pub r: Rect,
     pub draw: fn(&mut Canvas, Rect, &[i32]),
@@ -120,6 +129,12 @@ pub trait Sound: Send {
     /// Forgets what the sound holds (a delay line), as at the start of a song.
     fn reset(&mut self);
     fn process(&mut self, left: &mut [f32], right: &mut [f32]);
+    /// The delay the sound adds, in samples (reported to the host).
+    fn latency(&self) -> u32 {
+        0
+    }
+    /// Values for the editor's display while it plays (what the sound hears), taken after each block.
+    fn live(&self, _out: &mut [i32; LIVE]) {}
 }
 
 /// Everything that makes one of the effects.
@@ -190,11 +205,19 @@ pub struct Shared {
     pub rate: AtomicU32,
     /// Set while an editor is open.
     pub editor_open: AtomicBool,
+    /// The sound's live values ([`Sound::live`]), kept up while an editor is open.
+    pub live: [AtomicI32; LIVE],
 }
 
 impl Default for Shared {
     fn default() -> Self {
-        Shared { rate: AtomicU32::new(44100), editor_open: AtomicBool::new(false) }
+        Shared { rate: AtomicU32::new(44100), editor_open: AtomicBool::new(false), live: std::array::from_fn(|_| AtomicI32::new(0)) }
+    }
+}
+
+impl Shared {
+    pub fn live(&self) -> [i32; LIVE] {
+        std::array::from_fn(|k| self.live[k].load(Ordering::Relaxed))
     }
 }
 
@@ -206,6 +229,8 @@ pub struct SmallFx<K: Kind> {
     dsp: Option<Box<dyn Sound>>,
     raw: Vec<u8>,
     raw_seen: u64,
+    /// The latency last reported to the host.
+    latency: u32,
     kind: PhantomData<K>,
 }
 
@@ -217,6 +242,7 @@ impl<K: Kind> Default for SmallFx<K> {
             dsp: None,
             raw: params::default_state(K::SPEC),
             raw_seen: u64::MAX,
+            latency: 0,
             kind: PhantomData,
         }
     }
@@ -264,7 +290,7 @@ impl<K: Kind> Plugin for SmallFx<K> {
         Some(Box::new(editor::FxEditor::new(K::SPEC, self.params.clone(), self.shared.clone())))
     }
 
-    fn initialize(&mut self, _layout: &AudioIOLayout, config: &BufferConfig, _ctx: &mut impl InitContext<Self>) -> bool {
+    fn initialize(&mut self, _layout: &AudioIOLayout, config: &BufferConfig, ctx: &mut impl InitContext<Self>) -> bool {
         let rate = config.sample_rate.round() as u32;
         self.shared.rate.store(rate, Ordering::Relaxed);
         self.raw_seen = u64::MAX;
@@ -277,6 +303,8 @@ impl<K: Kind> Plugin for SmallFx<K> {
             }
             None => self.dsp = Some((K::SPEC.sound)(rate, v)),
         }
+        self.latency = self.dsp.as_ref().map_or(0, |d| d.latency());
+        ctx.set_latency_samples(self.latency);
         true
     }
 
@@ -286,7 +314,7 @@ impl<K: Kind> Plugin for SmallFx<K> {
         }
     }
 
-    fn process(&mut self, buffer: &mut Buffer, _aux: &mut AuxiliaryBuffers, _ctx: &mut impl ProcessContext<Self>) -> ProcessStatus {
+    fn process(&mut self, buffer: &mut Buffer, _aux: &mut AuxiliaryBuffers, ctx: &mut impl ProcessContext<Self>) -> ProcessStatus {
         let s = self.settings();
         let Some(dsp) = &mut self.dsp else { return ProcessStatus::Normal };
         dsp.set(&s[..K::SPEC.settings.len()]);
@@ -296,6 +324,17 @@ impl<K: Kind> Plugin for SmallFx<K> {
         }
         let (left, right) = out.split_at_mut(1);
         dsp.process(left[0], right[0]);
+        if dsp.latency() != self.latency {
+            self.latency = dsp.latency();
+            ctx.set_latency_samples(self.latency);
+        }
+        if self.shared.editor_open.load(Ordering::Relaxed) {
+            let mut live = [0; LIVE];
+            dsp.live(&mut live);
+            for (a, v) in self.shared.live.iter().zip(live) {
+                a.store(v, Ordering::Relaxed);
+            }
+        }
         if K::SPEC.rings { ProcessStatus::KeepAlive } else { ProcessStatus::Normal }
     }
 }
@@ -317,7 +356,7 @@ impl<K: Kind> Vst3Plugin for SmallFx<K> {
 mod tests {
     use super::*;
 
-    pub const SPECS: [&Spec; 11] = [
+    pub const SPECS: [&Spec; 12] = [
         soft_clipper::SPEC,
         fast_distortion::SPEC,
         balance::SPEC,
@@ -329,6 +368,7 @@ mod tests {
         flanger::SPEC,
         phaser::SPEC,
         spritz::SPEC,
+        pitch::SPEC,
     ];
 
     /// Every effect: ids unique, starts inside the ranges, a control per setting, the plugin ids distinct.
@@ -364,6 +404,7 @@ mod tests {
             <flanger::LemonFlanger as ClapPlugin>::CLAP_ID,
             <phaser::LemonPhaser as ClapPlugin>::CLAP_ID,
             <spritz::LemonSpritz as ClapPlugin>::CLAP_ID,
+            <pitch::LemonPitch as ClapPlugin>::CLAP_ID,
         ];
         let classes = [
             <soft_clipper::LemonSoftClipper as Vst3Plugin>::VST3_CLASS_ID,
@@ -377,6 +418,7 @@ mod tests {
             <flanger::LemonFlanger as Vst3Plugin>::VST3_CLASS_ID,
             <phaser::LemonPhaser as Vst3Plugin>::VST3_CLASS_ID,
             <spritz::LemonSpritz as Vst3Plugin>::VST3_CLASS_ID,
+            <pitch::LemonPitch as Vst3Plugin>::VST3_CLASS_ID,
         ];
         for i in 0..ids.len() {
             for j in i + 1..ids.len() {
@@ -445,7 +487,7 @@ mod tests {
             }
             v.into_iter().map(|x| x.expect("every parameter listed")).collect()
         };
-        for spec in [soft_clipper::SPEC, fast_distortion::SPEC, stereo_enhancer::SPEC, transient_processor::SPEC, chorus::SPEC, stereo_shaper::SPEC, filter::SPEC, spritz::SPEC] {
+        for spec in [soft_clipper::SPEC, fast_distortion::SPEC, stereo_enhancer::SPEC, transient_processor::SPEC, chorus::SPEC, stereo_shaper::SPEC, filter::SPEC, spritz::SPEC, pitch::SPEC] {
             for name in all(spec) {
                 read(spec, &name);
             }
@@ -477,6 +519,8 @@ mod tests {
         assert_eq!(all(filter::SPEC).len(), 4);
         assert_eq!(read(spritz::SPEC, "Heavy"), [6000, -220, 200, 40, 1, 0]);
         assert_eq!(all(spritz::SPEC).len(), 6);
+        assert_eq!(read(pitch::SPEC, "Hard tune")[pitch::RETUNE], 0);
+        assert_eq!(all(pitch::SPEC).len(), 8);
         // FL's 27 Flanger and 27 Phaser presets. Their Default presets are not what a new instance holds: the Flanger's has
         // the phase at 119 and the feedback at 24 (a new one 118 and 23), the Phaser's is a slower, all-wet sweep.
         for spec in [flanger::SPEC, phaser::SPEC] {
