@@ -6,16 +6,18 @@
 //! nearest note of a key and scale (set by hand or found from what it hears) and moves the sound onto it.
 //!
 //! - Pitch: YIN on the input mixed to mono and taken down to about 11 kHz, every 32 of those samples (about 3 ms),
-//!   over the range the input choice sets; the last three readings' median.
+//!   over the range the input choice sets; the last three readings' median, lightly smoothed. A note holds through
+//!   brief dropouts and short octave errors rather than letting go.
 //! - Key: how long each note has been heard (fading over half a minute), against Krumhansl's major and minor key
 //!   profiles; a new key takes over only when it fits clearly better.
 //! - Correction: the cents to the target note, scaled by the amount; flex leaves small deviations partly alone;
 //!   vibrato, its depth fading in after the onset; transpose. The retune speed is how fast the correction follows
 //!   (0 snaps at once), humanize slows it on held notes so they keep their natural movement.
 //! - The shift: pitch-synchronous overlap-add (TD-PSOLA). Grains two periods long, Hann windowed and centred on the
-//!   waveform's peaks a period apart, are laid out at the new period and the sum divided by the windows' sum. Grains
-//!   are not resampled, so the voice keeps its formants. Unpitched sound (breaths, S and T) plays dry, delayed by the
-//!   same latency, which the plugin reports to the host.
+//!   waveform's peaks a period apart, are laid out at the new period (to the fraction of a sample) and the sum divided
+//!   by the windows' sum, so an unshifted note comes back as it went in. Each grain takes the correction worked out
+//!   for its own moment (the pitch reading lags the input). Grains are not resampled, so the voice keeps its formants.
+//!   Unpitched sound (breaths, S and T) plays dry, delayed by the same latency, which the plugin reports to the host.
 
 use std::collections::VecDeque;
 
@@ -53,8 +55,8 @@ pub const SETTINGS: [Setting; N] = [
     Setting { id: "scale", name: "Scale", range: (0, 13), start: 1, magnet: None },
     Setting { id: "auto", name: "Key detection", range: (0, 1), start: 0, magnet: None },
     Setting { id: "voice", name: "Input", range: (0, 3), start: 1, magnet: None },
-    Setting { id: "retune", name: "Retune speed", range: (0, 400), start: 20, magnet: None },
-    Setting { id: "humanize", name: "Humanize", range: (0, 100), start: 0, magnet: None },
+    Setting { id: "retune", name: "Retune speed", range: (0, 400), start: 40, magnet: None },
+    Setting { id: "humanize", name: "Humanize", range: (0, 100), start: 20, magnet: None },
     Setting { id: "flex", name: "Flex", range: (0, 100), start: 0, magnet: None },
     Setting { id: "amount", name: "Amount", range: (0, 100), start: 100, magnet: None },
     Setting { id: "vib_rate", name: "Vibrato rate", range: (10, 100), start: 55, magnet: None },
@@ -392,6 +394,12 @@ impl Detector {
         }
     }
 
+    /// About how far (input samples) behind the newest input a reading's middle lies: YIN compares the frame's start
+    /// with itself a period on, so it mostly sees the older part of its frame.
+    pub fn delay(&self) -> usize {
+        (1.4 * (self.max_lag * self.factor) as f32) as usize
+    }
+
     /// Takes an input sample; true when it made a new reading.
     pub fn push(&mut self, x: f32) -> bool {
         let y = self.lp[0].run(x);
@@ -537,29 +545,38 @@ struct Psola {
     x: [Vec<f32>; 2],
     acc: [Vec<f32>; 2],
     wsum: Vec<f32>,
+    /// The ratio asked for and whether the input was pitched, by the frame they were given with.
+    ctl: Vec<(f32, bool)>,
     /// Frames written.
     n: i64,
-    /// Analysis marks: position and the period there.
+    /// Analysis marks: position and the period there (the distance to the next mark once it is placed).
     marks: VecDeque<(i64, f32)>,
     next_a: f64,
     next_s: f64,
+    /// The analysis mark the last grain came from.
+    last_a: i64,
     /// The longest period (samples).
     pmax: usize,
+    /// How far behind the input a pitch reading is (samples): the ratio for a moment was given this much later.
+    look: usize,
     lat: usize,
 }
 
 impl Psola {
-    fn new(pmax: usize) -> Psola {
+    fn new(pmax: usize, look: usize) -> Psola {
         let size = (6 * pmax + 64).next_power_of_two();
         Psola {
             x: [vec![0.0; size], vec![0.0; size]],
             acc: [vec![0.0; size], vec![0.0; size]],
             wsum: vec![0.0; size],
+            ctl: vec![(1.0, false); size],
             n: 0,
             marks: VecDeque::new(),
             next_a: 0.0,
             next_s: 0.0,
+            last_a: i64::MIN,
             pmax,
+            look: look.min(2 * pmax),
             lat: 3 * pmax + 2,
         }
     }
@@ -569,53 +586,94 @@ impl Psola {
         self.x[0][k] + self.x[1][k]
     }
 
-    /// Takes a frame with the period now (samples) and the pitch ratio to play it at; gives the shifted frame and the
-    /// input frame `lat` frames ago.
-    fn run(&mut self, x: [f32; 2], period: f32, ratio: f32, voiced: bool) -> ([f32; 2], [f32; 2]) {
+    /// Channel `ch` at `i + t` (`t` within a sample), by four-point Hermite interpolation.
+    fn read(&self, ch: usize, i: i64, t: f32) -> f32 {
+        let m = self.wsum.len() - 1;
+        let (i, t) = if t < 0.0 { (i - 1, t + 1.0) } else { (i, t) };
+        let x = |k: i64| self.x[ch][(i + k) as usize & m];
+        let (y0, y1, y2, y3) = (x(-1), x(0), x(1), x(2));
+        let c1 = 0.5 * (y2 - y0);
+        let c2 = y0 - 2.5 * y1 + 2.0 * y2 - 0.5 * y3;
+        let c3 = 0.5 * (y3 - y0) + 1.5 * (y1 - y2);
+        ((c3 * t + c2) * t + c1) * t + y1
+    }
+
+    /// The ratio and pitched flag that apply to frame `i` (read from when its pitch was known).
+    fn at(&self, i: i64) -> (f32, bool) {
+        self.ctl[(i + self.look as i64).min(self.n - 1).max(0) as usize & (self.wsum.len() - 1)]
+    }
+
+    /// Takes a frame with the period now (samples), the pitch ratio to play it at and whether it is pitched; gives the
+    /// shifted frame, the input frame `lat` frames ago and whether that one was pitched.
+    fn run(&mut self, x: [f32; 2], period: f32, ratio: f32, voiced: bool) -> ([f32; 2], [f32; 2], bool) {
         let m = self.wsum.len() - 1;
         let i = self.n as usize & m;
         (self.x[0][i], self.x[1][i]) = (x[0], x[1]);
+        self.ctl[i] = (ratio.clamp(0.25, 4.0), voiced);
         self.n += 1;
         let p = period.clamp(16.0, self.pmax as f32);
-        // Analysis marks a period apart, moved onto the waveform's peak within a quarter period while it is pitched.
+        // Analysis marks a period apart, moved onto the waveform's peak within a quarter period while it is pitched;
+        // each mark's period becomes the true distance to the next, so grains laid out at that distance rebuild the
+        // input exactly.
         let reach = (p / 4.0) as i64;
         while (self.n - 1) as f64 >= self.next_a + reach as f64 {
             let c = self.next_a.round() as i64;
             let at = if voiced { (c - reach..=c + reach).max_by(|&a, &b| self.mono(a).total_cmp(&self.mono(b))).unwrap_or(c) } else { c };
+            if let Some(last) = self.marks.back_mut() {
+                let gap = (at - last.0) as f32;
+                if gap >= 0.6 * last.1 && gap <= 1.6 * last.1 {
+                    last.1 = gap.min(self.pmax as f32);
+                }
+            }
             self.marks.push_back((at, p));
             self.next_a = (at as f64 + f64::from(p)).max(self.next_a + 1.0);
         }
-        // Synthesis marks at the new period, each taking the grain of the nearest analysis mark.
-        let ratio = ratio.clamp(0.25, 4.0);
+        // Synthesis marks at the new period. Each takes the grain of the mark after the last one used while that stays
+        // within three quarters of a period (so jitter cannot flip between repeating and skipping a period), else the
+        // nearest; while unpitched the marks line up again, so an unshifted grain lands where it was.
         while self.next_s + 2.0 * self.pmax as f64 <= self.n as f64 {
             let s = self.next_s.round() as i64;
-            while self.marks.len() > 1 && self.marks[0].0 < s - 2 * self.pmax as i64 {
+            while self.marks.len() > 2 && self.marks[1].0 < s - 2 * self.pmax as i64 {
                 self.marks.pop_front();
             }
-            let Some(&(a, pg)) = self.marks.iter().min_by_key(|(a, _)| (a - s).abs()) else {
+            let (ratio, pitched) = self.at(s);
+            let nearest = self.marks.iter().copied().min_by_key(|(a, _)| (a - s).abs());
+            let next = self.marks.iter().copied().find(|&(a, _)| a > self.last_a);
+            let Some((a, pg)) = (match (next, nearest) {
+                (Some(n), _) if pitched && ((n.0 - s).abs() as f32) < 0.75 * n.1 => Some(n),
+                (_, near) => near,
+            }) else {
                 self.next_s += f64::from(p);
                 continue;
             };
+            let (s, from) = if pitched { (s, self.next_s) } else { (a, a as f64) };
+            self.last_a = a;
+            // The grain lands at the fractional synthesis position (whole samples would jitter the period by up to
+            // half a sample, several cents on a high voice): read back from the source by that fraction.
+            let frac = (from - s as f64) as f32;
             // Two periods, longer when the marks spread out (a lower pitch), so the grains always overlap.
-            let half = ((pg.max(pg / ratio)).ceil() as i64).min(self.pmax as i64).min(self.n - 1 - a).max(1);
+            let half = ((pg.max(pg / ratio)).ceil() as i64).min(self.pmax as i64).min(self.n - 3 - a).max(1);
             for j in -half..=half {
-                let w = 0.5 + 0.5 * (std::f32::consts::PI * j as f32 / half as f32).cos();
-                let (src, dst) = ((a + j) as usize & m, (s + j) as usize & m);
-                self.acc[0][dst] += self.x[0][src] * w;
-                self.acc[1][dst] += self.x[1][src] * w;
+                let u = j as f32 - frac;
+                let w = if u.abs() >= half as f32 { 0.0 } else { 0.5 + 0.5 * (std::f32::consts::PI * u / half as f32).cos() };
+                let dst = (s + j) as usize & m;
+                for ch in 0..2 {
+                    self.acc[ch][dst] += self.read(ch, a + j, -frac) * w;
+                }
                 self.wsum[dst] += w;
             }
-            self.next_s += f64::from(pg / ratio).max(1.0);
+            let step = if pitched { pg / ratio } else { pg };
+            self.next_s = (from + f64::from(step).max(1.0)).max(self.next_s + 1.0);
         }
         let o = self.n - 1 - self.lat as i64;
         if o < 0 {
-            return ([0.0; 2], [0.0; 2]);
+            return ([0.0; 2], [0.0; 2], false);
         }
         let k = o as usize & m;
         let g = 1.0 / self.wsum[k].max(0.5);
         let out = [self.acc[0][k] * g, self.acc[1][k] * g];
         (self.acc[0][k], self.acc[1][k], self.wsum[k]) = (0.0, 0.0, 0.0);
-        (out, [self.x[0][k], self.x[1][k]])
+        (out, [self.x[0][k], self.x[1][k]], self.at(o).1)
     }
 }
 
@@ -632,6 +690,15 @@ const HELD_OVER: f32 = 0.4;
 const VIB_FADE: f32 = 0.25;
 /// The fade between the corrected and the dry sound (ms).
 const MIX_MS: f32 = 8.0;
+/// How long a note holds through readings that lose it (s), and how long a jump of about an octave must last before
+/// it is believed (s): shorter ones are the detector's octave errors.
+const HANG: f32 = 0.06;
+const OCTAVE_HOLD: f32 = 0.04;
+/// How smoothly the pitch heard is followed (s), and the jump (semitones) taken as a new note, followed at once.
+const SMOOTH: f32 = 0.005;
+const NEW_NOTE: f32 = 0.8;
+/// The quickest the correction follows (ms), so it never steps from one reading to the next.
+const FOLLOW_MIN_MS: f32 = 3.0;
 
 pub struct PitchFix {
     rate: f32,
@@ -643,7 +710,10 @@ pub struct PitchFix {
     recent: [f32; 3],
     fresh: usize,
     voiced: bool,
-    /// The period (samples) and the pitch heard (MIDI note number).
+    /// How long the readings have lost the note (s), and how long they have heard a jump of about an octave.
+    lost: f32,
+    octave: f32,
+    /// The period (samples) and the pitch heard (MIDI note number, smoothed).
     period: f32,
     heard: f32,
     target: Option<i32>,
@@ -651,6 +721,10 @@ pub struct PitchFix {
     held: f32,
     scale_in_use: u16,
     vib_phase: f32,
+    /// The vibrato (cents): where it is heading and where it is, added after the correction's smoothing so the retune
+    /// speed does not damp it.
+    vib_to: f32,
+    vib: f32,
     /// The correction (cents), where it is heading and how fast it follows (per sample).
     corr: f32,
     corr_to: f32,
@@ -658,6 +732,7 @@ pub struct PitchFix {
     /// The share of the corrected sound.
     mix: f32,
     mix_follow: f32,
+    vib_follow: f32,
 }
 
 /// One-pole coefficient for a time constant of `ms` at `rate` (1 for none).
@@ -671,22 +746,27 @@ impl PitchFix {
             rate: rate.max(1) as f32,
             v: [0; N],
             det: Detector::new(44100, 80.0, 700.0),
-            shift: Psola::new(64),
+            shift: Psola::new(64, 0),
             keys: KeyFinder::default(),
             recent: [0.0; 3],
             fresh: 0,
             voiced: false,
+            lost: 0.0,
+            octave: 0.0,
             period: 200.0,
             heard: 0.0,
             target: None,
             held: 0.0,
             scale_in_use: 0,
             vib_phase: 0.0,
+            vib_to: 0.0,
+            vib: 0.0,
             corr: 0.0,
             corr_to: 0.0,
             follow: 1.0,
             mix: 0.0,
             mix_follow: 0.0,
+            vib_follow: 1.0,
         };
         s.v.copy_from_slice(&v[..N]);
         s.rebuild();
@@ -698,10 +778,13 @@ impl PitchFix {
         let (_, lo, hi) = VOICES[self.v[VOICE].clamp(0, 3) as usize];
         let rate = self.rate as u32;
         self.det = Detector::new(rate, lo, hi);
-        self.shift = Psola::new((self.rate / lo).ceil() as usize);
+        let pmax = (self.rate / lo).ceil() as usize;
+        self.shift = Psola::new(pmax, self.det.delay() + HOP * self.det.factor + (SMOOTH * self.rate) as usize);
         self.period = self.rate / 200.0;
         self.mix_follow = coef(MIX_MS, self.rate);
+        self.vib_follow = coef(FOLLOW_MIN_MS, self.rate);
         (self.voiced, self.target, self.fresh, self.corr, self.corr_to, self.mix) = (false, None, 0, 0.0, 0.0, 0.0);
+        (self.lost, self.octave) = (0.0, 0.0);
     }
 
     /// The scale in use and the notes the target may land on.
@@ -728,13 +811,23 @@ impl PitchFix {
         let secs = (HOP * self.det.factor) as f32 / self.rate;
         let transpose = self.v[TRANSPOSE] as f32 * 100.0;
         let f = self.det.freq;
-        self.voiced = f > 0.0;
-        if !self.voiced {
-            (self.target, self.held, self.fresh, self.corr_to) = (None, 0.0, 0, transpose);
+        let a4 = self.v[TUNING] as f32 / 10.0;
+        // A reading of about an octave (or a twelfth) away from the note held is believed only once it lasts.
+        let note = 69.0 + 12.0 * (f / a4).log2();
+        let leap = (note - self.heard).abs();
+        let octave_error = self.voiced && f > 0.0 && [12.0, 19.0, 24.0].iter().any(|&o| (leap - o).abs() < 1.5);
+        self.octave = if octave_error { self.octave + secs } else { 0.0 };
+        if f <= 0.0 || (octave_error && self.octave < OCTAVE_HOLD) {
+            // Lost (or doubted) for a moment: hold the note and its correction rather than let go of it.
+            self.lost += secs;
+            if self.voiced && self.lost < HANG {
+                return;
+            }
+            (self.voiced, self.target, self.held, self.fresh, self.corr_to, self.vib_to) = (false, None, 0.0, 0, transpose, 0.0);
             return;
         }
-        let a4 = self.v[TUNING] as f32 / 10.0;
-        self.recent = [self.recent[1], self.recent[2], 69.0 + 12.0 * (f / a4).log2()];
+        self.lost = 0.0;
+        self.recent = [self.recent[1], self.recent[2], note];
         self.fresh = (self.fresh + 1).min(3);
         let heard = if self.fresh == 3 {
             let mut r = self.recent;
@@ -743,6 +836,13 @@ impl PitchFix {
         } else {
             self.recent[2]
         };
+        // Smoothed against the detector's jitter, but a new note is taken at once.
+        let heard = if !self.voiced || (heard - self.heard).abs() > NEW_NOTE {
+            heard
+        } else {
+            self.heard + (heard - self.heard) * (1.0 - (-secs / SMOOTH).exp())
+        };
+        self.voiced = true;
         self.heard = heard;
         self.period = self.rate / (a4 * 2f32.powf((heard - 69.0) / 12.0));
         let near = heard.round();
@@ -771,11 +871,11 @@ impl PitchFix {
         let rate = self.v[VIB_RATE] as f32 / 10.0;
         self.vib_phase = (self.vib_phase + std::f32::consts::TAU * rate * secs) % std::f32::consts::TAU;
         let fade = ((self.held - self.v[VIB_DELAY] as f32 / 1000.0) / VIB_FADE).clamp(0.0, 1.0);
-        let vib = self.v[VIB_DEPTH] as f32 * fade * self.vib_phase.sin();
-        self.corr_to = self.v[AMOUNT] as f32 / 100.0 * dev + vib + transpose;
+        self.vib_to = self.v[VIB_DEPTH] as f32 * fade * self.vib_phase.sin();
+        self.corr_to = self.v[AMOUNT] as f32 / 100.0 * dev + transpose;
         let sustain = ((self.held - HELD_FROM) / HELD_OVER).clamp(0.0, 1.0);
         let ms = self.v[RETUNE] as f32 + self.v[HUMANIZE] as f32 / 100.0 * HUMANIZE_MS * sustain;
-        self.follow = coef(ms, self.rate);
+        self.follow = coef(ms.max(FOLLOW_MIN_MS), self.rate);
     }
 
     /// Nothing to change: no correction, vibrato or transpose.
@@ -810,10 +910,11 @@ impl Sound for PitchFix {
                 self.reading();
             }
             self.corr += (self.corr_to - self.corr) * self.follow;
-            let to = if self.voiced && !self.idle() { 1.0 } else { 0.0 };
+            self.vib += (self.vib_to - self.vib) * self.vib_follow;
+            let ratio = 2f32.powf((self.corr + self.vib) / 1200.0);
+            let (wet, dry, pitched) = self.shift.run([*l, *r], self.period, ratio, self.voiced);
+            let to = if pitched && !self.idle() { 1.0 } else { 0.0 };
             self.mix += (to - self.mix) * self.mix_follow;
-            let ratio = 2f32.powf(self.corr / 1200.0);
-            let (wet, dry) = self.shift.run([*l, *r], self.period, ratio, self.voiced);
             if self.mix <= 1e-4 {
                 (*l, *r) = (dry[0], dry[1]);
             } else {
@@ -830,7 +931,7 @@ impl Sound for PitchFix {
     fn live(&self, out: &mut [i32; LIVE]) {
         out[L_VOICED] = i32::from(self.voiced);
         out[L_IN] = (self.heard * 100.0).round() as i32;
-        out[L_OUT] = (self.heard * 100.0 + self.corr).round() as i32;
+        out[L_OUT] = (self.heard * 100.0 + self.corr + self.vib).round() as i32;
         let (key, minor) = self.keys.key.map_or((-1, false), |k| k);
         out[L_KEY] = key;
         out[L_MINOR] = i32::from(minor);
@@ -1022,6 +1123,83 @@ mod tests {
         assert!(same as f32 > 0.97 * (x.len() - lat) as f32, "{same}");
         let (out, _) = play(&start(), &vec![0.0; 8192]);
         assert!(out.iter().all(|&s| s == 0.0));
+    }
+
+    /// A sung-like note: 220 Hz with a natural 5 Hz, +/-30 cent vibrato, `harmonics` falling off as 1/k (more like a
+    /// voice's buzz) and a little noise.
+    fn sung(secs: f32, harmonics: usize) -> Vec<f32> {
+        let n = (secs * RATE as f32) as usize;
+        let mut seed = 3u32;
+        let mut phase = 0.0f32;
+        (0..n)
+            .map(|i| {
+                let t = i as f32 / RATE as f32;
+                let hz = 220.0 * 2f32.powf(30.0 * (std::f32::consts::TAU * 5.0 * t).sin() / 1200.0);
+                phase = (phase + std::f32::consts::TAU * hz / RATE as f32) % std::f32::consts::TAU;
+                seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                let noise = (seed >> 8) as f32 / (1 << 24) as f32 - 0.5;
+                (1..=harmonics).map(|k| 0.3 / k as f32 * (k as f32 * phase).sin()).sum::<f32>() + 0.004 * noise
+            })
+            .collect()
+    }
+
+    /// The envelope's ripple: the spread of 20 ms RMS frames (5 ms apart) over their mean.
+    fn ripple(x: &[f32]) -> f32 {
+        let rms: Vec<f32> =
+            x.windows(882).step_by(220).map(|w| (w.iter().map(|s| s * s).sum::<f32>() / w.len() as f32).sqrt()).collect();
+        let mean = rms.iter().sum::<f32>() / rms.len() as f32;
+        (rms.iter().map(|r| (r - mean).powi(2)).sum::<f32>() / rms.len() as f32).sqrt() / mean
+    }
+
+    /// The pitch track (cents from `hz`) of `x`.
+    fn track(x: &[f32], hz: f32) -> Vec<f32> {
+        let mut d = Detector::new(RATE, 55.0, 1100.0);
+        x.iter().filter_map(|&s| (d.push(s) && d.freq > 0.0).then(|| cents(d.freq, hz))).collect()
+    }
+
+    /// At the default settings a sung note comes out steady: no warble in its level, a pitch track that wavers no more
+    /// than the voice did and no rougher, no reading off by more than a few cents from the next.
+    #[test]
+    fn a_sung_note_comes_out_steady() {
+        for harmonics in [3, 12] {
+            sung_note_comes_out_steady(&sung(2.0, harmonics));
+        }
+    }
+
+    fn sung_note_comes_out_steady(x: &[f32]) {
+        let (out, lat) = play(&start(), x);
+        let from = lat as usize + 22050;
+        let (r_in, r_out) = (ripple(&x[22050..]), ripple(&out[from..]));
+        let t_in = track(&x[22050..], 220.0);
+        let t = track(&out[from..], 220.0);
+        let spread = |t: &[f32]| (t.iter().map(|c| c * c).sum::<f32>() / t.len() as f32).sqrt();
+        let jump = |t: &[f32]| t.windows(2).map(|w| (w[1] - w[0]).abs()).fold(0.0, f32::max);
+        let (jump_in, jump) = (jump(&t_in), jump(&t));
+        let jitter = |t: &[f32]| (t.windows(3).map(|w| (w[2] - 2.0 * w[1] + w[0]).powi(2)).sum::<f32>() / t.len() as f32).sqrt();
+        let (j_in, jitter) = (jitter(&t_in), jitter(&t));
+        println!("ripple {r_in:.4} -> {r_out:.4}, spread {:.1} -> {:.1}, jump {jump_in:.1} -> {jump:.1}, jitter {j_in:.2} -> {jitter:.2}", spread(&t_in), spread(&t));
+        assert!(r_out < r_in + 0.01, "level ripple {r_out} (input {r_in})");
+        assert!(spread(&t) < spread(&t_in), "pitch spread {} of {}", spread(&t), spread(&t_in));
+        assert!(jump < jump_in + 1.5, "pitch jumps {jump} cents (input {jump_in})");
+        assert!(jitter < j_in + 0.3, "pitch jitter {jitter} (input {j_in})");
+    }
+
+    /// A steady note already in tune passes nearly unchanged (the input, delayed by the latency).
+    #[test]
+    fn an_in_tune_note_passes_nearly_unchanged() {
+        let x = tone(220.0, 1.5);
+        let (out, lat) = play(&start(), &x);
+        let lat = lat as usize;
+        let (mut err, mut sig) = (0.0, 0.0);
+        for i in lat + 22050..x.len() {
+            err += (out[i] - x[i - lat]).powi(2);
+            sig += x[i - lat].powi(2);
+        }
+        let snr = 10.0 * (sig / err).log10();
+        println!("in tune: {snr:.1} dB");
+        assert!(snr > 25.0, "{snr} dB");
+        let got = pitch_of(&out, lat + 22050);
+        assert!(cents(got, 220.0).abs() < 2.0, "{got} Hz");
     }
 
     /// Vibrato makes a steady note waver by about its depth once its onset has passed.

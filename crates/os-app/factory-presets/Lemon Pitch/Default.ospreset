@@ -1,12 +1,12 @@
 OSPRESET 1
 plugin=Lemon Pitch	id=clap:org.openstudio.lemon-pitch	format=clap	body=params
-# Steps from each minimum. C major, 20 ms retune.
+# Steps from each minimum. C major, 40 ms retune, a little humanize.
 Key = 0
 Scale = 1
 Key detection = 0
 Input = 1
-Retune speed = 20
-Humanize = 0
+Retune speed = 40
+Humanize = 20
 Flex = 0
 Amount = 100
 Vibrato rate = 45
