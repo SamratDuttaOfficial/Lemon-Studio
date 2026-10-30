@@ -2210,7 +2210,9 @@ impl Engine {
     /// at `tick`, as if playback had started there: a clip sounding that no longer plays here (its track or the clip
     /// muted, moved or deleted) fades out, and one that plays here but was not sounding (its track or the clip turned
     /// back on, or moved under the position) starts on `tick` from where its sample has got to (`clips_under_way`).
-    /// Each clip under way is matched to one sounding voice or waiting late start of its channel ending where it ends.
+    /// Each clip under way is matched to one sounding voice (the engine's own, or a hosted instrument's: Lemon Sampler
+    /// plays audio clips) or waiting late start of its channel ending where it ends, so a clip that plays on is never
+    /// started a second time over itself.
     fn follow_clips(&mut self, tick: u64) {
         let mut under = self.clips_under_way(tick);
         let mut take = |channel: usize, cut: Option<u64>| match under.iter().position(|t| t.channel == channel && t.cut == cut) {
@@ -2226,6 +2228,15 @@ impl Engine {
                 v.release = Some((fade, fade));
             }
         }
+        // An instrument's clip voice ends at its cut (`inst_offs`): one that no longer plays is choked now.
+        let events = &mut self.inst_events;
+        self.inst_offs.retain(|&(end, ch, key, voice)| {
+            let Some(v) = voice else { return true };
+            take(ch, Some(end)) || {
+                events.push(notes::Event { voice: Some(v), ..notes::Event::choke(ch, 0, key) });
+                false
+            }
+        });
         self.late.retain(|t| t.cut.is_none() || take(t.channel, t.cut));
         self.late.extend(under);
     }
@@ -2404,7 +2415,6 @@ impl Engine {
             let (c, b) = (self.late[i].channel, self.late[i].buf);
             self.late[i].buf = self.adopt(&old.channels, c, b);
         }
-        self.follow_clips(tick);
         self.sounding = std::mem::take(&mut old.sounding);
         self.inst_live = std::mem::take(&mut old.inst_live);
         self.inst_midi = std::mem::take(&mut old.inst_midi);
@@ -2430,6 +2440,8 @@ impl Engine {
         self.inst_offs.retain(|o| o.1 < n);
         self.inst_shapes = std::mem::take(&mut old.inst_shapes);
         self.inst_shapes.retain(|s| s.channel < n);
+        // With the voices and the instruments' clip ends both carried over.
+        self.follow_clips(tick);
         // The voices playing on keep their names: new ones get others.
         self.next_voice = old.next_voice;
         // An instance that plays on still owes what it missed; a new one starts afresh.
@@ -6294,6 +6306,63 @@ mod tests {
         e4.render_ticks(24, &mut same);
         let peak = same.iter().fold(0.0f32, |m, x| m.max(x.abs()));
         assert!(rms(&same) > 0.3 && peak < 0.51, "one voice, unbroken: rms {} peak {peak}", rms(&same));
+    }
+
+    /// The same with the clip played by a hosted instrument (Lemon Sampler plays every audio clip in the app): an edit
+    /// while it sounds starts no second voice of it, turning its track off chokes it, and on again starts it once.
+    #[test]
+    fn audio_clips_on_instruments_follow_their_track_while_playing() {
+        use os_model::{Clip, ClipSource};
+        #[derive(Default)]
+        struct Log(Vec<&'static str>);
+        impl crate::Instrument for Log {
+            fn note_on(&mut self, _o: u32, _k: u8, _v: f32) {
+                self.0.push("on");
+            }
+            fn note_off(&mut self, _o: u32, _k: u8) {
+                self.0.push("off");
+            }
+            fn note_on_from(&mut self, _o: u32, _k: u8, _v: f32, _start: f32) {
+                self.0.push("on");
+            }
+            fn choke(&mut self, _o: u32, _k: u8) {
+                self.0.push("choke");
+            }
+            fn process(&mut self, _rate: u32, _l: &mut [f32], _r: &mut [f32]) {}
+        }
+        let wav = Sines::new("track-switch-hosted", &[(440.0, 4.0)]);
+        let mut p = song(vec![], vec![Clip::new(0, 384 * 4, 0, ClipSource::Channel(0))]);
+        p.channels[0].kind = ChannelKind::AudioClip;
+        p.channels[0].sample_path = wav.path();
+        let mut lib = SampleLibrary::new(None);
+        let log = Arc::new(std::sync::Mutex::new(Log::default()));
+        let mut build = |p: &Project| {
+            let mut e = Engine::new(p, &mut lib, 48000, PlayMode::Song);
+            e.set_instrument(0, log.clone());
+            e
+        };
+        let mut e = build(&p);
+        let mut out = Vec::new();
+        e.render_ticks(96, &mut out);
+        assert_eq!(log.lock().unwrap().0, vec!["on"], "the clip starts");
+        // Edits that leave the clip playing, again and again: nothing more is started or cut.
+        for _ in 0..3 {
+            let mut next = build(&p);
+            next.continue_from(&mut e);
+            e = next;
+            e.render_ticks(24, &mut out);
+        }
+        assert_eq!(log.lock().unwrap().0, vec!["on"], "one voice through the edits");
+        p.arrangements[0].tracks[0].enabled = false;
+        let mut off = build(&p);
+        off.continue_from(&mut e);
+        off.render_ticks(24, &mut out);
+        assert_eq!(log.lock().unwrap().0, vec!["on", "choke"], "off: cut");
+        p.arrangements[0].tracks[0].enabled = true;
+        let mut on = build(&p);
+        on.continue_from(&mut off);
+        on.render_ticks(24, &mut out);
+        assert_eq!(log.lock().unwrap().0, vec!["on", "choke", "on"], "on again: started once");
     }
 
     // spec: audio/audio-clips.md "Starting inside a clip"

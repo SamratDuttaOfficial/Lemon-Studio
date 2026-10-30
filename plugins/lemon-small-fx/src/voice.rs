@@ -531,6 +531,19 @@ impl Kind for VoiceKind {
 
 pub type LemonVoice = SmallFx<VoiceKind>;
 
+/// What each setting does (the editor's tooltip).
+pub fn tip(id: &str) -> &'static str {
+    match id {
+        "ai" => "A neural network (DeepFilterNet 3) keeps the voice and takes away any background noise, even noise that changes. 0 is off; it adds about 40 ms of delay",
+        "denoise" => "Classic noise reduction of the steady noise left (hiss, hum, fan), after the AI denoise",
+        "room" => "Takes out the echo and reverb tail of the room",
+        "tone" => "Evens out the tone towards a studio vocal: cuts the boom of a mic too close, lifts the presence of one too far",
+        "level" => "Brings the voice to a steady level, moving only while someone speaks or sings, so pauses are not pumped up",
+        "target" => "The tone aimed for: Natural, Broadcast (fuller) or Bright",
+        _ => "",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

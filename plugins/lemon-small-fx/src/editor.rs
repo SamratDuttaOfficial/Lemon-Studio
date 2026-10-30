@@ -996,6 +996,22 @@ mod tests {
         }
     }
 
+    /// The vocal plugins say what each setting does, in a tooltip over the control the pointer rests on.
+    #[test]
+    fn vocal_settings_have_tooltips() {
+        for spec in [spritz::SPEC, pitch::SPEC, mouth::SPEC, phrase::SPEC, voice::SPEC] {
+            let mut l = logic(spec);
+            for s in spec.settings {
+                assert!(!crate::tip(spec, s.id).is_empty(), "{} {}", spec.name, s.id);
+                let t = l.hits.iter().find(|h| h.t.id() == s.id).map(|h| h.t.clone()).unwrap();
+                let (x, y) = centre(&l, &t);
+                l.moved(x, y, Mods::default());
+                paint(&mut l);
+            }
+        }
+        assert_eq!(crate::tip(soft_clipper::SPEC, "threshold"), "", "the others have none yet");
+    }
+
     #[test]
     fn knob_drags_wheel_magnets_and_reset() {
         let mut l = logic(balance::SPEC);

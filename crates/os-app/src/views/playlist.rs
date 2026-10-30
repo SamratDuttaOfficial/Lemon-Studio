@@ -1491,7 +1491,7 @@ fn popup_list(ui: &mut Ui, items: &[pl::PItem], x: f32, y: f32, screen: (f32, f3
         let live = it.enabled && (it.children.is_empty() || any_enabled(&it.children));
         // The entry's tip goes in the hint bar too, and beside the menu while the mouse is over it.
         let hint = if it.tip.is_empty() { it.label.to_string() } else { it.tip.to_string() };
-        if !it.tip.is_empty() && open != Some(i) && rr.contains(ui.mouse.0, ui.mouse.1) {
+        if !it.tip.is_empty() && rr.contains(ui.mouse.0, ui.mouse.1) {
             tip = Some((rr, it.tip.clone()));
         }
         if it.enabled {

@@ -546,16 +546,21 @@ pub fn menu_tip(ui: &mut Ui, menu: Rect, row: Rect, text: &str, left: bool) {
     let (lh, (sw, sh)) = (16.0, ui.c.size());
     let h = lines.len() as f32 * lh + 10.0;
     let right = menu.right() + 4.0;
-    let x = if !left && right + w <= sw {
-        right
+    // Beside the menu, on the side away from an open submenu (`left`); with no room there, under the menu (over a
+    // submenu it would hide its entries).
+    let b = if !left && right + w <= sw {
+        Rect::new(right, row.y.min(sh - h - 2.0).max(0.0), w, h)
     } else if menu.x - 4.0 - w >= 0.0 {
-        menu.x - 4.0 - w
-    } else if right + w <= sw {
-        right
+        Rect::new(menu.x - 4.0 - w, row.y.min(sh - h - 2.0).max(0.0), w, h)
+    } else if !left && right + w <= sw {
+        Rect::new(right, row.y.min(sh - h - 2.0).max(0.0), w, h)
+    } else if menu.bottom() + 4.0 + h <= sh {
+        Rect::new(menu.x.min(sw - w - 2.0).max(0.0), menu.bottom() + 4.0, w, h)
+    } else if menu.y - 4.0 - h >= 0.0 {
+        Rect::new(menu.x.min(sw - w - 2.0).max(0.0), menu.y - 4.0 - h, w, h)
     } else {
         return;
     };
-    let b = Rect::new(x, row.y.min(sh - h - 2.0).max(0.0), w, h);
     ui.c.fill_rrect(b.outset(1.0), 6.0, Color::rgb(0).with_alpha(90));
     ui.c.fill_rrect(b, 5.0, t.s(0x0b0d0f).with_alpha(245));
     for (k, l) in lines.iter().enumerate() {

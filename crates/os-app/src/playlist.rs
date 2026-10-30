@@ -238,6 +238,9 @@ pub enum Cmd {
     /// Shift+Tab: the next common snap setting (§4).
     CycleSnap,
     Consolidate,
+    /// Consolidate one track's clips, or one clip (`Whole`).
+    ConsolidateTrack(u16),
+    ConsolidateClip(usize),
     SelectAll,
     Deselect,
     InvertSelection,
@@ -2412,7 +2415,7 @@ pub fn options_menu(s: &State, x: f32, y: f32) -> Popup {
         PItem::sub(
             "Tools",
             vec![
-                PItem::new("Consolidate arranger selection", Cmd::Consolidate).key("Ctrl+Alt+C"),
+                PItem::new("Consolidate arranger selection", Cmd::Consolidate).key("Ctrl+Alt+C").tip(CONSOLIDATE_TIP),
                 PItem::new("Export all arranger tracks", Cmd::ExportTracks),
                 PItem::new("Quick quantize start times", Cmd::QuantizeStarts),
             ],
@@ -2524,6 +2527,11 @@ pub fn snap_menu(s: &State, x: f32, y: f32) -> Popup {
     Popup { x, y, items: snap_items(s), sub: None, scroll: [0; 2] }
 }
 
+/// What Consolidate does, for the menus' tips.
+pub const CONSOLIDATE_TIP: &str = "Renders the selected clips (or the time selection) as they sound into one new audio file, puts it on a free track as a new clip and mutes the originals";
+pub const CONSOLIDATE_TRACK_TIP: &str = "Renders every clip on this track as it sounds (cuts, fades, edits) into one new audio file and audio clip on a free track below; the originals are muted";
+pub const CONSOLIDATE_CLIP_TIP: &str = "Renders just this clip (a cut piece too) as it sounds into its own new audio file and audio clip on a free track below; the original is muted";
+
 pub fn clip_menu(s: &State, i: usize, x: f32, y: f32) -> Popup {
     let c = clips(s)[i];
     let head = match source_kind(s, c.source) {
@@ -2549,6 +2557,8 @@ pub fn clip_menu(s: &State, i: usize, x: f32, y: f32) -> Popup {
         items.extend(crate::timing::clip_items(s, i));
         items.push(PItem::sep());
     }
+    items.push(PItem::new("Consolidate this clip", Cmd::ConsolidateClip(i)).tip(CONSOLIDATE_CLIP_TIP));
+    items.push(PItem::sep());
     items.push(PItem::new("Select all similar clips", Cmd::ClipSelectSimilar(i)));
     items.push(PItem::new("Delete", Cmd::ClipDelete(i)));
     Popup { x, y, items, sub: None, scroll: [0; 2] }
@@ -2737,6 +2747,9 @@ pub fn track_menu(s: &State, t: u16, x: f32, y: f32) -> Popup {
         items.extend(crate::timing::track_items(s, t));
         items.push(PItem::sep());
     }
+    let consolidate = PItem::new("Consolidate this track", Cmd::ConsolidateTrack(t)).tip(CONSOLIDATE_TRACK_TIP);
+    items.push(if clips(s).iter().any(|c| c.track == t && !c.muted) { consolidate } else { consolidate.off() });
+    items.push(PItem::sep());
     items.extend([
         PItem::new("Group with above track", Cmd::TrackGroup(t)).mark(Mark::Check(track_info(s, t).is_some_and(|x| x.grouped))),
         PItem::new("Collapse group", Cmd::GroupCollapse(t))
@@ -4201,15 +4214,20 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             app.invalidate();
             return None;
         }
-        Cmd::Consolidate => {
-            let m = consolidate(app);
+        Cmd::Consolidate | Cmd::ConsolidateTrack(_) | Cmd::ConsolidateClip(_) => {
+            let what = match cmd {
+                Cmd::ConsolidateTrack(t) => Whole::Track(t),
+                Cmd::ConsolidateClip(i) => Whole::Clip(i),
+                _ => Whole::Selection,
+            };
+            let m = consolidate(app, what);
             app.invalidate();
-            return Some(m);
+            return m;
         }
         Cmd::ExportTracks => {
             let m = export_tracks(app);
             app.invalidate();
-            return Some(m);
+            return m;
         }
         Cmd::QuantizeStarts => {
             let m = quantize_starts(&mut app.state);
@@ -4351,7 +4369,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             snapshot(s);
             (!delete_space(s)).then(|| "Delete space: make a time selection first (right-drag the ruler)".into())
         }
-        Cmd::Consolidate | Cmd::ExportTracks | Cmd::QuantizeStarts | Cmd::PointValue(..) | Cmd::ClipPreview(_) | Cmd::TypeIn(_) | Cmd::Reset(_) | Cmd::Remote(_) | Cmd::MidiExt(_) => None,
+        Cmd::Consolidate | Cmd::ConsolidateTrack(_) | Cmd::ConsolidateClip(_) | Cmd::ExportTracks | Cmd::QuantizeStarts | Cmd::PointValue(..) | Cmd::ClipPreview(_) | Cmd::TypeIn(_) | Cmd::Reset(_) | Cmd::Remote(_) | Cmd::MidiExt(_) => None,
         Cmd::StretchMode => {
             s.playlist.stretch = !s.playlist.stretch;
             Some(if s.playlist.stretch { "Stretch mode on: resizing an audio clip stretches it".into() } else { "Stretch mode off".into() })
@@ -4786,71 +4804,131 @@ pub fn quantize_starts(s: &mut State) -> String {
 
 /// Tools > Export all playlist tracks (§10, OS): every track with unmuted clips on a playing track is rendered alone,
 /// from the song's start, into `Rendered/<project> tracks` next to the project file (the temp folder for a new
-/// project): "<NN> <track name>.wav", 44.1 kHz float, at least as long as the song so the files line up.
-pub fn export_tracks(app: &mut App) -> String {
+/// project): "<NN> <track name>.wav", 44.1 kHz float, at least as long as the song so the files line up. Rendered on
+/// a thread behind a progress panel (`busy`); returns why it cannot start, if it cannot.
+pub fn export_tracks(app: &mut App) -> Option<String> {
     let s = &app.state;
     let audible: Vec<Clip> = clips(s).iter().filter(|c| !c.muted && track_on(s, c.track)).copied().collect();
-    let Some(end) = audible.iter().map(|c| c.end()).max() else { return "Export tracks: the arranger has no clips to play".into() };
+    let Some(end) = audible.iter().map(|c| c.end()).max() else { return Some("Export tracks: the arranger has no clips to play".into()) };
     let mut tracks: Vec<u16> = audible.iter().map(|c| c.track).collect();
     tracks.sort_unstable();
     tracks.dedup();
+    let names: Vec<(u16, String)> = tracks.iter().map(|&t| (t, file_safe(&track_name(s, t)))).collect();
     let stem = s.path.as_ref().and_then(|p| p.file_stem()).map_or_else(|| "Untitled".to_string(), |n| n.to_string_lossy().into_owned());
-    let base = s.path.as_ref().and_then(|p| p.parent()).map(|d| d.join("Rendered")).unwrap_or_else(|| std::env::temp_dir().join("Lemon Studio").join("Rendered"));
-    let dir = base.join(format!("{stem} tracks"));
-    if let Err(e) = std::fs::create_dir_all(&dir) {
-        return format!("Export tracks: {e}");
-    }
-    let rate = 44100;
-    let mut lib = os_engine::SampleLibrary::new(crate::factory_folder::dir());
-    let song_frames = os_engine::laws::tick_to_frame(f64::from(end), s.project.ppq, s.project.tick_tempo(s.tempo), rate) as usize;
-    let mut written = 0;
-    for &t in &tracks {
-        let mut p = s.project.clone();
-        p.tempo = Some(s.tempo);
-        if let Some(arr) = p.arrangement_mut() {
-            arr.clips = audible.iter().filter(|c| c.track == t).copied().collect();
-            for tr in &mut arr.tracks {
-                tr.enabled = true;
+    let dir = rendered_dir(s).join(format!("{stem} tracks"));
+    let mut project = s.project.clone();
+    project.tempo = Some(s.tempo);
+    let tick_tempo = s.project.tick_tempo(s.tempo);
+    let factory = crate::factory_folder::dir();
+    crate::busy::run(app, "Export tracks", move |pr| {
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            return Box::new(move |_: &mut App| format!("Export tracks: {e}"));
+        }
+        let rate = 44100;
+        let mut lib = os_engine::SampleLibrary::new(factory);
+        let song_frames = os_engine::laws::tick_to_frame(f64::from(end), project.ppq, tick_tempo, rate) as usize;
+        let mut written = 0;
+        for (k, (t, name)) in names.iter().enumerate() {
+            let mut p = project.clone();
+            if let Some(arr) = p.arrangement_mut() {
+                arr.clips = audible.iter().filter(|c| c.track == *t).copied().collect();
+                for tr in &mut arr.tracks {
+                    tr.enabled = true;
+                }
             }
+            let mut audio = render(&p, &mut lib, rate, song_frames, |done| pr.set((k as f32 + done) / names.len() as f32, format!("Rendering {name}")));
+            if audio.len() < song_frames * 2 {
+                audio.resize(song_frames * 2, 0.0);
+            }
+            let file = dir.join(format!("{:02} {name}.wav", t + 1));
+            if let Err(e) = write_wav(&file, rate, &audio) {
+                return Box::new(move |_: &mut App| format!("Export tracks: {}: {e}", file.display()));
+            }
+            written += 1;
         }
-        let mut e = os_engine::Engine::new(&p, &mut lib, rate, os_engine::PlayMode::Song);
-        let mut audio = e.render_all(512);
-        if audio.len() < song_frames * 2 {
-            audio.resize(song_frames * 2, 0.0);
-        }
-        let name: String = track_name(s, t).chars().map(|c| if r#"<>:"/\|?*"#.contains(c) { '_' } else { c }).collect();
-        let file = dir.join(format!("{:02} {name}.wav", t + 1));
-        let ok = std::fs::File::create(&file).and_then(|f| {
-            let mut w = std::io::BufWriter::new(f);
-            os_engine::wav::write_f32_stereo(&mut w, rate, &audio)
-        });
-        if let Err(e) = ok {
-            return format!("Export tracks: {}: {e}", file.display());
-        }
-        written += 1;
-    }
-    format!("Exported {written} track{} to {}", if written == 1 { "" } else { "s" }, dir.display())
+        Box::new(move |_: &mut App| format!("Exported {written} track{} to {}", if written == 1 { "" } else { "s" }, dir.display()))
+    });
+    None
 }
 
-pub fn consolidate(app: &mut App) -> String {
-    let s = &mut app.state;
-    let sel = s.playlist.sel.clone();
-    let (a, b) = match (s.playlist.range, sel.is_empty()) {
-        (Some((r0, r1)), _) if r1 > r0 => (r0, r1),
-        (_, false) => {
-            let cs: Vec<&Clip> = sel.iter().filter_map(|&i| clips(s).get(i)).collect();
-            (cs.iter().map(|c| c.position).min().unwrap_or(0), cs.iter().map(|c| c.end()).max().unwrap_or(0))
+/// A name as a file name takes it (the characters one cannot hold as `_`).
+fn file_safe(name: &str) -> String {
+    name.chars().map(|c| if r#"<>:"/\|?*"#.contains(c) { '_' } else { c }).collect()
+}
+
+/// `Rendered` next to the project file (in the temp folder for a new project).
+fn rendered_dir(s: &State) -> std::path::PathBuf {
+    s.path.as_ref().and_then(|p| p.parent()).map(|d| d.join("Rendered")).unwrap_or_else(|| std::env::temp_dir().join("Lemon Studio").join("Rendered"))
+}
+
+/// Renders project `p` from its start at `rate` until it is over (at least `frames` frames' worth is asked for, for the
+/// progress): interleaved stereo. `progress` hears how far it is (0..=1) a few times a second.
+fn render(p: &os_model::Project, lib: &mut os_engine::SampleLibrary, rate: u32, frames: usize, progress: impl Fn(f32)) -> Vec<f32> {
+    let mut e = os_engine::Engine::new(p, lib, rate, os_engine::PlayMode::Song);
+    let mut audio = Vec::new();
+    while !e.render_ticks(48, &mut audio) {
+        progress((audio.len() / 2) as f32 / frames.max(1) as f32);
+    }
+    audio
+}
+
+fn write_wav(file: &std::path::Path, rate: u32, audio: &[f32]) -> std::io::Result<()> {
+    let mut w = std::io::BufWriter::new(std::fs::File::create(file)?);
+    os_engine::wav::write_f32_stereo(&mut w, rate, audio)?;
+    std::io::Write::flush(&mut w)
+}
+
+/// What Consolidate renders: the arranger selection (the selected clips, or the clips in a time selection), one
+/// track's clips that play, or one clip (a piece cut from a longer one).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Whole {
+    Selection,
+    Track(u16),
+    Clip(usize),
+}
+
+/// Consolidate (§10): what `what` names rendered alone as it sounds (its channels' settings and the mixer as the
+/// engine plays them) into a new file in `Rendered` next to the project, on a thread behind a progress panel (`busy`);
+/// then a new audio clip of it goes on a free track below at the same place, and the clips rendered are muted, one
+/// undo step. Returns why it cannot start, if it cannot.
+pub fn consolidate(app: &mut App, what: Whole) -> Option<String> {
+    let s = &app.state;
+    let playing = |c: &Clip| !c.muted;
+    let (a, b, use_idx, name, below) = match what {
+        Whole::Selection => {
+            let sel = s.playlist.sel.clone();
+            let (a, b) = match (s.playlist.range, sel.is_empty()) {
+                (Some((r0, r1)), _) if r1 > r0 => (r0, r1),
+                (_, false) => {
+                    let cs: Vec<&Clip> = sel.iter().filter_map(|&i| clips(s).get(i)).collect();
+                    (cs.iter().map(|c| c.position).min().unwrap_or(0), cs.iter().map(|c| c.end()).max().unwrap_or(0))
+                }
+                _ => return Some("Consolidate: select clips or a time range first".into()),
+            };
+            let idx: Vec<usize> = if sel.is_empty() { clips(s).iter().enumerate().filter(|(_, c)| c.position < b && c.end() > a).map(|(i, _)| i).collect() } else { sel };
+            (a, b, idx, "Consolidated".to_string(), track_after_used(s))
         }
-        _ => return "Consolidate: select clips or a time range first".into(),
+        Whole::Track(t) => {
+            let idx: Vec<usize> = clips(s).iter().enumerate().filter(|(_, c)| c.track == t && playing(c)).map(|(i, _)| i).collect();
+            if idx.is_empty() {
+                return Some(format!("Consolidate: {} has no clips that play", track_name(s, t)));
+            }
+            let a = idx.iter().map(|&i| clips(s)[i].position).min().unwrap_or(0);
+            let b = idx.iter().map(|&i| clips(s)[i].end()).max().unwrap_or(0);
+            (a, b, idx, format!("{} consolidated", file_safe(&track_name(s, t))), t.saturating_add(1))
+        }
+        Whole::Clip(i) => {
+            let Some(c) = clips(s).get(i).copied() else { return None };
+            let name = match c.source {
+                ClipSource::Channel(ch) => channel_of(s, ch).and_then(|x| x.name.clone()).unwrap_or_else(|| "Audio".into()),
+                ClipSource::Pattern(n) => s.project.pattern(n).and_then(|p| p.name.clone()).unwrap_or_else(|| format!("Pattern {n}")),
+            };
+            (c.position, c.end(), vec![i], format!("{} piece", file_safe(&name)), c.track.saturating_add(1))
+        }
     };
     if b <= a {
-        return "Consolidate: nothing to render".into();
+        return Some("Consolidate: nothing to render".into());
     }
-    let use_idx: Vec<usize> = if sel.is_empty() {
-        clips(s).iter().enumerate().filter(|(_, c)| c.position < b && c.end() > a).map(|(i, _)| i).collect()
-    } else {
-        sel.clone()
-    };
     // A project with just those clips, shifted to start at 0 (clips crossing the start are cut there).
     let mut p = s.project.clone();
     p.tempo = Some(s.tempo);
@@ -4866,6 +4944,7 @@ pub fn consolidate(app: &mut App) -> String {
         }
         c.position -= a;
         c.length = c.length.min(b - a - c.position.min(b - a));
+        c.muted = false;
         parts.push(c);
     }
     if let Some(arr) = p.arrangement_mut() {
@@ -4874,44 +4953,56 @@ pub fn consolidate(app: &mut App) -> String {
             t.enabled = true;
         }
     }
-    let rate = 44100;
-    let mut lib = os_engine::SampleLibrary::new(crate::factory_folder::dir());
-    let mut e = os_engine::Engine::new(&p, &mut lib, rate, os_engine::PlayMode::Song);
-    let mut audio = e.render_all(512);
-    let want = (os_engine::laws::tick_to_frame(f64::from(b - a), p.ppq, p.tick_tempo(s.tempo), rate) as usize) * 2;
-    audio.resize(want.max(2), 0.0);
-    let dir = s.path.as_ref().and_then(|p| p.parent()).map(|d| d.join("Rendered")).unwrap_or_else(|| std::env::temp_dir().join("Lemon Studio").join("Rendered"));
-    if let Err(e) = std::fs::create_dir_all(&dir) {
-        return format!("Consolidate: {e}");
-    }
-    let n = std::fs::read_dir(&dir).map(|d| d.count()).unwrap_or(0) + 1;
-    let file = dir.join(format!("Consolidated {n}.wav"));
-    let written = std::fs::File::create(&file).and_then(|f| {
-        let mut w = std::io::BufWriter::new(f);
-        os_engine::wav::write_f32_stereo(&mut w, rate, &audio)
-    });
-    if let Err(e) = written {
-        return format!("Consolidate: {e}");
-    }
-    let path = file.to_string_lossy().into_owned();
-    let track = free_track(s, track_after_used(s), a, b);
-    snapshot(s);
-    for &i in &use_idx {
-        if let Some(c) = arr_mut(s).clips.get_mut(i) {
-            c.muted = true;
+    let below = below.min(TRACKS - 1);
+    let dir = rendered_dir(s);
+    let factory = crate::factory_folder::dir();
+    let want = os_engine::laws::tick_to_frame(f64::from(b - a), p.ppq, p.tick_tempo(s.tempo), 44100) as usize;
+    crate::busy::run(app, "Consolidate", move |pr| {
+        let rate = 44100;
+        let mut lib = os_engine::SampleLibrary::new(factory);
+        let mut audio = render(&p, &mut lib, rate, want, |done| pr.set(0.95 * done, "Rendering"));
+        audio.resize(want.max(1) * 2, 0.0);
+        pr.set(0.96, "Writing");
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            return Box::new(move |_: &mut App| format!("Consolidate: {e}"));
         }
-    }
-    crate::history::unrecord(s); // one undo step for the whole consolidation (add_audio_clip snapshots)
-    match add_audio_clip(s, &path, track, a) {
-        Some(i) => {
-            // The render's own length, exactly.
-            if let Some(c) = arr_mut(s).clips.get_mut(i) {
-                c.length = b - a;
+        let mut file = dir.join(format!("{name}.wav"));
+        let mut n = 2;
+        while file.exists() {
+            file = dir.join(format!("{name} {n}.wav"));
+            n += 1;
+        }
+        if let Err(e) = write_wav(&file, rate, &audio) {
+            return Box::new(move |_: &mut App| format!("Consolidate: {e}"));
+        }
+        Box::new(move |app: &mut App| {
+            let s = &mut app.state;
+            let path = file.to_string_lossy().into_owned();
+            let track = free_track(s, below, a, b);
+            if s.playlist.wave(&path).is_none() {
+                return format!("Consolidate: could not read back {}", file.display());
             }
-            format!("Consolidated to {}", file.display())
-        }
-        None => format!("Consolidate: could not read back {}", file.display()),
-    }
+            // One undo step: the clips muted and the new one added.
+            snapshot_as(s, "Consolidate");
+            for &i in &use_idx {
+                if let Some(c) = arr_mut(s).clips.get_mut(i) {
+                    c.muted = true;
+                }
+            }
+            s.piano.dirty = true;
+            match add_audio_clip_in(s, &path, track, a, None) {
+                Some(i) => {
+                    // The render's own length, exactly.
+                    if let Some(c) = arr_mut(s).clips.get_mut(i) {
+                        c.length = b - a;
+                    }
+                    format!("Consolidated to {} on {}", file.display(), track_name(s, track))
+                }
+                None => format!("Consolidate: could not read back {}", file.display()),
+            }
+        })
+    });
+    None
 }
 
 /// Keys while the playlist is focused. Returns true when handled.
@@ -5258,5 +5349,66 @@ mod tests {
         assert_eq!(app.state.selected_mixer, 5, "the selection stays");
         crate::history::undo(&mut app.state);
         assert!(crate::mixer::track(&app.state, t).unwrap().slots[usize::from(k)].is_some(), "one undo step");
+    }
+    /// Consolidate this track and Consolidate this clip: a track of two pieces cut from one recording becomes one new
+    /// file and clip on a free track below, as long as the pieces span, the pieces muted, one undo step; one piece
+    /// becomes a file and clip of its own as long as it is. Each renders on a thread behind the progress panel.
+    #[test]
+    fn consolidate_a_track_and_a_piece() {
+        let mut app = app();
+        app.state.path = Some(std::env::temp_dir().join(format!("os-consolidate-{}.flp", std::process::id())));
+        let wav = std::env::temp_dir().join(format!("os-consolidate-{}.wav", std::process::id()));
+        let tone: Vec<f32> = (0..96000).flat_map(|i| [0.3 * (i as f32 * 0.05).sin(); 2]).collect();
+        os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 48000, &tone).unwrap();
+        let text = wav.to_string_lossy().into_owned();
+        let i = add_audio_clip(&mut app.state, &text, 0, 0).expect("clip");
+        // Cut in two with a gap: the first half and the second half a beat later.
+        let s = &mut app.state;
+        let mut c = clips(s)[i];
+        let (w0, w1) = window(s, &c);
+        let half = c.length / 2;
+        let mut second = c;
+        c.length = half;
+        c.window = Some((w0, w0 + to_src(s, c.source, f64::from(half))));
+        second.position = half + 96;
+        second.length = c.length;
+        second.window = Some((w0 + to_src(s, c.source, f64::from(half)), w1));
+        arr_mut(s).clips = vec![c, second];
+        let steps = s.history.entries().len();
+        let m = track_menu(&app.state, 0, 0.0, 0.0);
+        let it = entry(&m, "Consolidate this track");
+        assert!(it.enabled && !it.tip.is_empty());
+        assert_eq!(run(&mut app, Cmd::ConsolidateTrack(0)), None, "started");
+        assert!(app.loading(), "behind the panel");
+        let msg = crate::busy::wait(&mut app).unwrap();
+        assert!(msg.starts_with("Consolidated to") && msg.ends_with("on Track 2"), "{msg}");
+        let all = clips(&app.state);
+        assert_eq!(all.len(), 3);
+        assert!(all[0].muted && all[1].muted, "the pieces are muted");
+        assert_eq!((all[2].track, all[2].position, all[2].length), (1, 0, second.end()));
+        let ClipSource::Channel(ch) = all[2].source else { panic!() };
+        let file = app.state.project.channels.iter().find(|x| x.index == ch).and_then(|x| x.sample_path.clone()).unwrap();
+        assert!(file.ends_with("Track 1 consolidated.wav"), "{file}");
+        assert_eq!(app.state.history.entries().len(), steps + 1, "one undo step");
+        crate::history::undo(&mut app.state);
+        assert_eq!(clips(&app.state).len(), 2);
+        assert!(clips(&app.state).iter().all(|c| !c.muted), "undone");
+        // The second piece alone.
+        let m = clip_menu(&app.state, 1, 0.0, 0.0);
+        assert!(!entry(&m, "Consolidate this clip").tip.is_empty());
+        assert_eq!(run(&mut app, Cmd::ConsolidateClip(1)), None, "started");
+        let msg = crate::busy::wait(&mut app).unwrap();
+        assert!(msg.starts_with("Consolidated to"), "{msg}");
+        let all = clips(&app.state);
+        assert!(!all[0].muted && all[1].muted);
+        assert_eq!((all[2].track, all[2].position, all[2].length), (1, second.position, second.length));
+        let ClipSource::Channel(ch) = all[2].source else { panic!() };
+        let piece = app.state.project.channels.iter().find(|x| x.index == ch).and_then(|x| x.sample_path.clone()).unwrap();
+        assert!(piece.contains(" piece"), "{piece}");
+        let out = os_engine::sample::load(std::path::Path::new(&piece)).unwrap();
+        assert!(out.left.iter().any(|v| v.abs() > 0.01), "it has the sound");
+        for f in [wav.to_string_lossy().into_owned(), file, piece] {
+            let _ = std::fs::remove_file(f);
+        }
     }
 }

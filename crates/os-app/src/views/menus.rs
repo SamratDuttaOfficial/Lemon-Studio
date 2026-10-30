@@ -1022,8 +1022,8 @@ pub fn paint_dropdown(ui: &mut Ui, s: &State, menu: usize, k: f32) {
                     } else if !works(menu, item) {
                         ui.off(rr, item.label);
                     }
-                    // The tip beside the dropdown, while no submenu of it is open there.
-                    if !about.is_empty() && open.is_none() && rr.contains(ui.mouse.0, ui.mouse.1) {
+                    // The tip beside the dropdown (away from a submenu open on its right).
+                    if !about.is_empty() && rr.contains(ui.mouse.0, ui.mouse.1) {
                         tip_at = Some((rr, about));
                     }
                     let mark = mark_of(s, menu, item);
@@ -1052,7 +1052,7 @@ pub fn paint_dropdown(ui: &mut Ui, s: &State, menu: usize, k: f32) {
         cx += cw;
     }
     if let Some((rr, about)) = tip_at {
-        super::menu_tip(ui, r, rr, about, false);
+        super::menu_tip(ui, r, rr, about, open.is_some());
     }
 }
 

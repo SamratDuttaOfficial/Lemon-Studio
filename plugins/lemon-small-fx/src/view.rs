@@ -176,7 +176,43 @@ pub fn paint(spec: &Spec, c: &mut Canvas, t: &Palette, m: &dyn Model, st: &ViewS
         }
         _ => {}
     }
+    // What the control under the pointer does, while nothing is pressed.
+    if let (Some((mx, my)), None) = (st.mouse, &st.pressed) {
+        if let Some(h) = ui.hits.iter().rev().find(|h| h.r.contains(mx, my)) {
+            let about = crate::tip(spec, h.t.id());
+            if !about.is_empty() {
+                tooltip(ui.c, spec.size, h.r, about);
+            }
+        }
+    }
     ui.hits
+}
+
+/// A dark bubble with `text` below control `r` (above it where the editor ends), inside the editor of `size`.
+fn tooltip(c: &mut Canvas, size: (u32, u32), r: Rect, text: &str) {
+    let (sw, sh) = (size.0 as f32, size.1 as f32);
+    let max = (sw - 16.0).min(300.0);
+    let mut lines: Vec<String> = Vec::new();
+    for word in text.split(' ') {
+        match lines.last_mut() {
+            Some(l) if c.text_width(HINT, &format!("{l} {word}")) <= max => {
+                l.push(' ');
+                l.push_str(word);
+            }
+            _ => lines.push(word.to_string()),
+        }
+    }
+    let lh = c.line_height(HINT);
+    let w = lines.iter().map(|l| c.text_width(HINT, l)).fold(0.0f32, f32::max).ceil() + 14.0;
+    let h = lines.len() as f32 * lh + 8.0;
+    let x = (r.cx() - w / 2.0).clamp(4.0, (sw - w - 4.0).max(4.0));
+    let y = if r.bottom() + 4.0 + h <= sh { r.bottom() + 4.0 } else { (r.y - 4.0 - h).max(2.0) };
+    let b = Rect::new(x.round(), y.round(), w, h);
+    c.fill_rrect(b.outset(1.0), 6.0, Color::rgb(0).with_alpha(90));
+    c.fill_rrect(b, 5.0, Color::rgb(0x0b0d0f).with_alpha(245));
+    for (k, l) in lines.iter().enumerate() {
+        c.text(HINT, b.x + 7.0, b.y + 4.0 + k as f32 * lh, Color::rgb(0xe6e6e6), l);
+    }
 }
 
 /// A card's heading (as Lemon Delay's): letter-spaced caps centred on a hairline rule at `y`, the rule stopping 7 px

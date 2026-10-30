@@ -295,6 +295,19 @@ impl Kind for SpritzKind {
 
 pub type LemonSpritz = SmallFx<SpritzKind>;
 
+/// What each setting does (the editor's tooltip).
+pub fn tip(id: &str) -> &'static str {
+    match id {
+        "freq" => "Where the S sounds start: the band above this is watched and turned down. Lower for a deep voice, higher for a bright one",
+        "threshold" => "How loud the S band must get, next to the whole voice, before it is turned down. Lower catches more",
+        "depth" => "The most an S is turned down, in dB",
+        "speed" => "How fast the reduction lets go after an S: short keeps the words clear, long is smoother",
+        "mode" => "Split turns down only the highs above the frequency; Wide turns the whole voice down while an S sounds",
+        "listen" => "Listen plays only what is taken out, to set the frequency and threshold by ear",
+        _ => "",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

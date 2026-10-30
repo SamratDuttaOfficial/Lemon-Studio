@@ -73,6 +73,18 @@ pub struct Setting {
     pub magnet: Option<i32>,
 }
 
+/// What setting `id` of plugin `spec` does, for the editor's tooltip (the vocal plugins say it; "" for the others).
+pub fn tip(spec: &Spec, id: &str) -> &'static str {
+    match spec.name {
+        "Lemon Spritz" => spritz::tip(id),
+        "Lemon Pitch" => pitch::tip(id),
+        "Lemon Mouth" => mouth::tip(id),
+        "Lemon Phrase" => phrase::tip(id),
+        "Lemon Voice" => voice::tip(id),
+        _ => "",
+    }
+}
+
 /// A control of the editor.
 pub enum Control {
     /// A Pith dial of radius `r` centred at (`cx`, `cy`), its caption under it (the value text, in lemon, when the

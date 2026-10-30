@@ -516,6 +516,18 @@ impl Kind for MouthKind {
 
 pub type LemonMouth = SmallFx<MouthKind>;
 
+/// What each setting does (the editor's tooltip).
+pub fn tip(id: &str) -> &'static str {
+    match id {
+        "sensitivity" => "How readily a sound counts as a mouth click: higher finds quieter clicks, lower leaves more alone",
+        "amount" => "How much a click that is found is turned down",
+        "length" => "The longest a click can be, ms: anything longer is a consonant and is left alone",
+        "low" => "Nothing below this frequency is touched, so the body of the voice stays",
+        "listen" => "Listen plays only what is taken out, to check that only the clicks go",
+        _ => "",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

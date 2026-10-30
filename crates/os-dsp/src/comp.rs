@@ -34,6 +34,18 @@ const LEAD: f64 = 0.01;
 const FADE: f64 = 0.02;
 /// A sample this near full scale counts as clipped.
 const CLIP: f32 = 0.985;
+/// In one recording of several takes (`split`): a pause this long parts its phrases, seconds.
+const TAKE_GAP: f64 = 0.3;
+/// The shortest take, seconds.
+const MIN_TAKE: f64 = 2.0;
+/// How much of the part's opening is looked for where it may start again, seconds.
+const OPENING: f64 = 4.0;
+/// A place starts the part again when it looks at most this much as unlike the opening as the opening does to what
+/// follows it (measured on spoken takes: about 0.25 where it does, 0.8 or more elsewhere).
+const RESTART: f64 = 0.55;
+/// Words between takes ("one more time") this short or shorter, that look like nothing in the other takes, are left
+/// out, seconds.
+const CHATTER: f64 = 2.5;
 
 /// One take: its sound (a mono mix) and its reading.
 pub struct Take<'a> {
@@ -289,6 +301,164 @@ pub fn comp(takes: &[Take]) -> Comp {
     Comp { reference: r, phrases, paths }
 }
 
+/// Frames `a` .. `b` of `look`.
+fn part(look: &Look, a: usize, b: usize) -> Look {
+    let b = b.min(look.frames());
+    let a = a.min(b);
+    Look { shape: look.shape[a * look.bands..b * look.bands].to_vec(), bands: look.bands, level: look.level[a..b].to_vec(), sound: look.sound[a..b].to_vec() }
+}
+
+/// How unlike frames `x` of `look` are to the closest stretch of frames `y` (dynamic time warping within `band`
+/// seconds of the line that puts `x`'s start `offset` seconds into `y`): the mean over `x`'s sound.
+fn unlike_in(look: &Look, x: (usize, usize), y: (usize, usize), offset: f64, band: f64) -> f64 {
+    let (a, mut b) = (part(look, x.0, x.1), part(look, y.0, y.1));
+    if a.frames() == 0 || b.frames() == 0 {
+        return f64::MAX;
+    }
+    // Where `y` ends before `x` could (the recording's end), silence: what of `x` finds nothing there counts as unlike
+    // (the path would otherwise end early, the rest of `x` not counted).
+    let need = a.frames() + ((offset.max(0.0) + band) / HOP).ceil() as usize + 1;
+    if b.frames() < need {
+        let floor = b.level.iter().copied().fold(f32::MAX, f32::min);
+        b.shape.resize(need * b.bands, 0.0);
+        b.level.resize(need, floor);
+        b.sound.resize(need, false);
+    }
+    let p = align::align(&a, &b, offset, band);
+    let (sum, n) = a.sound.iter().zip(&p.cost).filter(|(s, _)| **s).fold((0.0, 0usize), |(s, n), (_, c)| (s + f64::from(*c), n + 1));
+    if n == 0 { f64::MAX } else { sum / n as f64 }
+}
+
+/// The phrases of `look`: its sound in runs parted by pauses of `TAKE_GAP` or more (a click or breath under 0.1 s
+/// left out), frames.
+fn phrases(look: &Look) -> Vec<(usize, usize)> {
+    let gap = (TAKE_GAP / HOP).round() as usize;
+    let n = look.frames();
+    let mut out: Vec<(usize, usize)> = Vec::new();
+    let mut f = 0;
+    while f < n {
+        if !look.sound[f] {
+            f += 1;
+            continue;
+        }
+        let a = f;
+        while f < n && look.sound[f] {
+            f += 1;
+        }
+        match out.last_mut() {
+            Some(last) if a - last.1 < gap => last.1 = f,
+            _ => out.push((a, f)),
+        }
+    }
+    out.retain(|(a, b)| (b - a) as f64 * HOP >= 0.1);
+    out
+}
+
+/// The takes in one recording of a part done several times over, each from the top, as (from, to) seconds: where the
+/// recording starts the part again, its sound looking like the part's opening (its first `OPENING` seconds) much more
+/// than the opening looks like what follows it. The opening may be the recording's first phrase or, after a few words
+/// before the part ("take one"), its second or third: whichever is found again most often. Words between takes that
+/// look like nothing in the other takes ("one more time") are left out. Fewer than two: the recording holds one take.
+pub fn split(look: &Look) -> Vec<(f64, f64)> {
+    let ph = phrases(look);
+    let n = look.frames();
+    let (w, min_take) = ((OPENING / HOP) as usize, (MIN_TAKE / HOP) as usize);
+    let shifts = [1.5, 2.5, 3.5].map(|s: f64| (s / HOP) as usize);
+    // For each opening tried: its phrase, the phrases found starting the part again, and how unlike the opening a
+    // stretch that does not start it is.
+    let mut best: Option<(usize, Vec<usize>, f64)> = None;
+    for o in 0..ph.len().min(3) {
+        let start = ph[o].0;
+        if start > n / 2 {
+            break;
+        }
+        let open = (start, (start + w).min(n));
+        // How unlike the opening each later phrase's start is.
+        let costs: Vec<(usize, f64)> = (o + 1..ph.len())
+            .filter(|&p| ph[p].0 >= start + min_take)
+            .map(|p| (p, unlike_in(look, open, (ph[p].0, (ph[p].0 + w + 100).min(n)), 0.0, 1.0)))
+            .collect();
+        // Not the part starting again: the opening against what follows it (the most alike of three places), or the
+        // later phrases' starts as most of them are, whichever is less alike (a short take's next one can be within
+        // reach of the first, and with a phrase a take most later phrases do start it again).
+        let after = shifts.iter().map(|&s| unlike_in(look, open, (start + s, (start + s + w + 100).min(n)), 0.0, 1.0)).fold(f64::MAX, f64::min);
+        let other = if costs.len() >= 3 { after.max(median(costs.iter().map(|c| c.1).collect())) } else { after };
+        if other == f64::MAX {
+            continue;
+        }
+        let mut found: Vec<(usize, f64)> = costs.into_iter().filter(|&(_, c)| c < RESTART * other).collect();
+        // Two places closer than a take: the more alike.
+        found.sort_by(|a, b| a.1.total_cmp(&b.1));
+        let mut kept: Vec<usize> = Vec::new();
+        for (p, _) in found {
+            if kept.iter().all(|&q| ph[q].0.abs_diff(ph[p].0) >= min_take) {
+                kept.push(p);
+            }
+        }
+        kept.sort_unstable();
+        kept.insert(0, o);
+        if best.as_ref().is_none_or(|b| kept.len() > b.1.len()) {
+            best = Some((o, kept, other));
+        }
+    }
+    let Some((o, mut starts, other)) = best.filter(|b| b.1.len() >= 2) else { return Vec::new() };
+    // The part may begin before the opening found again (its first phrase spoilt in the first take, a cough over it):
+    // when what comes before the opening in one take, as long as before it in the first, is found before it in
+    // another, every take starts that much earlier, at the phrase nearest. Otherwise it was words before the part.
+    if o > 0 {
+        let lead = ph[o].0 - ph[0].0;
+        let before: Vec<(usize, usize)> = starts.iter().map(|&p| (ph[p].0.saturating_sub(lead), ph[p].0)).collect();
+        let back = (50.0 * 0.01 / HOP) as usize;
+        let alike = (0..before.len())
+            .any(|i| (i + 1..before.len()).any(|j| unlike_in(look, before[i], (before[j].0.saturating_sub(back), before[j].1), back as f64 * HOP, 1.0) < RESTART * other));
+        if alike {
+            for k in 0..starts.len() {
+                let lo = if k == 0 { 0 } else { starts[k - 1] + 1 };
+                let want = ph[starts[k]].0.saturating_sub(lead);
+                starts[k] = (lo..=starts[k]).min_by_key(|&p| ph[p].0.abs_diff(want)).unwrap_or(starts[k]);
+            }
+        }
+    }
+    // Each take: its phrases, from its start to the next take's.
+    let mut takes: Vec<Vec<(usize, usize)>> = starts.iter().enumerate().map(|(k, &s)| ph[s..starts.get(k + 1).copied().unwrap_or(ph.len())].to_vec()).collect();
+    // Chatter at a take's end: a short last phrase found in none of the other takes, near where it would be there,
+    // and without which the take is still as long as the others (else it is the take's own last line, flubbed).
+    let span = |t: &[(usize, usize)]| (t[0].0, t[t.len() - 1].1);
+    for k in 0..takes.len() {
+        while takes[k].len() >= 2 {
+            let last = takes[k][takes[k].len() - 1];
+            let (s, e) = span(&takes[k]);
+            let rest = takes[k][takes[k].len() - 2].1 - s;
+            let shortest = (0..takes.len()).filter(|&j| j != k).map(|j| span(&takes[j]).1 - span(&takes[j]).0).min().unwrap_or(0);
+            if (last.1 - last.0) as f64 * HOP > CHATTER || (rest as f64) < 0.75 * shortest as f64 {
+                break;
+            }
+            let len = (e - s) as f64;
+            let alike = (0..takes.len())
+                .filter(|&j| j != k)
+                .map(|j| {
+                    let (js, je) = span(&takes[j]);
+                    // Where it would be in take `j`, its share of the way through its take.
+                    let at = (last.0 - s) as f64 / len * (je - js) as f64 * HOP;
+                    unlike_in(look, last, (js, je), at, (0.25 * (je - js) as f64 * HOP).max(1.5))
+                })
+                .fold(f64::MAX, f64::min);
+            if alike < RESTART * other {
+                break;
+            }
+            takes[k].pop();
+        }
+    }
+    // From just before a take's first sound to just after its last (`TAIL`), within the pauses either side.
+    takes
+        .iter()
+        .map(|t| {
+            let (s, e) = span(t);
+            ((s as f64 * HOP - LEAD).max(0.0), (e as f64 * HOP + TAIL).min(n as f64 * HOP))
+        })
+        .collect()
+}
+
 /// How different frame `i` of `a` and frame `j` of `b` sound, their loudness aside (each frame's mean over the bands
 /// taken off): level is scored on its own.
 fn shape_distance(a: &Look, i: usize, b: &Look, j: usize) -> f32 {
@@ -393,5 +563,61 @@ mod tests {
         let out = Scan::new(&l, RATE);
         assert_eq!(out.syllables.len(), 15, "{:?}", out.syllables.iter().map(|s| s.at).collect::<Vec<_>>());
         assert!(l.iter().all(|v| v.abs() < 0.985), "no clipping in the comp");
+    }
+
+    /// One recording of the three takes, a second apart, with a few other words said after the first: three takes
+    /// are found, each from its first sound to its last (the third's flubbed last line kept), the words left out.
+    #[test]
+    fn finds_the_takes_in_one_recording() {
+        let audio = takes();
+        let gap = RATE as usize;
+        let mut x = Vec::new();
+        let mut starts = Vec::new();
+        for (k, t) in audio.iter().enumerate() {
+            // Each take from its first syllable (0.3 s + 0.07 s a take in its own file) to its last.
+            let (a, b) = ((0.25 + 0.07 * k as f64) * f64::from(RATE), (6.3 + 0.07 * k as f64) * f64::from(RATE));
+            starts.push(x.len() as f64 / f64::from(RATE) + 0.05);
+            x.extend_from_slice(&t[a as usize..b as usize]);
+            if k == 0 {
+                // "One more time": three syllables of other vowels.
+                let mut y = vec![0.0f32; RATE as usize * 2];
+                let mut noise = Noise::new(9);
+                for i in 0..3 {
+                    sound(&mut y, RATE, 0.6 + 0.25 * f64::from(i), 0.14, 180.0, [[250.0, 600.0, 2400.0], [650.0, 1700.0, 2500.0], [400.0, 1000.0, 2200.0]][i as usize], Onset::Soft, &mut noise);
+                }
+                x.extend(std::iter::repeat_n(0.0, gap / 2));
+                x.extend(y);
+            }
+            x.extend(std::iter::repeat_n(0.0, gap));
+        }
+        let look = Look::new(&Scan::new(&x, RATE));
+        let found = split(&look);
+        assert_eq!(found.len(), 3, "{found:?}");
+        for (k, (&(a, b), s)) in found.iter().zip(&starts).enumerate() {
+            assert!((a - s).abs() < 0.15, "take {k} starts at {a}, not {s}");
+            // Its last syllable ends 5.2 s in (the third take's, with two more words, 5.7 s).
+            let want = if k == 2 { 5.7 } else { 5.2 };
+            assert!((b - a - want).abs() < 0.25, "take {k} is {} s long: {found:?}", b - a);
+        }
+        // One take alone is one take.
+        let one = split(&Look::new(&Scan::new(&audio[0], RATE)));
+        assert!(one.is_empty(), "{one:?}");
+    }
+
+    /// One recording of a part done several times (16-bit PCM WAV, `OS_TAKES_WAV`): the takes found in it (`cargo
+    /// test -p os-dsp --release -- --ignored real_takes --nocapture`).
+    #[test]
+    #[ignore]
+    fn real_takes() {
+        let Some(path) = std::env::var_os("OS_TAKES_WAV") else { return };
+        let b = std::fs::read(path).expect("reads");
+        let rate = u32::from_le_bytes(b[24..28].try_into().unwrap());
+        let chans = usize::from(u16::from_le_bytes(b[22..24].try_into().unwrap()));
+        let data = b.windows(4).position(|w| w == b"data").expect("data") + 8;
+        let x: Vec<f32> = b[data..].chunks_exact(2 * chans).map(|f| f32::from(i16::from_le_bytes([f[0], f[1]])) / 32768.0).collect();
+        let t0 = std::time::Instant::now();
+        let look = Look::new(&Scan::new(&x, rate));
+        let takes = split(&look);
+        println!("{} takes in {:?}: {takes:.2?}", takes.len(), t0.elapsed());
     }
 }

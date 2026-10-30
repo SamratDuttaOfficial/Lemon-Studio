@@ -10,10 +10,12 @@
 //! - Match timing to track: a double or a backing vocal moved onto another track's timing, syllable by syllable, for
 //!   layering.
 //! - Comp takes: several takes of one part made into one, phrase by phrase the best of them, lined up with each other
-//!   and joined in the pauses after the last word (`os_dsp::comp`).
+//!   and joined in the pauses after the last word (`os_dsp::comp`). The takes are clips, or one clip of a part done
+//!   several times in a row, the takes found in it (`comp::split`).
 //!
 //! The new audio goes to the data folder's Fitted folder. Fit and Match give the clips' channel the new file and move
-//! the clips' trims with the audio; Comp puts a new audio clip under the takes and mutes them. Each is one undo step.
+//! the clips' trims with the audio; Comp puts a new audio clip under the takes and mutes them. Each is one undo step,
+//! worked out on a thread behind a progress panel (`busy`).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -112,6 +114,7 @@ fn loose() -> bool {
 pub const FIT_TIP: &str = "Moves each syllable onto the beat grid, stretching and squeezing tiny pieces where it is least heard (pauses, then vowels); reads the flow by itself";
 pub const MATCH_TIP: &str = "Moves the timing onto another track's, syllable by syllable, so a double or backing vocal sits exactly with the lead";
 pub const COMP_TIP: &str = "Makes one take of several takes of the same part: lines them up, keeps the best version of each phrase and joins them in the pauses";
+pub const COMP_ONE_TIP: &str = "For one recording of a part done several times in a row: finds where each take starts again (by how it sounds, any language), leaves out the words between takes, then keeps the best version of each phrase";
 
 /// Fit to tempo's submenu: the feels (each fits), then the grid.
 pub fn fit_items(target: Target) -> Vec<PItem> {
@@ -149,23 +152,33 @@ pub fn match_items(s: &State, target: Target, skip: Option<u16>) -> Vec<PItem> {
 /// The Vocal timing part of an audio clip's menu.
 pub fn clip_items(s: &State, i: usize) -> Vec<PItem> {
     let track = clips(s).get(i).map(|c| c.track);
-    let comp = PItem::new("Comp selected takes", Cmd::Timing(TCmd::Comp(Target::Clip(i)))).tip(COMP_TIP);
+    let cmd = Cmd::Timing(TCmd::Comp(Target::Clip(i)));
+    let comp = match targets(s, Target::Clip(i)).len() {
+        0 => PItem::new("Comp takes", cmd).tip(COMP_TIP).off(),
+        1 => PItem::new("Comp takes in this clip", cmd).tip(COMP_ONE_TIP),
+        _ => PItem::new("Comp selected takes", cmd).tip(COMP_TIP),
+    };
     vec![
         PItem::head("Vocal timing"),
         PItem::sub("Fit to tempo", fit_items(Target::Clip(i))).tip(FIT_TIP),
         PItem::sub("Match timing to track", match_items(s, Target::Clip(i), track)).tip(MATCH_TIP),
-        if targets(s, Target::Clip(i)).len() >= 2 { comp } else { comp.off() },
+        comp,
     ]
 }
 
 /// The Vocal timing part of a track's menu.
 pub fn track_items(s: &State, t: u16) -> Vec<PItem> {
-    let comp = PItem::new("Comp takes on this track", Cmd::Timing(TCmd::Comp(Target::Track(t)))).tip(COMP_TIP);
+    let comp = PItem::new("Comp takes on this track", Cmd::Timing(TCmd::Comp(Target::Track(t))));
+    let comp = match targets(s, Target::Track(t)).len() {
+        0 => comp.tip(COMP_TIP).off(),
+        1 => comp.tip(COMP_ONE_TIP),
+        _ => comp.tip(COMP_TIP),
+    };
     vec![
         PItem::head("Vocal timing"),
         PItem::sub("Fit audio to tempo", fit_items(Target::Track(t))).tip(FIT_TIP),
         PItem::sub("Match audio to track", match_items(s, Target::Track(t), Some(t))).tip(MATCH_TIP),
-        if targets(s, Target::Track(t)).len() >= 2 { comp } else { comp.off() },
+        comp,
     ]
 }
 
@@ -189,28 +202,32 @@ pub fn targets(s: &State, target: Target) -> Vec<usize> {
     v
 }
 
-/// Runs a command; returns the status line.
+/// Runs a command: a setting at once, a tool on a thread behind a progress panel (`busy`, its status line when it is
+/// done). Returns why a tool cannot start, if it cannot.
 pub fn run(app: &mut App, c: TCmd) -> Option<String> {
-    let msg = match c {
+    match c {
         TCmd::Grid(n) => {
             crate::settings_file::write(GRID_KEY, &n.to_string());
-            return None;
+            None
         }
         TCmd::MatchLoose(on) => {
             crate::settings_file::set_flag(LOOSE_KEY, on);
-            return None;
+            None
         }
-        TCmd::Fit(t, feel) => fit(&mut app.state, t, feel),
-        TCmd::Match(t, guide) => match_to(&mut app.state, t, guide),
-        TCmd::Comp(t) => comp_takes(&mut app.state, t),
-    };
-    app.invalidate();
-    Some(msg)
+        TCmd::Fit(t, feel) => fit(app, t, feel).err(),
+        TCmd::Match(t, guide) => match_to(app, t, guide).err(),
+        TCmd::Comp(t) => comp_takes(app, t).err(),
+    }
 }
 
 fn load(path: &str) -> Result<Arc<Sample>, String> {
     let file = crate::plugins::resolve_sample(path);
     os_engine::sample::load_shared(Path::new(&file)).map_err(|e| e.to_string())
+}
+
+/// A file's name, for the progress panel.
+fn file_name(path: &str) -> String {
+    Path::new(path).file_name().map_or_else(|| path.to_string(), |n| n.to_string_lossy().into_owned())
 }
 
 fn mono(l: &[f32], r: &[f32]) -> Vec<f32> {
@@ -257,10 +274,9 @@ fn stem(path: &str) -> String {
     [" fitted", " matched", " comp"].iter().find_map(|e| s.strip_suffix(e)).map_or(s.clone(), str::to_string)
 }
 
-/// Writes "<stem> <what>.wav" (a number after it when taken) to the Fitted folder.
-fn write(s: &State, stem: &str, what: &str, rate: u32, l: &[f32], r: &[f32]) -> Result<PathBuf, String> {
-    let dir = out_dir(s);
-    std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+/// Writes "<stem> <what>.wav" (a number after it when taken) to folder `dir`.
+fn write(dir: &Path, stem: &str, what: &str, rate: u32, l: &[f32], r: &[f32]) -> Result<PathBuf, String> {
+    std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     let mut path = dir.join(format!("{stem} {what}.wav"));
     let mut n = 2;
     while path.exists() {
@@ -286,8 +302,10 @@ struct Swap {
 }
 
 /// Gives each channel its new audio, one undo step `name`: the channel's clips in this arrangement keep playing the
-/// same audio (their trims through the map), a fitted stretch time keeps the speed.
+/// same audio (their trims through the map), a fitted stretch time keeps the speed. A channel no longer at its row is
+/// left as it is.
 fn apply(s: &mut State, name: &'static str, swaps: &[Swap]) {
+    let swaps: Vec<&Swap> = swaps.iter().filter(|w| s.project.channels.get(w.row).is_some_and(|c| c.index == w.ch)).collect();
     let snaps: Vec<Snap> = swaps.iter().filter_map(|w| Snap::sample(s, w.row)).collect();
     playlist::snapshot_with(s, name, Snap::Several(snaps));
     for w in swaps {
@@ -328,10 +346,11 @@ fn ms(secs: f64) -> String {
 }
 
 /// Fit to tempo (`os_dsp::flow`) on `target`'s clips, each channel's file once.
-fn fit(s: &mut State, target: Target, feel: Feel) -> String {
+fn fit(app: &mut App, target: Target, feel: Feel) -> Result<(), String> {
+    let s = &app.state;
     let list = targets(s, target);
     if list.is_empty() {
-        return "Fit to tempo works on audio clips: right-click one, or select some".into();
+        return Err("Fit to tempo works on audio clips: right-click one, or select some".into());
     }
     let g = grid();
     let set = feel.settings(if g == 0 { Grid::Auto } else { Grid::Steps(g) });
@@ -342,258 +361,355 @@ fn fit(s: &mut State, target: Target, feel: Feel) -> String {
             per.entry(ch).or_default().push(span(s, &c));
         }
     }
-    let (mut found, mut moved, mut total, mut triplets, mut fast) = (0usize, 0usize, 0.0, 0usize, 0usize);
-    let (mut swaps, mut errors) = (Vec::new(), Vec::new());
-    for (ch, spans) in per {
-        let Some(row) = row_of(s, ch) else { continue };
-        let Some(path) = s.project.channels[row].sample_path.clone() else { continue };
-        let sample = match load(&path) {
-            Ok(x) => x,
-            Err(e) => {
-                errors.push(e);
+    // Each channel's row and file; the audio is worked on the job's thread.
+    let work: Vec<(usize, u16, String, Vec<Span>)> = per
+        .into_iter()
+        .filter_map(|(ch, spans)| {
+            let row = row_of(s, ch)?;
+            Some((row, ch, s.project.channels[row].sample_path.clone()?, spans))
+        })
+        .collect();
+    let dir = out_dir(s);
+    crate::busy::run(app, "Fit to tempo", move |p| {
+        let (mut found, mut moved, mut total, mut triplets, mut fast) = (0usize, 0usize, 0.0, 0usize, 0usize);
+        let (mut swaps, mut errors) = (Vec::new(), Vec::new());
+        let n = work.len();
+        for (k, (row, ch, path, spans)) in work.into_iter().enumerate() {
+            let step = |part: f32, what: &str| p.set((k as f32 + part) / n as f32, format!("{what} {}", file_name(&path)));
+            step(0.0, "Reading");
+            let sample = match load(&path) {
+                Ok(x) => x,
+                Err(e) => {
+                    errors.push(e);
+                    continue;
+                }
+            };
+            step(0.1, "Finding the syllables of");
+            let scan = Scan::new(&mono(&sample.left, &sample.right), sample.rate);
+            step(0.4, "Reading the flow of");
+            let plan = flow::plan(&scan, &spans, &set);
+            found += plan.syllables;
+            moved += plan.moved;
+            total += plan.mean_move * plan.moved as f64;
+            triplets += plan.triplets.len();
+            fast += plan.fast.len();
+            if plan.moved == 0 {
                 continue;
             }
-        };
-        let scan = Scan::new(&mono(&sample.left, &sample.right), sample.rate);
-        let plan = flow::plan(&scan, &spans, &set);
-        found += plan.syllables;
-        moved += plan.moved;
-        total += plan.mean_move * plan.moved as f64;
-        triplets += plan.triplets.len();
-        fast += plan.fast.len();
-        if plan.moved == 0 {
-            continue;
+            step(0.5, "Fitting");
+            let (l, r) = warp::render(&sample.left, &sample.right, sample.rate, &frames(&plan.map, sample.rate));
+            let new = l.len() as f64 / f64::from(sample.rate);
+            step(0.9, "Writing");
+            match write(&dir, &stem(&path), "fitted", sample.rate, &l, &r) {
+                Ok(f) => swaps.push(Swap { row, ch, path: f, map: plan.map, old: scan.len, new }),
+                Err(e) => errors.push(e),
+            }
         }
-        let (l, r) = warp::render(&sample.left, &sample.right, sample.rate, &frames(&plan.map, sample.rate));
-        let new = l.len() as f64 / f64::from(sample.rate);
-        match write(s, &stem(&path), "fitted", sample.rate, &l, &r) {
-            Ok(p) => swaps.push(Swap { row, ch, path: p, map: plan.map, old: scan.len, new }),
-            Err(e) => errors.push(e),
-        }
-    }
-    if !swaps.is_empty() {
-        apply(s, "Fit to tempo", &swaps);
-    }
-    if let Some(e) = errors.first() {
-        return format!("Fit to tempo: {e}");
-    }
-    if found == 0 {
-        return "Fit to tempo: no syllables found in the clip".into();
-    }
-    if moved == 0 {
-        return format!("Fit to tempo: all {found} syllables are already on the beat");
-    }
-    let mut flow = Vec::new();
-    if triplets > 0 {
-        flow.push(format!("{triplets} beats in triplets"));
-    }
-    if fast > 0 {
-        flow.push(format!("{fast} in thirty-seconds"));
-    }
-    let flow = if flow.is_empty() { String::new() } else { format!(" ({})", flow.join(", ")) };
-    format!("Fit to tempo: moved {moved} of {found} syllables, {} on average{flow}", ms(total / moved as f64))
+        Box::new(move |app: &mut App| {
+            if !swaps.is_empty() {
+                apply(&mut app.state, "Fit to tempo", &swaps);
+            }
+            if let Some(e) = errors.first() {
+                return format!("Fit to tempo: {e}");
+            }
+            if found == 0 {
+                return "Fit to tempo: no syllables found in the clip".into();
+            }
+            if moved == 0 {
+                return format!("Fit to tempo: all {found} syllables are already on the beat");
+            }
+            let mut flow = Vec::new();
+            if triplets > 0 {
+                flow.push(format!("{triplets} beats in triplets"));
+            }
+            if fast > 0 {
+                flow.push(format!("{fast} in thirty-seconds"));
+            }
+            let flow = if flow.is_empty() { String::new() } else { format!(" ({})", flow.join(", ")) };
+            format!("Fit to tempo: moved {moved} of {found} syllables, {} on average{flow}", ms(total / moved as f64))
+        })
+    });
+    Ok(())
 }
 
 /// How far either side of where they are placed a clip and its guide may be found apart, seconds.
 const MATCH_REACH: f64 = 0.5;
 
+/// A clip Match timing moves: its channel, row and file, its window in the file and where it starts in the song
+/// (seconds), and how fast it plays its file.
+struct Dub {
+    ch: u16,
+    row: usize,
+    path: String,
+    w0: f64,
+    w1: f64,
+    start: f64,
+    speed: f64,
+}
+
 /// Match timing to track (`os_dsp::align`): each of `target`'s clips (those not on `guide`) moved onto what the guide
 /// track plays over it.
-fn match_to(s: &mut State, target: Target, guide: u16) -> String {
+fn match_to(app: &mut App, target: Target, guide: u16) -> Result<(), String> {
+    let s = &app.state;
     let name = playlist::track_name(s, guide);
     let list: Vec<usize> = targets(s, target).into_iter().filter(|&i| clips(s)[i].track != guide).collect();
     if list.is_empty() {
-        return format!("Match timing to {name}: choose audio clips on another track");
+        return Err(format!("Match timing to {name}: choose audio clips on another track"));
     }
     let strength = if loose() { 0.7 } else { 1.0 };
     let spt = playlist::secs_per_tick(s);
-    // The guide track's audio clips that play, with their samples.
-    let mut guides = Vec::new();
-    for c in clips(s).iter().filter(|c| c.track == guide && !c.muted && is_audio(s, c)) {
-        let ClipSource::Channel(ch) = c.source else { continue };
-        let Some(path) = row_of(s, ch).and_then(|r| s.project.channels[r].sample_path.clone()) else { continue };
-        if let Ok(x) = load(&path) {
+    // The guide track's audio clips that play: from and to in the song, where in its file it starts (seconds), its
+    // speed and file.
+    let guides: Vec<(f64, f64, f64, f64, String)> = clips(s)
+        .iter()
+        .filter(|c| c.track == guide && !c.muted && is_audio(s, c))
+        .filter_map(|c| {
+            let ClipSource::Channel(ch) = c.source else { return None };
+            let path = row_of(s, ch).and_then(|r| s.project.channels[r].sample_path.clone())?;
             let (w0, _) = playlist::window(s, c);
-            let speed = playlist::audio_speed(s, c.source);
-            guides.push((f64::from(c.position) * spt, f64::from(c.end()) * spt, w0 / 1000.0, speed, mono(&x.left, &x.right), x.rate));
-        }
-    }
+            Some((f64::from(c.position) * spt, f64::from(c.end()) * spt, w0 / 1000.0, playlist::audio_speed(s, c.source), path))
+        })
+        .collect();
     if guides.is_empty() {
-        return format!("Match timing to {name}: it has no audio clips that play");
+        return Err(format!("Match timing to {name}: it has no audio clips that play"));
     }
-    let mut per: BTreeMap<u16, Vec<(f64, f64)>> = BTreeMap::new();
-    let (mut count, mut moves, mut total, mut errors) = (0usize, 0usize, 0.0, Vec::new());
-    let mut samples: BTreeMap<u16, Arc<Sample>> = BTreeMap::new();
-    for &i in &list {
-        let c = clips(s)[i];
-        let ClipSource::Channel(ch) = c.source else { continue };
-        let Some(path) = row_of(s, ch).and_then(|r| s.project.channels[r].sample_path.clone()) else { continue };
-        let sample = match samples.get(&ch) {
-            Some(x) => x.clone(),
-            None => match load(&path) {
-                Ok(x) => {
-                    samples.insert(ch, x.clone());
-                    x
-                }
+    let dubs: Vec<Dub> = list
+        .iter()
+        .filter_map(|&i| {
+            let c = clips(s)[i];
+            let ClipSource::Channel(ch) = c.source else { return None };
+            let row = row_of(s, ch)?;
+            let path = s.project.channels[row].sample_path.clone()?;
+            let (w0, w1) = playlist::window(s, &c);
+            Some(Dub { ch, row, path, w0: w0 / 1000.0, w1: w1 / 1000.0, start: f64::from(c.position) * spt, speed: playlist::audio_speed(s, c.source).max(1e-6) })
+        })
+        .collect();
+    let dir = out_dir(s);
+    crate::busy::run(app, "Match timing to track", move |p| {
+        let mut errors = Vec::new();
+        p.set(0.0, format!("Reading {name}"));
+        let guides: Vec<(f64, f64, f64, f64, Vec<f32>, u32)> = guides
+            .into_iter()
+            .filter_map(|(g0, g1, gw, speed, path)| match load(&path) {
+                Ok(x) => Some((g0, g1, gw, speed, mono(&x.left, &x.right), x.rate)),
                 Err(e) => {
                     errors.push(e);
-                    continue;
+                    None
                 }
-            },
-        };
-        let rate = sample.rate;
-        let rf = f64::from(rate);
-        let (w0, w1) = playlist::window(s, &c);
-        let (a, b) = ((w0 / 1000.0 * rf) as usize, (w1 / 1000.0 * rf) as usize);
-        let dub = mono(&cut(&sample.left, a, b), &cut(&sample.right, a, b));
-        if dub.is_empty() {
-            continue;
+            })
+            .collect();
+        if guides.is_empty() {
+            let e = errors.first().cloned().unwrap_or_default();
+            return Box::new(move |_: &mut App| format!("Match timing to {name}: {e}"));
         }
-        // What the guide plays over the clip, in the clip's own time (its sample's seconds from its start).
-        let speed = playlist::audio_speed(s, c.source).max(1e-6);
-        let start = f64::from(c.position) * spt;
-        let mut lead = vec![0.0f32; dub.len()];
-        for (g0, g1, gw, gspeed, gm, grate) in &guides {
-            for (u, v) in lead.iter_mut().enumerate() {
-                let song = start + u as f64 / rf / speed;
-                if song < *g0 || song >= *g1 {
-                    continue;
-                }
-                let p = (gw + (song - g0) * gspeed) * f64::from(*grate);
-                let j = p as usize;
-                if j + 1 < gm.len() {
-                    let f = (p - j as f64) as f32;
-                    *v += gm[j] + (gm[j + 1] - gm[j]) * f;
+        let mut per: BTreeMap<u16, Vec<(f64, f64)>> = BTreeMap::new();
+        let (mut count, mut moves, mut total) = (0usize, 0usize, 0.0);
+        let mut samples: BTreeMap<u16, Arc<Sample>> = BTreeMap::new();
+        let steps = dubs.len() + dubs.iter().map(|d| d.ch).collect::<std::collections::BTreeSet<_>>().len();
+        for (k, d) in dubs.iter().enumerate() {
+            p.step(k, steps, format!("Lining up {}", file_name(&d.path)));
+            let sample = match samples.get(&d.ch) {
+                Some(x) => x.clone(),
+                None => match load(&d.path) {
+                    Ok(x) => {
+                        samples.insert(d.ch, x.clone());
+                        x
+                    }
+                    Err(e) => {
+                        errors.push(e);
+                        continue;
+                    }
+                },
+            };
+            let rate = sample.rate;
+            let rf = f64::from(rate);
+            let (a, b) = ((d.w0 * rf) as usize, (d.w1 * rf) as usize);
+            let dub = mono(&cut(&sample.left, a, b), &cut(&sample.right, a, b));
+            if dub.is_empty() {
+                continue;
+            }
+            // What the guide plays over the clip, in the clip's own time (its sample's seconds from its start).
+            let mut lead = vec![0.0f32; dub.len()];
+            for (g0, g1, gw, gspeed, gm, grate) in &guides {
+                for (u, v) in lead.iter_mut().enumerate() {
+                    let song = d.start + u as f64 / rf / d.speed;
+                    if song < *g0 || song >= *g1 {
+                        continue;
+                    }
+                    let at = (gw + (song - g0) * gspeed) * f64::from(*grate);
+                    let j = at as usize;
+                    if j + 1 < gm.len() {
+                        let f = (at - j as f64) as f32;
+                        *v += gm[j] + (gm[j + 1] - gm[j]) * f;
+                    }
                 }
             }
-        }
-        let (sd, sg) = (Scan::new(&dub, rate), Scan::new(&lead, rate));
-        let (ld, lg) = (align::Look::new(&sd), align::Look::new(&sg));
-        let off = align::offset(&ld, &lg, MATCH_REACH);
-        let path = align::align(&ld, &lg, off, MATCH_REACH);
-        let anchors = align::anchors(&sd, &sg, &path, strength);
-        count += 1;
-        let at = w0 / 1000.0;
-        for (x, y) in anchors {
-            if (y - x).abs() > 1e-3 {
-                moves += 1;
-                total += (y - x).abs();
-            }
-            per.entry(ch).or_default().push((at + x, at + y));
-        }
-    }
-    let mut swaps = Vec::new();
-    for (ch, mut anchors) in per {
-        let (Some(row), Some(sample)) = (row_of(s, ch), samples.get(&ch)) else { continue };
-        let Some(path) = s.project.channels[row].sample_path.clone() else { continue };
-        // The clips' own starts and ends stay where they are.
-        for &i in &list {
-            let c = clips(s)[i];
-            if c.source == ClipSource::Channel(ch) {
-                let (w0, w1) = playlist::window(s, &c);
-                anchors.extend([(w0 / 1000.0 + 1e-3, w0 / 1000.0 + 1e-3), (w1 / 1000.0 - 1e-3, w1 / 1000.0 - 1e-3)]);
+            let (sd, sg) = (Scan::new(&dub, rate), Scan::new(&lead, rate));
+            let (ld, lg) = (align::Look::new(&sd), align::Look::new(&sg));
+            let off = align::offset(&ld, &lg, MATCH_REACH);
+            let path = align::align(&ld, &lg, off, MATCH_REACH);
+            let anchors = align::anchors(&sd, &sg, &path, strength);
+            count += 1;
+            for (x, y) in anchors {
+                if (y - x).abs() > 1e-3 {
+                    moves += 1;
+                    total += (y - x).abs();
+                }
+                per.entry(d.ch).or_default().push((d.w0 + x, d.w0 + y));
             }
         }
-        anchors.sort_by(|a, b| a.0.total_cmp(&b.0));
-        let scan = Scan::new(&mono(&sample.left, &sample.right), sample.rate);
-        let map = retime::map(&scan, &anchors);
-        let (l, r) = warp::render(&sample.left, &sample.right, sample.rate, &frames(&map, sample.rate));
-        let new = l.len() as f64 / f64::from(sample.rate);
-        match write(s, &stem(&path), "matched", sample.rate, &l, &r) {
-            Ok(p) => swaps.push(Swap { row, ch, path: p, map, old: scan.len, new }),
-            Err(e) => errors.push(e),
+        let mut swaps = Vec::new();
+        for (k, (ch, mut anchors)) in per.into_iter().enumerate() {
+            let (Some(d), Some(sample)) = (dubs.iter().find(|d| d.ch == ch), samples.get(&ch)) else { continue };
+            p.step(dubs.len() + k, steps, format!("Moving {}", file_name(&d.path)));
+            // The clips' own starts and ends stay where they are.
+            for d in dubs.iter().filter(|d| d.ch == ch) {
+                anchors.extend([(d.w0 + 1e-3, d.w0 + 1e-3), (d.w1 - 1e-3, d.w1 - 1e-3)]);
+            }
+            anchors.sort_by(|a, b| a.0.total_cmp(&b.0));
+            let scan = Scan::new(&mono(&sample.left, &sample.right), sample.rate);
+            let map = retime::map(&scan, &anchors);
+            let (l, r) = warp::render(&sample.left, &sample.right, sample.rate, &frames(&map, sample.rate));
+            let new = l.len() as f64 / f64::from(sample.rate);
+            match write(&dir, &stem(&d.path), "matched", sample.rate, &l, &r) {
+                Ok(f) => swaps.push(Swap { row: d.row, ch, path: f, map, old: scan.len, new }),
+                Err(e) => errors.push(e),
+            }
         }
-    }
-    if let Some(e) = errors.first() {
-        if swaps.is_empty() {
-            return format!("Match timing to {name}: {e}");
-        }
-    }
-    if moves == 0 || swaps.is_empty() {
-        return format!("Match timing to {name}: already in time with it");
-    }
-    apply(s, "Match timing to track", &swaps);
-    let clips_word = if count == 1 { "clip" } else { "clips" };
-    format!("Matched {count} {clips_word} to {name}'s timing: {moves} syllables moved, {} on average", ms(total / moves as f64))
+        Box::new(move |app: &mut App| {
+            if let Some(e) = errors.first() {
+                if swaps.is_empty() {
+                    return format!("Match timing to {name}: {e}");
+                }
+            }
+            if moves == 0 || swaps.is_empty() {
+                return format!("Match timing to {name}: already in time with it");
+            }
+            apply(&mut app.state, "Match timing to track", &swaps);
+            let clips_word = if count == 1 { "clip" } else { "clips" };
+            format!("Matched {count} {clips_word} to {name}'s timing: {moves} syllables moved, {} on average", ms(total / moves as f64))
+        })
+    });
+    Ok(())
 }
 
-/// Comp takes (`os_dsp::comp`): `target`'s clips are the takes; the comp goes on a free track under them, at the
-/// reference take's place, and the takes are muted.
-fn comp_takes(s: &mut State, target: Target) -> String {
+/// A clip Comp takes reads: its file, its window in it (seconds), where it starts in the song (tick) and how fast it
+/// plays its file.
+struct TakeClip {
+    path: String,
+    from: f64,
+    to: f64,
+    at: u32,
+    speed: f64,
+}
+
+/// Comp takes (`os_dsp::comp`): `target`'s clips are the takes, or the takes are found in its one clip
+/// (`comp::split`). The comp goes on a free track under them, at the reference take's place, and the clips are muted.
+fn comp_takes(app: &mut App, target: Target) -> Result<(), String> {
+    let s = &app.state;
     let list = targets(s, target);
-    if list.len() < 2 {
-        return "Comp takes: select two or more takes of the same part (audio clips)".into();
+    if list.is_empty() {
+        return Err("Comp takes: select two or more takes of the same part (audio clips), or a clip with several takes in it".into());
     }
-    // Each take as it plays: its clip's stretch of its sample, at the first take's rate.
-    let mut rate = 0u32;
-    let mut audio: Vec<(Vec<f32>, Vec<f32>)> = Vec::with_capacity(list.len());
-    let mut first_path = String::new();
+    let mut takes = Vec::with_capacity(list.len());
     for &i in &list {
         let c = clips(s)[i];
         let ClipSource::Channel(ch) = c.source else { continue };
         let Some(path) = row_of(s, ch).and_then(|r| s.project.channels[r].sample_path.clone()) else {
-            return "Comp takes: a take has no audio".into();
+            return Err("Comp takes: a take has no audio".into());
         };
-        let x = match load(&path) {
-            Ok(x) => x,
-            Err(e) => return format!("Comp takes: {e}"),
-        };
-        if rate == 0 {
-            rate = x.rate;
-            first_path = path;
-        }
-        let rf = f64::from(x.rate);
         let (w0, w1) = playlist::window(s, &c);
-        let (a, b) = ((w0 / 1000.0 * rf) as usize, (w1 / 1000.0 * rf) as usize);
-        audio.push((resample(&cut(&x.left, a, b), x.rate, rate), resample(&cut(&x.right, a, b), x.rate, rate)));
+        takes.push(TakeClip { path, from: w0 / 1000.0, to: w1 / 1000.0, at: c.position, speed: playlist::audio_speed(s, c.source).max(1e-6) });
     }
-    if audio.iter().any(|(l, _)| (l.len() as f64) < f64::from(rate) * 0.5) {
-        return "Comp takes: a take is too short (less than half a second)".into();
-    }
-    let monos: Vec<Vec<f32>> = audio.iter().map(|(l, r)| mono(l, r)).collect();
-    let scans: Vec<Scan> = monos.iter().map(|m| Scan::new(m, rate)).collect();
-    let takes: Vec<comp::Take> = monos.iter().zip(&scans).map(|(m, sc)| comp::Take { mono: m, scan: sc }).collect();
-    let c = comp::comp(&takes);
-    let used = c.used();
-    let parts: Vec<(Vec<f32>, Vec<f32>)> = (0..audio.len())
-        .map(|k| {
-            if !used.contains(&k) {
-                (Vec::new(), Vec::new())
-            } else if k == c.reference {
-                audio[k].clone()
-            } else {
-                warp::render(&audio[k].0, &audio[k].1, rate, &frames(&c.map(k, &takes), rate))
-            }
-        })
-        .collect();
-    let (l, r) = comp::assemble(&parts, &c, rate, audio[c.reference].0.len());
-    let path = match write(s, &stem(&first_path), "comp", rate, &l, &r) {
-        Ok(p) => p,
-        Err(e) => return format!("Comp takes: {e}"),
-    };
-    let reference = clips(s)[list[c.reference]];
+    let spt = playlist::secs_per_tick(s);
+    let muted: Vec<(u32, u16, ClipSource)> = list.iter().map(|&i| clips(s)[i]).map(|c| (c.position, c.track, c.source)).collect();
     let below = list.iter().map(|&i| clips(s)[i].track).max().unwrap_or(0).saturating_add(1).min(playlist::TRACKS - 1);
-    let track = playlist::free_track(s, below, reference.position, reference.end());
-    let takes_at: Vec<(u32, u16, ClipSource)> = list.iter().map(|&i| clips(s)[i]).map(|c| (c.position, c.track, c.source)).collect();
-    let text = path.to_string_lossy().into_owned();
-    if playlist::add_audio_clip_as(s, &text, track, reference.position, "Comp takes").is_none() {
-        return format!("Comp takes: {text} could not be read");
-    }
-    if let Some(a) = s.project.arrangement_mut() {
-        for cl in a.clips.iter_mut().filter(|cl| takes_at.contains(&(cl.position, cl.track, cl.source))) {
-            cl.muted = true;
+    let dir = out_dir(s);
+    crate::busy::run(app, "Comp takes", move |p| {
+        let fail = |e: String| -> crate::busy::Finish { Box::new(move |_: &mut App| format!("Comp takes: {e}")) };
+        // Each take as it plays, at the first file's rate, and where it starts in the song.
+        let single = takes.len() == 1;
+        let mut rate = 0u32;
+        let mut audio: Vec<(Vec<f32>, Vec<f32>)> = Vec::new();
+        let mut starts: Vec<u32> = Vec::new();
+        for (k, t) in takes.iter().enumerate() {
+            p.step(k, takes.len() * 3, format!("Reading {}", file_name(&t.path)));
+            let x = match load(&t.path) {
+                Ok(x) => x,
+                Err(e) => return fail(e),
+            };
+            if rate == 0 {
+                rate = x.rate;
+            }
+            let rf = f64::from(x.rate);
+            let (a, b) = ((t.from * rf) as usize, (t.to * rf) as usize);
+            let (l, r) = (cut(&x.left, a, b), cut(&x.right, a, b));
+            if !single {
+                audio.push((resample(&l, x.rate, rate), resample(&r, x.rate, rate)));
+                starts.push(t.at);
+                continue;
+            }
+            // One clip: the takes in it, each where it plays in the song.
+            p.set(0.1, "Finding the takes in the clip");
+            let found = comp::split(&align::Look::new(&Scan::new(&mono(&l, &r), x.rate)));
+            if found.len() < 2 {
+                return fail("only one take found in the clip. Record the part two or more times in it, one after another, or select clips that are takes".into());
+            }
+            for (f0, f1) in found {
+                let (fa, fb) = ((f0 * rf) as usize, (f1 * rf) as usize);
+                audio.push((cut(&l, fa, fb), cut(&r, fa, fb)));
+                starts.push(t.at + (f0 / t.speed / spt).round() as u32);
+            }
         }
-    }
-    s.piano.dirty = true;
-    let order: Vec<String> = c.phrases.iter().map(|p| (p.take + 1).to_string()).collect();
-    let phrases = if c.phrases.len() == 1 { "1 phrase".to_string() } else { format!("{} phrases", c.phrases.len()) };
-    format!(
-        "Comp of {} takes on {}: {phrases}, from takes {} in turn, in time with take {}",
-        list.len(),
-        playlist::track_name(s, track),
-        order.join(", "),
-        c.reference + 1
-    )
+        if audio.iter().any(|(l, _)| (l.len() as f64) < f64::from(rate) * 0.5) {
+            return fail("a take is too short (less than half a second)".into());
+        }
+        p.set(0.35, format!("Lining up {} takes", audio.len()));
+        let monos: Vec<Vec<f32>> = audio.iter().map(|(l, r)| mono(l, r)).collect();
+        let scans: Vec<Scan> = monos.iter().map(|m| Scan::new(m, rate)).collect();
+        let parts: Vec<comp::Take> = monos.iter().zip(&scans).map(|(m, sc)| comp::Take { mono: m, scan: sc }).collect();
+        let c = comp::comp(&parts);
+        let used = c.used();
+        let fitted: Vec<(Vec<f32>, Vec<f32>)> = (0..audio.len())
+            .map(|k| {
+                p.set(0.6 + 0.3 * k as f32 / audio.len() as f32, format!("Fitting take {} to take {}", k + 1, c.reference + 1));
+                if !used.contains(&k) {
+                    (Vec::new(), Vec::new())
+                } else if k == c.reference {
+                    audio[k].clone()
+                } else {
+                    warp::render(&audio[k].0, &audio[k].1, rate, &frames(&c.map(k, &parts), rate))
+                }
+            })
+            .collect();
+        p.set(0.92, "Joining the phrases");
+        let (l, r) = comp::assemble(&fitted, &c, rate, audio[c.reference].0.len());
+        let path = match write(&dir, &stem(&takes[0].path), "comp", rate, &l, &r) {
+            Ok(f) => f,
+            Err(e) => return fail(e),
+        };
+        let (at, len) = (starts[c.reference], l.len() as f64 / f64::from(rate));
+        let (count, reference) = (audio.len(), c.reference);
+        let order: Vec<String> = c.phrases.iter().map(|ph| (ph.take + 1).to_string()).collect();
+        let phrases = if c.phrases.len() == 1 { "1 phrase".to_string() } else { format!("{} phrases", c.phrases.len()) };
+        Box::new(move |app: &mut App| {
+            let s = &mut app.state;
+            let track = playlist::free_track(s, below, at, at + ((len / spt).round() as u32).max(1));
+            let text = path.to_string_lossy().into_owned();
+            if playlist::add_audio_clip_as(s, &text, track, at, "Comp takes").is_none() {
+                return format!("Comp takes: {text} could not be read");
+            }
+            if let Some(a) = s.project.arrangement_mut() {
+                for cl in a.clips.iter_mut().filter(|cl| muted.contains(&(cl.position, cl.track, cl.source))) {
+                    cl.muted = true;
+                }
+            }
+            s.piano.dirty = true;
+            let of = if single { format!("{count} takes found in the clip") } else { format!("{count} takes") };
+            format!("Comp of {of} on {}: {phrases}, from takes {} in turn, in time with take {}", playlist::track_name(s, track), order.join(", "), reference + 1)
+        })
+    });
+    Ok(())
 }
 
 #[cfg(test)]
@@ -611,12 +727,19 @@ mod tests {
     /// A rough rapped line: vowels (a pulse train's harmonics around a formant) each after a short consonant burst,
     /// at `at` seconds, written to a WAV in the temp folder.
     fn take(name: &str, at: &[f64], secs: f64) -> PathBuf {
+        let v: Vec<(f64, usize)> = at.iter().enumerate().map(|(k, &t)| (t, k % 4)).collect();
+        take_with(name, &v, secs)
+    }
+
+    /// `take` with each syllable's vowel (of seven) given.
+    fn take_with(name: &str, at: &[(f64, usize)], secs: f64) -> PathBuf {
         let n = (secs * f64::from(RATE)) as usize;
         let mut x = vec![0.0f32; n];
         let mut seed = 0x9e37_79b9_u32;
-        for (k, &t) in at.iter().enumerate() {
-            let f0 = 120.0 + 10.0 * (k % 4) as f64;
-            let formant = [700.0, 400.0, 550.0, 300.0][k % 4];
+        for &(t, vowel) in at {
+            let f0 = 120.0 + 10.0 * (vowel % 4) as f64 + 3.0 * (vowel / 4) as f64;
+            // Two formants, as a vowel has: what tells the vowels apart.
+            let (formant, second) = [(700.0, 1100.0), (400.0, 2000.0), (550.0, 1700.0), (300.0, 800.0), (850.0, 1300.0), (250.0, 2400.0), (480.0, 1000.0)][vowel % 7];
             let start = (t * f64::from(RATE)) as usize;
             for i in 0..(0.012 * f64::from(RATE)) as usize {
                 seed ^= seed << 13;
@@ -633,7 +756,7 @@ mod tests {
                 let mut v = 0.0;
                 for h in 1..30 {
                     let f = f0 * f64::from(h);
-                    let w = 1.0 / (1.0 + ((f - formant) / 150.0).powi(2)) + 0.3 / (1.0 + ((f - 1200.0) / 200.0).powi(2));
+                    let w = 1.0 / (1.0 + ((f - formant) / 150.0).powi(2)) + 0.5 / (1.0 + ((f - second) / 200.0).powi(2));
                     v += w * (std::f64::consts::TAU * f * tt).sin();
                 }
                 if let Some(o) = x.get_mut(start + i) {
@@ -669,7 +792,8 @@ mod tests {
         let i = playlist::add_audio_clip_as(s, &text, 0, 0, "Test").expect("clip");
         let ClipSource::Channel(ch) = clips(s)[i].source else { panic!() };
         let row = row_of(s, ch).unwrap();
-        let msg = run(&mut app, TCmd::Fit(Target::Clip(i), Feel::Tight)).unwrap();
+        assert_eq!(run(&mut app, TCmd::Fit(Target::Clip(i), Feel::Tight)), None, "started");
+        let msg = crate::busy::wait(&mut app).unwrap();
         assert!(msg.starts_with("Fit to tempo: moved "), "{msg}");
         let now = app.state.project.channels[row].sample_path.clone().unwrap();
         assert!(now.ends_with("fitted.wav") && Path::new(&now).parent().unwrap().ends_with("Fitted"), "{now}");
@@ -699,7 +823,8 @@ mod tests {
         playlist::add_audio_clip_as(&mut app.state, &tl, 0, 0, "Test").expect("lead");
         let i = playlist::add_audio_clip_as(&mut app.state, &td, 1, 0, "Test").expect("double");
         app.state.playlist.sel.clear();
-        let msg = run(&mut app, TCmd::Match(Target::Clip(i), 0)).unwrap();
+        assert_eq!(run(&mut app, TCmd::Match(Target::Clip(i), 0)), None, "started");
+        let msg = crate::busy::wait(&mut app).unwrap();
         assert!(msg.starts_with("Matched 1 clip to Track 1's timing"), "{msg}");
         let ClipSource::Channel(ch) = clips(&app.state)[i].source else { panic!() };
         let now = app.state.project.channel(ch).and_then(|c| c.sample_path.clone()).unwrap();
@@ -737,7 +862,8 @@ mod tests {
         let s = &mut app.state;
         s.playlist.sel = (0..clips(s).len()).collect();
         let n = clips(s).len();
-        let msg = run(&mut app, TCmd::Comp(Target::Selected)).unwrap();
+        assert_eq!(run(&mut app, TCmd::Comp(Target::Selected)), None, "started");
+        let msg = crate::busy::wait(&mut app).unwrap();
         assert!(msg.starts_with("Comp of 3 takes on Track 4"), "{msg}");
         let all = clips(&app.state);
         assert_eq!(all.len(), n + 1);
@@ -753,7 +879,46 @@ mod tests {
         }
     }
 
-    /// The menus: an audio clip's has the three tools, Comp greyed out for one clip; the grid radio follows the setting.
+    /// Comp takes on one clip: a recording of the same line three times in a row becomes a comp of the three takes
+    /// found in it, on a free track under the clip, which is muted.
+    #[test]
+    fn comp_takes_finds_the_takes_in_one_clip() {
+        let mut app = app();
+        at_tempo(&mut app);
+        // The line: two phrases of six syllables, its vowels in no repeating order.
+        const LINE: [usize; 12] = [0, 4, 1, 5, 2, 6, 3, 0, 6, 2, 5, 1];
+        let mut at = Vec::new();
+        for k in 0..3 {
+            let start = 4.2 * f64::from(k) + 0.02 * f64::from(k);
+            let times = (0..6).map(|i| start + 0.3 + f64::from(i) * 0.2).chain((0..6).map(|i| start + 2.0 + f64::from(i) * 0.2));
+            at.extend(times.zip(LINE));
+        }
+        let file = take_with("comp-one", &at, 13.0);
+        let text = file.to_string_lossy().into_owned();
+        let i = playlist::add_audio_clip_as(&mut app.state, &text, 0, 0, "Test").expect("clip");
+        app.state.playlist.sel.clear();
+        let items = clip_items(&app.state, i);
+        let comp = items.iter().find(|p| matches!(p.cmd, Cmd::Timing(TCmd::Comp(_)))).unwrap();
+        assert!(comp.enabled && comp.label == "Comp takes in this clip", "{}", comp.label);
+        assert_eq!(run(&mut app, TCmd::Comp(Target::Clip(i))), None, "started");
+        let msg = crate::busy::wait(&mut app).unwrap();
+        assert!(msg.starts_with("Comp of 3 takes found in the clip on Track 2"), "{msg}");
+        let all = clips(&app.state);
+        assert!(all[i].muted, "the clip is muted");
+        let new = all.iter().find(|c| !c.muted).unwrap();
+        assert_eq!(new.track, 1);
+        let ClipSource::Channel(ch) = new.source else { panic!() };
+        let path = app.state.project.channel(ch).and_then(|c| c.sample_path.clone()).unwrap();
+        // One take long, its 12 syllables.
+        let out = load(&path).unwrap();
+        let scan = Scan::new(&mono(&out.left, &out.right), out.rate);
+        assert_eq!(scan.syllables.len(), 12, "{:?}", scan.syllables.iter().map(|y| y.at).collect::<Vec<_>>());
+        assert!(scan.len < 4.0, "{}", scan.len);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&file);
+    }
+
+    /// The menus: Fit to tempo's feels and grids, every entry with its tip; Match lists the tracks with audio.
     #[test]
     fn the_menus_have_the_tools_with_tips() {
         let app = app();

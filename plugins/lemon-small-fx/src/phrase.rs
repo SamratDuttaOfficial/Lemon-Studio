@@ -377,6 +377,20 @@ impl Kind for PhraseKind {
 
 pub type LemonPhrase = SmallFx<PhraseKind>;
 
+/// What each setting does (the editor's tooltip).
+pub fn tip(id: &str) -> &'static str {
+    match id {
+        "key" => "The key's root note, used while key detection is on Manual key",
+        "scale" => "The notes the voice is pulled to: the scale of the key",
+        "auto" => "Auto key finds the key and scale from what is sung and follows it; Manual key uses the Key and Scale set here",
+        "voice" => "What goes in: the pitch range listened over. Pick the closest for the steadiest reading",
+        "amount" => "How much of the way each out-of-tune note is moved onto the scale",
+        "tighten" => "Also pulls what wavers inside each note in towards its centre: vibrato and scoops get smaller",
+        "glide" => "How long the pitch takes to move from one note's correction to the next, ms",
+        _ => "",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

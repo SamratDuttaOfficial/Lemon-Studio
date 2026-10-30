@@ -960,6 +960,27 @@ impl Kind for PitchKind {
 
 pub type LemonPitch = SmallFx<PitchKind>;
 
+/// What each setting does (the editor's tooltip).
+pub fn tip(id: &str) -> &'static str {
+    match id {
+        "key" => "The key's root note, used while key detection is on Manual key",
+        "scale" => "The notes the voice is pulled to: the scale of the key",
+        "auto" => "Auto key finds the key and scale from what is sung and follows it; Manual key uses the Key and Scale set here",
+        "voice" => "What goes in: the pitch range listened over. Pick the closest for the steadiest reading",
+        "retune" => "How fast notes are pulled onto pitch, in ms: 0 snaps at once (the hard-tuned effect), higher sounds natural",
+        "humanize" => "Slows the correction on held notes so they keep their natural movement; short notes stay tight",
+        "flex" => "Leaves small slips from the note partly alone, for a looser, more human sound",
+        "amount" => "How much of the way to the note the pitch is moved",
+        "vib_rate" => "How fast the vibrato added to held notes goes",
+        "vib_depth" => "How deep the added vibrato is (0: none added)",
+        "vib_delay" => "How long a note is held before the added vibrato starts, ms",
+        "transpose" => "Moves the whole voice up or down, in semitones",
+        "tuning" => "The pitch of A4 the notes are tuned to, in Hz (440 is standard), to match an instrument tuned a little off",
+        "notes" => "Click a key to turn that note off: the voice is never pulled to a note that is off",
+        _ => "",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

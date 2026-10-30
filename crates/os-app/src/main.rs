@@ -25,6 +25,7 @@ mod audio_bench;
 mod open_bench;
 mod browser;
 mod browser_index;
+mod busy;
 mod cable;
 mod capture;
 mod one_click;
@@ -826,7 +827,9 @@ impl ApplicationHandler for Shell {
             WindowEvent::MouseWheel { .. } | WindowEvent::DroppedFile(_) => true,
             _ => false,
         };
-        if press && self.app.loading() {
+        // Behind a slow edit's panel (`busy`) the space bar still starts and stops playback.
+        let space = matches!(&event, WindowEvent::KeyboardInput { event, .. } if event.logical_key == winit::keyboard::Key::Named(winit::keyboard::NamedKey::Space));
+        if press && self.app.loading() && !(space && self.app.busy.is_some() && !self.app.project_busy()) {
             return;
         }
         // Linux: a wheel turn over a docked plugin window is the plugin window's alone; nothing behind it scrolls

@@ -1334,6 +1334,8 @@ pub struct App {
     pub(crate) missing: crate::missing::Missing,
     /// A zipped project being unzipped or written (`crate::zipped`): its panel shows, input waits.
     pub(crate) zipping: Option<crate::zipped::Zipping>,
+    /// A slow edit worked out on a thread behind a progress panel (`busy`).
+    pub(crate) busy: Option<crate::busy::Busy>,
     /// While a project loads: when the plugin hosts stop for this tick (`host_plugins`), and whether one stopped with
     /// instances left to start.
     host_deadline: Option<std::time::Instant>,
@@ -1544,6 +1546,7 @@ impl App {
             loading: None,
             missing: Default::default(),
             zipping: None,
+            busy: None,
             host_deadline: None,
             host_more: false,
             export: None,
@@ -2373,9 +2376,15 @@ impl App {
         past
     }
 
-    /// A project is loading or an export is rendering: the window shows the progress and takes no input (spec:
+    /// A project is loading, an export is rendering or a slow edit is under way (`busy`): the window shows the progress
+    /// and takes no input (spec:
     /// ui/project-loading.md §2).
     pub fn loading(&self) -> bool {
+        self.project_busy() || self.busy.is_some()
+    }
+
+    /// A project loading, an export, a search for missing files or a zip under way (`loading` less a slow edit).
+    pub fn project_busy(&self) -> bool {
         self.loading.is_some() || self.export.is_some() || self.missing.search.is_some() || self.zipping.is_some()
     }
 
@@ -2476,6 +2485,7 @@ impl App {
         self.export_tick();
         crate::missing::tick(self);
         crate::zipped::tick(self);
+        crate::busy::tick(self);
         self.midi_tick();
         self.mixer_tick();
         self.follow_ids(false, true);
@@ -4172,6 +4182,9 @@ impl App {
         }
         if let Some(z) = &self.zipping {
             crate::zipped::paint(canvas, &self.theme.colors, z);
+        }
+        if let Some(b) = &self.busy {
+            crate::busy::paint(canvas, &self.theme.colors, b);
         }
         if let Some((name, p)) = &self.export {
             let status = format!("Rendering {name}   {:.0} %", p * 100.0);
@@ -17388,7 +17401,8 @@ mod tests {
         assert_eq!(pl::clips(&app.state)[0].position, step + 5, "one undo step");
         // Export: two files (tracks 1 and 3), the same length, each with sound only where its clip is.
         app.state.path = Some(std::env::temp_dir().join(format!("os-export-{}.flp", std::process::id())));
-        let m = pl::run(&mut app, pl::Cmd::ExportTracks).unwrap();
+        assert_eq!(pl::run(&mut app, pl::Cmd::ExportTracks), None, "started");
+        let m = crate::busy::wait(&mut app).unwrap();
         let dir = std::env::temp_dir().join("Rendered").join(format!("os-export-{} tracks", std::process::id()));
         assert!(m.starts_with("Exported 2 tracks"), "{m}");
         let read = |name: &str| os_engine::sample::load(&dir.join(name)).expect(name);
