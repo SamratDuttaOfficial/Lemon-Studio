@@ -1,0 +1,10 @@
+OSPRESET 1
+plugin=Lemon Phrase	id=clap:org.openstudio.lemon-phrase	format=clap	body=params
+# Auto key, low voice, 100%, tighten 15%.
+Key = 0
+Scale = 1
+Key detection = 1
+Input = 2
+Amount = 100
+Tighten = 15
+Transition = 35

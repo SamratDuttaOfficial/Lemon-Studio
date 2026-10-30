@@ -267,7 +267,7 @@ fn notes_text(mask: i32) -> String {
 }
 
 /// A note name (`C`, `F#`, `Bb`; an octave after it is ignored) as 0 to 11.
-fn note_index(s: &str) -> Option<i32> {
+pub(crate) fn note_index(s: &str) -> Option<i32> {
     let s = s.trim().to_ascii_lowercase();
     let mut c = s.chars();
     let base = match c.next()? {
@@ -341,7 +341,7 @@ impl LowPass {
 }
 
 /// Decimated samples between readings.
-const HOP: usize = 32;
+pub(crate) const HOP: usize = 32;
 const RING: usize = 4096;
 /// YIN's threshold, and the worst dip still taken as pitched when none goes under it.
 const YIN: f32 = 0.15;
@@ -541,7 +541,7 @@ impl KeyFinder {
 // The shift
 
 /// Pitch-synchronous overlap-add on two channels, with a constant latency.
-struct Psola {
+pub(crate) struct Psola {
     x: [Vec<f32>; 2],
     acc: [Vec<f32>; 2],
     wsum: Vec<f32>,
@@ -559,11 +559,11 @@ struct Psola {
     pmax: usize,
     /// How far behind the input a pitch reading is (samples): the ratio for a moment was given this much later.
     look: usize,
-    lat: usize,
+    pub(crate) lat: usize,
 }
 
 impl Psola {
-    fn new(pmax: usize, look: usize) -> Psola {
+    pub(crate) fn new(pmax: usize, look: usize) -> Psola {
         let size = (6 * pmax + 64).next_power_of_two();
         Psola {
             x: [vec![0.0; size], vec![0.0; size]],
@@ -605,7 +605,7 @@ impl Psola {
 
     /// Takes a frame with the period now (samples), the pitch ratio to play it at and whether it is pitched; gives the
     /// shifted frame, the input frame `lat` frames ago and whether that one was pitched.
-    fn run(&mut self, x: [f32; 2], period: f32, ratio: f32, voiced: bool) -> ([f32; 2], [f32; 2], bool) {
+    pub(crate) fn run(&mut self, x: [f32; 2], period: f32, ratio: f32, voiced: bool) -> ([f32; 2], [f32; 2], bool) {
         let m = self.wsum.len() - 1;
         let i = self.n as usize & m;
         (self.x[0][i], self.x[1][i]) = (x[0], x[1]);
@@ -736,7 +736,7 @@ pub struct PitchFix {
 }
 
 /// One-pole coefficient for a time constant of `ms` at `rate` (1 for none).
-fn coef(ms: f32, rate: f32) -> f32 {
+pub(crate) fn coef(ms: f32, rate: f32) -> f32 {
     if ms < 0.05 { 1.0 } else { 1.0 - (-1000.0 / (ms * rate)).exp() }
 }
 

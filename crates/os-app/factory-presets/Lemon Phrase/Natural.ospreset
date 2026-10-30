@@ -1,0 +1,10 @@
+OSPRESET 1
+plugin=Lemon Phrase	id=clap:org.openstudio.lemon-phrase	format=clap	body=params
+# 70%, 80 ms: notes nudged most of the way, nothing sounds tuned.
+Key = 0
+Scale = 1
+Key detection = 1
+Input = 1
+Amount = 70
+Tighten = 0
+Transition = 75

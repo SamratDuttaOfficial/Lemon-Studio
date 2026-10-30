@@ -1,0 +1,10 @@
+OSPRESET 1
+plugin=Lemon Phrase	id=clap:org.openstudio.lemon-phrase	format=clap	body=params
+# 100%, tighten 50%, 20 ms: notes dead on, wobbles calmed.
+Key = 0
+Scale = 1
+Key detection = 1
+Input = 1
+Amount = 100
+Tighten = 50
+Transition = 15

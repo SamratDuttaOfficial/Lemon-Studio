@@ -4,10 +4,10 @@
 
 //! Lemon Studio's small effects as VST3 / CLAP plugins (nih-plug): Lemon Soft Clipper, Lemon Fast Distortion, Lemon
 //! Balance, Lemon Stereo Enhancer, Lemon Transient Processor, Lemon Chorus, Lemon Stereo Shaper, Lemon Filter, Lemon
-//! Flanger, Lemon Phaser, Lemon Spritz, Lemon Pitch and Lemon Mouth. Each is a handful of settings over a sound, so
-//! they share everything but their description: the plugin, its parameters and saved state ([`params`]), the Pith editor
-//! ([`editor`], [`view`]). A description ([`Spec`]) gives the settings, their value texts, the editor's cards and
-//! controls, and the sound. The plugin modules (`plugins/lemon-soft-clipper` and the others) export one each.
+//! Flanger, Lemon Phaser, Lemon Spritz, Lemon Pitch, Lemon Mouth and Lemon Phrase. Each is a handful of settings over a
+//! sound, so they share everything but their description: the plugin, its parameters and saved state ([`params`]), the
+//! Pith editor ([`editor`], [`view`]). A description ([`Spec`]) gives the settings, their value texts, the editor's
+//! cards and controls, and the sound. The plugin modules (`plugins/lemon-soft-clipper` and the others) export one each.
 //!
 // spec: plugins/lemon-small-effects.md (§1 how they are built, §5 parameters and state), the plugin pages
 // (plugins/lemon-soft-clipper.md, lemon-fast-distortion.md, lemon-balance.md, lemon-stereo-enhancer.md,
@@ -24,6 +24,7 @@ pub mod flanger;
 pub mod params;
 pub mod phaser;
 pub mod mouth;
+pub mod phrase;
 pub mod pitch;
 pub mod soft_clipper;
 pub mod spectral;
@@ -358,7 +359,7 @@ impl<K: Kind> Vst3Plugin for SmallFx<K> {
 mod tests {
     use super::*;
 
-    pub const SPECS: [&Spec; 13] = [
+    pub const SPECS: [&Spec; 14] = [
         soft_clipper::SPEC,
         fast_distortion::SPEC,
         balance::SPEC,
@@ -372,6 +373,7 @@ mod tests {
         spritz::SPEC,
         pitch::SPEC,
         mouth::SPEC,
+        phrase::SPEC,
     ];
 
     /// Every effect: ids unique, starts inside the ranges, a control per setting, the plugin ids distinct.
@@ -409,6 +411,7 @@ mod tests {
             <spritz::LemonSpritz as ClapPlugin>::CLAP_ID,
             <pitch::LemonPitch as ClapPlugin>::CLAP_ID,
             <mouth::LemonMouth as ClapPlugin>::CLAP_ID,
+            <phrase::LemonPhrase as ClapPlugin>::CLAP_ID,
         ];
         let classes = [
             <soft_clipper::LemonSoftClipper as Vst3Plugin>::VST3_CLASS_ID,
@@ -424,6 +427,7 @@ mod tests {
             <spritz::LemonSpritz as Vst3Plugin>::VST3_CLASS_ID,
             <pitch::LemonPitch as Vst3Plugin>::VST3_CLASS_ID,
             <mouth::LemonMouth as Vst3Plugin>::VST3_CLASS_ID,
+            <phrase::LemonPhrase as Vst3Plugin>::VST3_CLASS_ID,
         ];
         for i in 0..ids.len() {
             for j in i + 1..ids.len() {
@@ -492,7 +496,7 @@ mod tests {
             }
             v.into_iter().map(|x| x.expect("every parameter listed")).collect()
         };
-        for spec in [soft_clipper::SPEC, fast_distortion::SPEC, stereo_enhancer::SPEC, transient_processor::SPEC, chorus::SPEC, stereo_shaper::SPEC, filter::SPEC, spritz::SPEC, pitch::SPEC, mouth::SPEC] {
+        for spec in [soft_clipper::SPEC, fast_distortion::SPEC, stereo_enhancer::SPEC, transient_processor::SPEC, chorus::SPEC, stereo_shaper::SPEC, filter::SPEC, spritz::SPEC, pitch::SPEC, mouth::SPEC, phrase::SPEC] {
             for name in all(spec) {
                 read(spec, &name);
             }
@@ -528,6 +532,8 @@ mod tests {
         assert_eq!(all(pitch::SPEC).len(), 8);
         assert_eq!(read(mouth::SPEC, "Wet mouth"), [75, 100, 40, 500, 0]);
         assert_eq!(all(mouth::SPEC).len(), 6);
+        assert_eq!(read(phrase::SPEC, "Tight pop"), [0, 1, 1, 1, 100, 50, 20]);
+        assert_eq!(all(phrase::SPEC).len(), 7);
         // FL's 27 Flanger and 27 Phaser presets. Their Default presets are not what a new instance holds: the Flanger's has
         // the phase at 119 and the feedback at 24 (a new one 118 and 23), the Phaser's is a slower, all-wet sweep.
         for spec in [flanger::SPEC, phaser::SPEC] {

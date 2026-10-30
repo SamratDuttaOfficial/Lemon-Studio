@@ -1,0 +1,10 @@
+OSPRESET 1
+plugin=Lemon Phrase	id=clap:org.openstudio.lemon-phrase	format=clap	body=params
+# Auto key, instrument range, 100%, 30 ms.
+Key = 0
+Scale = 1
+Key detection = 1
+Input = 3
+Amount = 100
+Tighten = 0
+Transition = 25

@@ -1,0 +1,10 @@
+OSPRESET 1
+plugin=Lemon Phrase	id=clap:org.openstudio.lemon-phrase	format=clap	body=params
+# 50%, 120 ms: only the worst notes, softly.
+Key = 0
+Scale = 1
+Key detection = 1
+Input = 1
+Amount = 50
+Tighten = 0
+Transition = 115

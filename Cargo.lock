@@ -1998,6 +1998,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "lemon-phrase"
+version = "0.0.1"
+dependencies = [
+ "lemon-small-fx",
+ "nih_plug",
+ "os-plugkit",
+]
+
+[[package]]
 name = "lemon-pitch"
 version = "0.0.1"
 dependencies = [
@@ -2907,6 +2916,7 @@ dependencies = [
  "lemon-mouth",
  "lemon-parametric-eq-2",
  "lemon-phaser",
+ "lemon-phrase",
  "lemon-pitch",
  "lemon-reverb",
  "lemon-sampler",
