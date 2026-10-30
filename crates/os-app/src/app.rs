@@ -111,6 +111,8 @@ pub struct WinState {
 
 /// Title bar height of the three docked-style windows.
 pub const TITLE_H: f32 = 23.0;
+/// How often playback's project is compared with the edited one while playing (`App::tick`).
+const PLAYED_CHECK: std::time::Duration = std::time::Duration::from_millis(150);
 
 /// Toolbar utility buttons whose left and right clicks differ (spec: ui/toolbar-buttons.md §2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1217,6 +1219,10 @@ pub struct App {
     typing_held: Vec<(KeyCode, usize, u16)>,
     pub typing_octave: i32,
     typing_synced: bool,
+    /// The project playback last got from an edit (`piano.dirty`), and when it was last compared with the project: a
+    /// change that did not flag itself still reaches playback (`tick`).
+    played: Option<Project>,
+    played_check: std::time::Instant,
     /// The piano-roll key held with the mouse, sounding as a live note until released: (rack row, key).
     mouse_note: Option<(usize, u16)>,
     /// When the mixer's cables were last stepped (`None` while they are still).
@@ -1463,6 +1469,8 @@ impl App {
             typing_held: Vec::new(),
             typing_octave: 0,
             typing_synced: false,
+            played: None,
+            played_check: std::time::Instant::now(),
             mouse_note: None,
             cables_at: None,
             key_velocity: TYPING_VELOCITY,
@@ -3913,14 +3921,25 @@ impl App {
             self.state.playlist.pos = t;
             self.damage_win(Win::Playlist);
         }
+        // Any other change to the project while playing (one that did not flag itself) is found a few times a second
+        // and sent too, so an edit is always heard without stopping and starting again.
+        if self.transport.playing() && !self.state.piano.dirty && self.played_check.elapsed() >= PLAYED_CHECK {
+            self.played_check = std::time::Instant::now();
+            let now = crate::rack::play_project(&self.state);
+            match &self.played {
+                Some(p) if *p != now => self.state.piano.dirty = true,
+                Some(_) => {}
+                None => self.played = Some(now),
+            }
+        }
         // Edits (notes, steps, mixer, channel volume / pan / mute, tempo) reach playback right away,
         // also during a drag (at most once per tick).
         if self.state.piano.dirty {
             self.state.piano.dirty = false;
             // Also while Play is still starting (not `playing` yet); ignored when stopped.
-            {
-                self.transport.update(&crate::rack::play_project(&self.state));
-            }
+            let now = crate::rack::play_project(&self.state);
+            self.transport.update(&now);
+            self.played = Some(now);
         }
         self.playback_damage();
         self.has_damage()
@@ -4113,6 +4132,7 @@ impl App {
         self.transport.stop();
         self.transport.set_loop(self.state.playlist.range);
         self.transport.play(&p, PlayMode::Song, f64::from(tick));
+        self.played = Some(p);
         self.invalidate();
     }
 
@@ -7258,6 +7278,7 @@ impl App {
         // The engine gets the loop range before its first tick.
         self.sync_loop_range();
         self.transport.play_counted(&p, self.play_mode(), start, bars);
+        self.played = Some(p);
     }
 
     fn play_mode(&self) -> PlayMode {
@@ -9465,6 +9486,39 @@ mod tests {
         let st = crate::plugins::sampler_state(c);
         let json = String::from_utf8_lossy(&st[8..]).to_string();
         assert!(json.contains("\"envvol_on\":{\"bool\":false}") && json.contains("\"sample-path\":\"\\\"\\\"\""), "{json}");
+    }
+
+    /// While playing, a change to the project that did not flag itself still reaches playback within `PLAYED_CHECK`;
+    /// an unchanged project sends nothing.
+    #[test]
+    fn unflagged_edits_reach_playback() {
+        let mut app = App::new(None);
+        app.transport.pretend_playing();
+        let past = std::time::Instant::now() - PLAYED_CHECK * 2;
+        app.played = Some(crate::rack::play_project(&app.state));
+        app.played_check = past;
+        app.tick();
+        assert!(!app.state.piano.dirty, "nothing changed");
+        app.state.project.patterns[0].notes.push(os_model::Note {
+            position: 96,
+            length: 48,
+            channel: 0,
+            key: 60,
+            fine_pitch: 120,
+            release: 64,
+            pan: 64,
+            velocity: 100,
+            mod_x: 128,
+            mod_y: 128,
+            flags: 0,
+            group: 0,
+            unk14: 0,
+            repeat: 0,
+        });
+        app.played_check = past;
+        app.tick();
+        assert_eq!(app.played, Some(crate::rack::play_project(&app.state)), "the edit was sent");
+        app.transport.stop();
     }
 
     /// The whole window at one scale, for looking at text: `OS_TEXT_SHOT=<file.png> OS_TEXT_SHOT_SCALE=1.25`.
