@@ -130,20 +130,21 @@ impl Tones {
 }
 
 /// An in-place radix-2 complex FFT of a fixed power-of-two size, its twiddles computed once.
-struct Fft {
+pub(crate) struct Fft {
     n: usize,
     cos: Vec<f32>,
     sin: Vec<f32>,
 }
 
 impl Fft {
-    fn new(n: usize) -> Fft {
+    pub(crate) fn new(n: usize) -> Fft {
         debug_assert!(n.is_power_of_two());
         let a = |k: usize| -2.0 * std::f64::consts::PI * k as f64 / n as f64;
         Fft { n, cos: (0..n / 2).map(|k| a(k).cos() as f32).collect(), sin: (0..n / 2).map(|k| a(k).sin() as f32).collect() }
     }
 
-    fn run(&self, re: &mut [f32], im: &mut [f32]) {
+    /// Forward, in place (`e^-i`), unscaled.
+    pub(crate) fn run(&self, re: &mut [f32], im: &mut [f32]) {
         let n = self.n;
         let bits = n.trailing_zeros();
         for i in 0..n {

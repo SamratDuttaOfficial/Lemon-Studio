@@ -14,18 +14,30 @@
 //! - [`channel_filter`]: the channel filter a voice runs through.
 //! - [`tone`]: the spectral make-up of a sound's stretches, for colourful waveforms.
 //! - [`curve`]: Image-Line's curves (envelopes, LFOs, maps) as Citrus and Pulp Filter walk them.
+//! - [`align`]: one recording lined up with another by how they sound (dynamic time warping).
+//! - [`comp`]: comping takes, phrase by phrase the best of several takes of one part, in time with each other.
+//! - [`flow`]: Fit to tempo, a take's syllables moved onto the beat grid as its flow reads.
+//! - [`syllables`]: where a voice's syllables, attacks, silences and voiced stretches are, from the sound alone.
+//! - [`retime`]: a voice's time map from anchors, the time taken where it is least heard.
+//! - [`warp`]: audio played through a time map (WSOLA), for the retiming tools.
 //! - [`num`]: the plugin pages' arithmetic (`single( )`, Round, flushes) and a little-endian state reader.
 //!
 // spec: audio/conventions.md, audio/mixer.md, audio/sampler.md, audio/time-stretch.md, audio/envelopes-and-lfos.md,
 // audio/channel-filter.md, plugins/image-line-curves.md
 
+pub mod align;
 pub mod articulator;
 pub mod channel_filter;
+pub mod comp;
 pub mod curve;
+pub mod flow;
 pub mod glide;
 pub mod level;
 pub mod mixer;
 pub mod num;
 pub mod resample;
+pub mod retime;
 pub mod stretch;
+pub mod syllables;
 pub mod tone;
+pub mod warp;
