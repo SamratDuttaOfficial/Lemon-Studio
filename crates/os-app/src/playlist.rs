@@ -428,6 +428,8 @@ pub enum Cmd {
     Messages(crate::messages::Pick),
     /// Settings > Project ▸ Data folder's menus and the forms' lists (`crate::data_folder`).
     DataFolder(crate::data_folder::DCmd),
+    /// The vocal timing tools: Fit to tempo, Match timing to track, Comp takes (`crate::timing`).
+    Timing(crate::timing::TCmd),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -445,11 +447,13 @@ pub struct PItem {
     /// Column break: the following items start a new column (not drawn).
     pub col: bool,
     pub children: Vec<PItem>,
+    /// What the entry does, shown beside it while the mouse is over it (`views::menu_tip`); empty for none.
+    pub tip: Cow<'static, str>,
 }
 
 impl PItem {
     pub fn new(label: impl Into<Cow<'static, str>>, cmd: Cmd) -> Self {
-        PItem { label: label.into(), key: "", cmd, mark: Mark::None, enabled: true, dim: false, head: false, sep: false, col: false, children: Vec::new() }
+        PItem { label: label.into(), key: "", cmd, mark: Mark::None, enabled: true, dim: false, head: false, sep: false, col: false, children: Vec::new(), tip: Cow::Borrowed("") }
     }
     pub fn key(mut self, k: &'static str) -> Self {
         self.key = k;
@@ -465,6 +469,10 @@ impl PItem {
     }
     pub fn dim(mut self, on: bool) -> Self {
         self.dim = on;
+        self
+    }
+    pub fn tip(mut self, tip: impl Into<Cow<'static, str>>) -> Self {
+        self.tip = tip.into();
         self
     }
     pub fn head(label: impl Into<Cow<'static, str>>) -> Self {
@@ -1017,7 +1025,7 @@ pub fn source(s: &State) -> ClipSource {
     s.playlist.source.unwrap_or(ClipSource::Pattern(s.pattern.max(1)))
 }
 
-fn ppq(s: &State) -> u32 {
+pub(crate) fn ppq(s: &State) -> u32 {
     u32::from(s.project.ppq.max(4))
 }
 
@@ -1215,7 +1223,7 @@ fn sample_secs(s: &State, ch: &os_model::Channel) -> f64 {
 }
 
 /// Seconds per tick at the project tempo (the ticks run at `Project::tick_tempo`).
-fn secs_per_tick(s: &State) -> f64 {
+pub(crate) fn secs_per_tick(s: &State) -> f64 {
     60.0 / s.project.tick_tempo(s.tempo.max(1.0)) / f64::from(ppq(s))
 }
 
@@ -2398,6 +2406,10 @@ pub fn clip_menu(s: &State, i: usize, x: f32, y: f32) -> Popup {
         items.push(PItem::new("Edit pattern", Cmd::ClipEditSource(i)));
         items.push(PItem::new("Make unique", Cmd::ClipUnique(i)));
     }
+    if head == "Audio clip" {
+        items.extend(crate::timing::clip_items(s, i));
+        items.push(PItem::sep());
+    }
     items.push(PItem::new("Select all similar clips", Cmd::ClipSelectSimilar(i)));
     items.push(PItem::new("Delete", Cmd::ClipDelete(i)));
     Popup { x, y, items, sub: None, scroll: [0; 2] }
@@ -2534,7 +2546,7 @@ pub fn track_menu(s: &State, t: u16, x: f32, y: f32) -> Popup {
     .into_iter()
     .map(|(n, c)| PItem::new(n, Cmd::TrackColor(t, c)))
     .collect();
-    let items = vec![
+    let mut items = vec![
         PItem::head("Track"),
         PItem::new("Rename...", Cmd::TrackRename(t)),
         PItem::sub("Color", colors),
@@ -2544,6 +2556,12 @@ pub fn track_menu(s: &State, t: u16, x: f32, y: f32) -> Popup {
         PItem::new("Mute all clips", Cmd::TrackMuteClips(t, true)),
         PItem::new("Unmute all clips", Cmd::TrackMuteClips(t, false)),
         PItem::sep(),
+    ];
+    if clips(s).iter().any(|c| c.track == t && source_kind(s, c.source) == PickKind::Audio && matches!(c.source, ClipSource::Channel(_))) {
+        items.extend(crate::timing::track_items(s, t));
+        items.push(PItem::sep());
+    }
+    items.extend([
         PItem::new("Group with above track", Cmd::TrackGroup(t)).mark(Mark::Check(track_info(s, t).is_some_and(|x| x.grouped))),
         PItem::new("Collapse group", Cmd::GroupCollapse(t))
             .mark(Mark::Check(group_track(s, t).or(Some(t)).and_then(|g| track_info(s, g)).is_some_and(|x| x.collapsed))),
@@ -2552,7 +2570,7 @@ pub fn track_menu(s: &State, t: u16, x: f32, y: f32) -> Popup {
         PItem::new("Delete one", Cmd::TrackDelete(t)),
         PItem::new("Move up", Cmd::TrackUp(t)),
         PItem::new("Move down", Cmd::TrackDown(t)),
-    ];
+    ]);
     Popup { x, y, items, sub: None, scroll: [0; 2] }
 }
 
@@ -3769,6 +3787,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
         Cmd::Project(c) => return crate::project_picker::run(app, c),
         Cmd::Rack(c) => return crate::rack::run(app, c),
         Cmd::Mixer(c) => return crate::mixer::run(app, c),
+        Cmd::Timing(c) => return crate::timing::run(app, c),
         Cmd::Param(c) => return app.params_cmd(c),
         Cmd::Pattern(c) => {
             let m = app.pattern_cmd(c);
@@ -4000,7 +4019,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
     let grid_w = grid.map_or(1400.0, |g| g.w);
     let grid_wh = grid.map_or((1400.0, 800.0), |g| (g.w, g.h));
     let msg = match cmd {
-        Cmd::Nothing | Cmd::Pick(..) | Cmd::Browser(_) | Cmd::Plugin(_) | Cmd::Project(_) | Cmd::Rack(_) | Cmd::Mixer(_) | Cmd::Param(_) | Cmd::Preset(_) | Cmd::Misc(..) | Cmd::PluginMenu(..) | Cmd::PluginDetach(..) | Cmd::Piano(_) | Cmd::Audio(_) | Cmd::Cpu(_) | Cmd::MetronomeSound(_) | Cmd::MetronomeVolume(_) | Cmd::Record(_) | Cmd::RecPrecountBars(_) | Cmd::OneClick(..) | Cmd::OneClickEditor | Cmd::Rec(_) | Cmd::ContinuousScrolling | Cmd::Pattern(_) | Cmd::ClockMode(_) | Cmd::ClockBeat(_) | Cmd::Toolbar(_) | Cmd::ToolbarPreset(_) | Cmd::ToolbarSave | Cmd::ToolbarDelete | Cmd::TimeSig(..) | Cmd::AddSignature | Cmd::MarkerSigAt(_) | Cmd::MarkerEveryMenu | Cmd::Bar(..) | Cmd::PanningLaw(_) | Cmd::TimeMode(_) | Cmd::Timebase(_) => None,
+        Cmd::Nothing | Cmd::Pick(..) | Cmd::Browser(_) | Cmd::Plugin(_) | Cmd::Project(_) | Cmd::Rack(_) | Cmd::Mixer(_) | Cmd::Timing(_) | Cmd::Param(_) | Cmd::Preset(_) | Cmd::Misc(..) | Cmd::PluginMenu(..) | Cmd::PluginDetach(..) | Cmd::Piano(_) | Cmd::Audio(_) | Cmd::Cpu(_) | Cmd::MetronomeSound(_) | Cmd::MetronomeVolume(_) | Cmd::Record(_) | Cmd::RecPrecountBars(_) | Cmd::OneClick(..) | Cmd::OneClickEditor | Cmd::Rec(_) | Cmd::ContinuousScrolling | Cmd::Pattern(_) | Cmd::ClockMode(_) | Cmd::ClockBeat(_) | Cmd::Toolbar(_) | Cmd::ToolbarPreset(_) | Cmd::ToolbarSave | Cmd::ToolbarDelete | Cmd::TimeSig(..) | Cmd::AddSignature | Cmd::MarkerSigAt(_) | Cmd::MarkerEveryMenu | Cmd::Bar(..) | Cmd::PanningLaw(_) | Cmd::TimeMode(_) | Cmd::Timebase(_) => None,
         Cmd::NotYet(name) => Some(format!("{name}: not available yet")),
         Cmd::Tool(t) => {
             s.playlist.tool = t;

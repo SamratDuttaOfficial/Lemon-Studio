@@ -309,6 +309,10 @@ const TOOLS_A: &[Item] = &[
     head("Last tweaked parameters"),
     it("Last tweaked", "").sub(),
     it("Next to last tweaked", "").sub(),
+    head("Vocal timing"),
+    it(FIT_LABEL, "").sub(),
+    it(MATCH_LABEL, "").sub(),
+    it(COMP_LABEL, "").on(),
 ];
 const TOOLS_B: &[Item] = &[
     head("Macros"),
@@ -497,6 +501,105 @@ pub const DECLICK_LABEL: &str = "Change declicking for selected channels to";
 /// ui/channel-switches.md §1).
 pub const CLIPS_ALL_LABEL: &str = "Switch all audio clip channels to";
 pub const CLIPS_SEL_LABEL: &str = "Switch selected audio clip channels to";
+/// TOOLS > Vocal timing on the selected audio clips (`crate::timing`).
+pub const FIT_LABEL: &str = "Fit selected clips to tempo";
+pub const MATCH_LABEL: &str = "Match selected clips to track";
+pub const COMP_LABEL: &str = "Comp selected takes";
+
+/// What a dropdown entry does, shown beside it while the mouse is over it and in the hint bar (`views::menu_tip`).
+pub fn tip(menu: usize, label: &str) -> &'static str {
+    if menu != TOOLS_MENU {
+        return "";
+    }
+    match label {
+        "Browser find..." => "Searches the browser's folders for a file by its name",
+        ONE_CLICK_LABEL => "Records from an audio input straight into a new audio clip at the song position, or into the audio editor",
+        "Chord progression tool..." => "Writes chord progressions into the piano roll (not available yet)",
+        "Control creator" => "Builds a panel of your own controls (not available yet)",
+        "Save audio clipboard to browser" => "Saves audio copied to the clipboard as a file the browser lists (not available yet)",
+        "Save MIDI clipboard to browser" => "Saves MIDI copied to the clipboard as a file the browser lists (not available yet)",
+        DUMP_LOG_LABEL => "Puts what was played on MIDI in the last few minutes into the selected pattern, recording or not",
+        CLEAR_LOG_LABEL => "Forgets everything the score logger has kept",
+        "Enabled" => "Keeps a running recording of the master output to go back to (not available yet)",
+        "Settings" => "How long the audio logger keeps and what it records (not available yet)",
+        "Dump to audio editor" => "Opens what the audio logger kept in the audio editor (not available yet)",
+        "Last tweaked" => "The last control moved: link it to a controller or automate it",
+        "Next to last tweaked" => "The control moved before the last one: link it to a controller or automate it",
+        FIT_LABEL => crate::timing::FIT_TIP,
+        MATCH_LABEL => crate::timing::MATCH_TIP,
+        COMP_LABEL => crate::timing::COMP_TIP,
+        "Stop sound" => "Silences everything now: hanging notes, long tails, plugins stuck on",
+        "Cancel recording" => "Stops recording and throws away what this take recorded",
+        "Prepare for performance mode" => "Sets the playlist up for playing clips live (not available yet)",
+        "Prepare for MIDI export" => "Readies the project to export cleanly as MIDI (not available yet)",
+        "Select unused channels" => "Selects the channel rack's channels that no pattern or clip plays",
+        "Purge unused audio clips" => "Deletes the audio clip channels that no playlist clip uses",
+        "Switch smart disable for all plugins" => "Lets every plugin rest while it is silent, to save processing (not available yet)",
+        CLIPS_ALL_LABEL => "Sets how every audio clip channel stretches its audio to the tempo",
+        CLIPS_SEL_LABEL => "Sets how the selected audio clip channels stretch their audio to the tempo",
+        "Lock all playlist tracks to content" => "Ties each playlist track to the source its clips play (not available yet)",
+        "Unlock all playlist tracks from content" => "Frees the playlist tracks from their sources (not available yet)",
+        "Reset empty playlist tracks" => "Gives the tracks without clips their default name, colour and size back",
+        REMOVE_TESLAS_LABEL => "Removes every audio editor from the mixer",
+        DELETE_UNUSED_LABEL => "Deletes the files in the project's folder that it no longer uses, then saves",
+        EDITORS_LABEL => "Shows every plugin's editor inside its plugin window, or in a window of its own",
+        "Set keyboard focus for all plugins to" => "Whether typing goes to the plugins' editors or to Lemon Studio (not available yet)",
+        DECLICK_LABEL => "How the selected channels fade their sounds in and out so that they do not click",
+        _ => "",
+    }
+}
+
+/// What an entry of a TOOLS submenu does (`tip`), wherever the submenu shows (the channel rack's options too).
+fn sub_tip(p: &crate::playlist::PItem) -> std::borrow::Cow<'static, str> {
+    use crate::playlist::Cmd;
+    let fixed = match p.label.as_ref() {
+        "Attached" => "Each plugin's editor shows inside its plugin window",
+        "Detached" => "Each plugin's editor opens in a window of its own",
+        "Into the audio editor" => "Records into the audio editor on the master track instead of the playlist; asks for the input",
+        "Out only (no bleeding)" => "Only the end of each sound is faded; a new note cuts the last one off",
+        "Transient (no bleeding)" => "A very short fade that keeps attacks punchy; a new note cuts the last one off",
+        "Transient (bleeding)" => "A very short fade that keeps attacks punchy; the last note fades out under the new one",
+        "Generic (bleeding)" => "A short fade for most sounds; the last note fades out under the new one",
+        "Smooth (bleeding)" => "Longer fades for soft and held sounds; the last note fades out under the new one",
+        "Crossfade (bleeding)" => "The longest fades: each note fades out slowly under the next",
+        "Resample" => "No stretching: the audio plays faster or slower, its pitch moving with it",
+        "Stretch" => "Stretched while it plays, keeping its pitch",
+        "Stretch Pro" => "Stretched while it plays at a higher quality, keeping its pitch",
+        "e3 generic" => "Stretched once beforehand, for most material",
+        "e3 mono" => "Stretched once beforehand, for a single voice or instrument",
+        "Slice stretch" => "Cut at its beats and the pieces stretched, for drum loops",
+        "Slice map" => "Cut at its beats and the pieces moved without stretching, for drum loops",
+        "Auto" => "A method picked from what the audio sounds like",
+        "e2 generic" => "The older stretcher, for most material",
+        "e2 transient" => "The older stretcher, keeping drum hits sharp",
+        "e2 mono" => "The older stretcher, for a single voice or instrument",
+        "e2 speech" => "The older stretcher, for speech",
+        _ => "",
+    };
+    if !fixed.is_empty() {
+        return fixed.into();
+    }
+    match &p.cmd {
+        Cmd::OneClick(..) => format!("Records from {} into a new audio clip at the song position", p.label).into(),
+        Cmd::Rec(_) => format!("Puts the notes played in the {} into the selected pattern", p.label.to_lowercase()).into(),
+        _ => "".into(),
+    }
+}
+
+/// `items` with their tips (`sub_tip`).
+pub(crate) fn tipped(items: Vec<crate::playlist::PItem>) -> Vec<crate::playlist::PItem> {
+    items
+        .into_iter()
+        .map(|p| {
+            if p.tip.is_empty() && !p.head && !p.sep {
+                let t = sub_tip(&p);
+                p.tip(t)
+            } else {
+                p
+            }
+        })
+        .collect()
+}
 
 /// What fills the submenu of ▸ entry `label` of `menu`: the app's own popup items, as the same submenu shows them
 /// elsewhere (the channel rack's options menu, the plugin menus). `None` while it is not built: the entry stays greyed
@@ -518,6 +621,8 @@ pub fn submenu(menu: usize, label: &str) -> Option<fn(&State) -> Vec<crate::play
         (TOOLS_MENU, DECLICK_LABEL) => Some(crate::rack::declick_items),
         (TOOLS_MENU, CLIPS_ALL_LABEL) => Some(|_| crate::rack::stretch_items(true)),
         (TOOLS_MENU, CLIPS_SEL_LABEL) => Some(|_| crate::rack::stretch_items(false)),
+        (TOOLS_MENU, FIT_LABEL) => Some(|_| crate::timing::fit_items(crate::timing::Target::Selected)),
+        (TOOLS_MENU, MATCH_LABEL) => Some(|s| crate::timing::match_items(s, crate::timing::Target::Selected, None)),
         // spec: ui/toolbar-menu.md §8
         (VIEW, "Toolbars") => Some(toolbar_items),
         _ => None,
@@ -765,6 +870,7 @@ pub fn paint_dropdown(ui: &mut Ui, s: &State, menu: usize, k: f32) {
     let dy = (row - os_ui::kit::menu::ROW) / 2.0;
     // The ▸ entry whose submenu is open stays lit, as in the app's popups.
     let open = s.menu_sub.filter(|_| s.playlist.popup.is_some());
+    let mut tip_at: Option<(Rect, &'static str)> = None;
     let mut cx = r.x + border;
     let mut flat = 0usize;
     for (ci, (_, items)) in m.cols.iter().enumerate() {
@@ -808,14 +914,20 @@ pub fn paint_dropdown(ui: &mut Ui, s: &State, menu: usize, k: f32) {
                     let ok = active(s, menu, item);
                     // Greyed-out entries never light up; they only say they are not available yet (EDIT's without a
                     // step to act on say nothing).
+                    let about = tip(menu, item.label);
                     if ok {
-                        let hov = ui.hit(rr, item_action(menu, flat, item), item.label);
+                        let hint = if about.is_empty() { item.label } else { about };
+                        let hov = ui.hit(rr, item_action(menu, flat, item), hint);
                         ui.menu_row(crate::app::MENU_DROPDOWN);
                         if hov || open == Some(flat) {
                             light(ui, rr);
                         }
                     } else if !works(menu, item) {
                         ui.off(rr, item.label);
+                    }
+                    // The tip beside the dropdown, while no submenu of it is open there.
+                    if !about.is_empty() && open.is_none() && rr.contains(ui.mouse.0, ui.mouse.1) {
+                        tip_at = Some((rr, about));
                     }
                     let mark = mark_of(s, menu, item);
                     let (mx, my) = (rr.x + 10.0, rr.y + row / 2.0);
@@ -841,6 +953,9 @@ pub fn paint_dropdown(ui: &mut Ui, s: &State, menu: usize, k: f32) {
             y += h;
         }
         cx += cw;
+    }
+    if let Some((rr, about)) = tip_at {
+        super::menu_tip(ui, r, rr, about, false);
     }
 }
 
@@ -1004,7 +1119,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(built, ["New from template", OPEN_RECENT_LABEL, "Import", "Effect", "Toolbars", ONE_CLICK_LABEL, DUMP_LOG_LABEL, CLIPS_ALL_LABEL, CLIPS_SEL_LABEL, EDITORS_LABEL, DECLICK_LABEL]);
+        assert_eq!(built, ["New from template", OPEN_RECENT_LABEL, "Import", "Effect", "Toolbars", ONE_CLICK_LABEL, DUMP_LOG_LABEL, FIT_LABEL, MATCH_LABEL, CLIPS_ALL_LABEL, CLIPS_SEL_LABEL, EDITORS_LABEL, DECLICK_LABEL]);
         let labels = |menu, label| submenu(menu, label).unwrap()(&app.state).iter().map(|p| p.label.to_string()).collect::<Vec<_>>();
         let modes = ["Out only (no bleeding)", "Transient (no bleeding)", "Transient (bleeding)", "Generic (bleeding)", "Smooth (bleeding)", "Crossfade (bleeding)"];
         assert_eq!(labels(TOOLS_MENU, DECLICK_LABEL), modes, "the six declick modes in order (spec: audio/declick.md)");
@@ -1041,6 +1156,22 @@ mod tests {
         assert_eq!(radios(&app)[1], (true, Mark::Radio(true)));
         app.menu_item(ADD_MENU, index("Categories"));
         assert_eq!(app.state.plugdb.prefs.menu_view, MenuView::Categories);
+    }
+
+    /// Every TOOLS entry has a tip, and so does every entry of the TOOLS submenus that are built.
+    #[test]
+    fn every_tools_entry_says_what_it_does() {
+        let app = crate::app::App::new(None);
+        for (_, items) in MENUS[TOOLS_MENU].cols {
+            for it in items.iter().filter(|it| it.kind == Kind::Item) {
+                assert!(!tip(TOOLS_MENU, it.label).is_empty(), "{} has no tip", it.label);
+                let Some(fill) = submenu(TOOLS_MENU, it.label) else { continue };
+                for p in fill(&app.state).iter().filter(|p| !p.head && !p.sep && !p.col && p.enabled) {
+                    assert!(!p.tip.is_empty(), "{} ▸ {} has no tip", it.label, p.label);
+                }
+            }
+        }
+        assert_eq!(tip(EDIT_MENU, "Undo"), "");
     }
 }
 

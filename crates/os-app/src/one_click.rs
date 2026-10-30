@@ -37,7 +37,7 @@ pub struct AudioRec {
 pub fn items(_: &State) -> Vec<PItem> {
     let mut v = vec![PItem::new("Into the audio editor", Cmd::OneClickEditor)];
     v.extend(inputs(false));
-    v
+    crate::views::menus::tipped(v)
 }
 
 /// A stereo and a mono header per device with its inputs, each recording into the audio editor (`editor`) or the

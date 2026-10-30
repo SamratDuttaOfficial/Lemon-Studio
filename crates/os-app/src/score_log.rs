@@ -76,7 +76,7 @@ impl Log {
 
 /// TOOLS > Dump score log to selected pattern ▸.
 pub fn items(_: &State) -> Vec<PItem> {
-    MINUTES.iter().map(|&m| PItem::new(format!("Last {m} minutes"), Cmd::Rec(RecCmd::Dump(m)))).collect()
+    crate::views::menus::tipped(MINUTES.iter().map(|&m| PItem::new(format!("Last {m} minutes"), Cmd::Rec(RecCmd::Dump(m)))).collect())
 }
 
 /// Ticks a second at the project's tempo.

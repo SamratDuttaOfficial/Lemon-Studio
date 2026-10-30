@@ -8537,6 +8537,12 @@ impl App {
                     self.state.message = Some(m);
                 }
             }
+            (TOOLS_MENU, i) if item_at(TOOLS_MENU, i).is_some_and(|it| it.label == COMP_LABEL) => {
+                let c = crate::playlist::Cmd::Timing(crate::timing::TCmd::Comp(crate::timing::Target::Selected));
+                if let Some(m) = crate::playlist::run(self, c) {
+                    self.state.message = Some(m);
+                }
+            }
             (TOOLS_MENU, i) if item_at(TOOLS_MENU, i).is_some_and(|it| it.label == "Reset empty playlist tracks") => {
                 if let Some(m) = crate::playlist::run(self, crate::playlist::Cmd::ResetEmptyTracks) {
                     self.state.message = Some(m);
@@ -9528,6 +9534,24 @@ mod tests {
         let scale: f32 = std::env::var("OS_TEXT_SHOT_SCALE").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0);
         let Ok(mut c) = Canvas::new((1600.0 * scale) as u32, (900.0 * scale) as u32, scale) else { return };
         let mut app = App::new(None);
+        app.invalidate();
+        frame(&mut app, &mut c, None);
+        c.pixmap.save_png(std::path::Path::new(&out)).unwrap();
+    }
+
+    /// TOOLS open, the mouse over Comp selected takes, its tip beside the menu: `OS_TIP_SHOT=<file.png>`.
+    #[test]
+    fn tip_shot() {
+        use views::menus::{COMP_LABEL, TOOLS_MENU};
+        let Some(out) = std::env::var_os("OS_TIP_SHOT") else { return };
+        let Ok(mut c) = Canvas::new(1600, 900, 1.0) else { return };
+        let mut app = App::new(None);
+        app.state.menu_open = Some(TOOLS_MENU);
+        app.invalidate();
+        frame(&mut app, &mut c, None);
+        let entry = views::menus::MENUS[TOOLS_MENU].cols.iter().flat_map(|(_, items)| items.iter()).position(|it| it.label == COMP_LABEL).unwrap();
+        let row = hit_rect(&app, &Action::MenuItem(TOOLS_MENU, entry));
+        app.mouse_move(row.cx(), row.cy());
         app.invalidate();
         frame(&mut app, &mut c, None);
         c.pixmap.save_png(std::path::Path::new(&out)).unwrap();
@@ -18641,7 +18665,9 @@ mod tests {
             app.state.menu_open = Some(menu);
             frame(&mut app, &mut c, None);
             for it in m.cols.iter().flat_map(|(_, items)| items.iter()).filter(|it| matches!(it.kind, Kind::Item)) {
-                let Some(h) = app.hits.iter().rev().find(|h| h.hint == it.label || h.action == Action::Placeholder(it.label)) else { continue };
+                // A row with a tip has it for its hint.
+                let about = views::menus::tip(menu, it.label);
+                let Some(h) = app.hits.iter().rev().find(|h| (!about.is_empty() && h.hint == about) || h.hint == it.label || h.action == Action::Placeholder(it.label)) else { continue };
                 let label = c.text_width(f, &label_now(&app.state, menu, it));
                 let key = if it.shortcut.is_empty() { 0.0 } else { c.text_width(f.italic(), shortcut_now(it)) + 4.0 };
                 let end = h.rect.right() - if it.sub { 13.0 } else { 8.0 } - key;

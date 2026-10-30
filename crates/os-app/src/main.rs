@@ -128,6 +128,7 @@ mod theme_adjust;
 mod theme_library;
 mod templates;
 mod timesig;
+mod timing;
 mod transport;
 mod typein;
 mod views;

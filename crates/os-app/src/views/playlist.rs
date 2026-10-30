@@ -1438,6 +1438,7 @@ fn popup_list(ui: &mut Ui, items: &[pl::PItem], x: f32, y: f32, screen: (f32, f3
     let r = Rect::new(x, y, w, h);
     let menu = if sub { crate::app::MENU_SUB } else { crate::app::MENU_POPUP };
     let mut rows = Vec::with_capacity(items.len());
+    let mut tip: Option<(Rect, std::borrow::Cow<'static, str>)> = None;
     let lemon = super::lemon(ui);
     if lemon {
         os_ui::kit::popup(ui.c, t, r);
@@ -1483,8 +1484,13 @@ fn popup_list(ui: &mut Ui, items: &[pl::PItem], x: f32, y: f32, screen: (f32, f3
         // Greyed out: a disabled entry, or a submenu with nothing available in it (it still opens, to show what is
         // planned). Disabled entries never light up.
         let live = it.enabled && (it.children.is_empty() || any_enabled(&it.children));
+        // The entry's tip goes in the hint bar too, and beside the menu while the mouse is over it.
+        let hint = if it.tip.is_empty() { it.label.to_string() } else { it.tip.to_string() };
+        if !it.tip.is_empty() && open != Some(i) && rr.contains(ui.mouse.0, ui.mouse.1) {
+            tip = Some((rr, it.tip.clone()));
+        }
         if it.enabled {
-            let lit = ui.hit(rr, action, it.label.to_string()) || open == Some(i);
+            let lit = ui.hit(rr, action, hint) || open == Some(i);
             ui.menu_row(menu);
             if lit && lemon {
                 os_ui::kit::row_highlight(ui.c, t, rr);
@@ -1495,7 +1501,7 @@ fn popup_list(ui: &mut Ui, items: &[pl::PItem], x: f32, y: f32, screen: (f32, f3
             ui.hit(rr, action, crate::app::off_text(&it.label));
         } else {
             // Disabled here and now (nothing to merge, the last arrangement), not missing.
-            ui.hit(rr, action, it.label.to_string());
+            ui.hit(rr, action, hint);
         }
         // A working entry drawn dim: a Manage messages entry that is off (spec: ui/settings-choices.md "Hints and
         // warnings: Manage messages and Project data size warning (2026-10-16)").
@@ -1532,6 +1538,10 @@ fn popup_list(ui: &mut Ui, items: &[pl::PItem], x: f32, y: f32, screen: (f32, f3
         let track = Rect::new(r.x + m.border + 2.0, r.bottom() - m.border - bar_h + 2.0, r.w - 2.0 * m.border - 4.0, bar_h - 4.0);
         let target = if sub { crate::app::Scroll::PopupSub } else { crate::app::Scroll::Popup };
         super::scrollbar(ui, track, false, first as f32, shown as f32, cols as f32, target);
+    }
+    // To the left while a submenu is open on the right.
+    if let Some((rr, text)) = tip {
+        super::menu_tip(ui, r, rr, &text, open.is_some());
     }
     (r, rows)
 }

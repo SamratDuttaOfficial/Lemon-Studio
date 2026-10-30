@@ -506,6 +506,55 @@ pub fn tool_face(ui: &mut Ui, r: Rect, look: Look) -> Color {
     }
 }
 
+/// `text` in lines no wider than `w` in `font`, broken between words.
+fn wrap(c: &mut os_ui::Canvas, font: os_ui::Font, text: &str, w: f32) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    let mut line = String::new();
+    for word in text.split_whitespace() {
+        let next = if line.is_empty() { word.to_string() } else { format!("{line} {word}") };
+        if !line.is_empty() && c.text_width(font, &next) > w {
+            lines.push(std::mem::replace(&mut line, word.to_string()));
+        } else {
+            line = next;
+        }
+    }
+    if !line.is_empty() {
+        lines.push(line);
+    }
+    lines
+}
+
+/// A menu entry's tip: what it does, in a dark bubble beside the menu `menu` at the entry's row `row`, to the right of
+/// the menu, or to its left (`left`, or where the window ends on the right). Drawn without a hit, so the menu under the
+/// mouse still answers.
+pub fn menu_tip(ui: &mut Ui, menu: Rect, row: Rect, text: &str, left: bool) {
+    if text.is_empty() {
+        return;
+    }
+    let t = ui.t;
+    let font = os_ui::Font::new(13);
+    let lines = wrap(ui.c, font, text, 280.0);
+    let w = lines.iter().map(|l| ui.c.text_width(font, l)).fold(0.0f32, f32::max).ceil() + 16.0;
+    let (lh, (sw, sh)) = (16.0, ui.c.size());
+    let h = lines.len() as f32 * lh + 10.0;
+    let right = menu.right() + 4.0;
+    let x = if !left && right + w <= sw {
+        right
+    } else if menu.x - 4.0 - w >= 0.0 {
+        menu.x - 4.0 - w
+    } else if right + w <= sw {
+        right
+    } else {
+        return;
+    };
+    let b = Rect::new(x, row.y.min(sh - h - 2.0).max(0.0), w, h);
+    ui.c.fill_rrect(b.outset(1.0), 6.0, Color::rgb(0).with_alpha(90));
+    ui.c.fill_rrect(b, 5.0, t.s(0x0b0d0f).with_alpha(245));
+    for (k, l) in lines.iter().enumerate() {
+        ui.c.text(font, b.x + 8.0, b.y + 5.0 + k as f32 * lh, t.tx(0xe6e6e6), l);
+    }
+}
+
 /// A 30×33 toolbar button (§1). `on` draws the orange "on" state.
 /// An `Action::Placeholder` button is not available yet: drawn greyed out, never lit (`Ui::off`).
 pub fn tool_button(ui: &mut Ui, r: Rect, icon: Icon, on: bool, action: Action, hint: &'static str) {

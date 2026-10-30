@@ -1287,21 +1287,22 @@ pub(crate) fn add_one_items(s: &State) -> Vec<PItem> {
 /// Sampler's list names them (spec: audio/declick.md), greyed out while no channel is selected.
 pub(crate) fn declick_items(s: &State) -> Vec<PItem> {
     let none = s.rack.sel.is_empty();
-    lemon_sampler::params::DECLICK
+    let items = lemon_sampler::params::DECLICK
         .iter()
         .enumerate()
         .map(|(m, &label)| {
             let i = it(label, RCmd::DeclickSel(m as u8));
             if none { i.off() } else { i }
         })
-        .collect()
+        .collect();
+    crate::views::menus::tipped(items)
 }
 
 /// Switch all plugin editors to ▸ (§17 "Switch", also TOOLS; spec: ui/plugin-window.md "Docking"); greyed out where
 /// plugin editors have no windows of their own.
 pub(crate) fn editor_items() -> Vec<PItem> {
     let item = |label: &'static str, on: bool| if cfg!(plugin_windows) { it(label, RCmd::DetachAll(on)) } else { it(label, RCmd::DetachAll(on)).off() };
-    vec![item("Attached", false), item("Detached", true)]
+    crate::views::menus::tipped(vec![item("Attached", false), item("Detached", true)])
 }
 
 /// Switch all (`all`) / selected audio clip channels to ▸ (§17 "Switch", also TOOLS; spec: ui/channel-switches.md §1):
@@ -1318,7 +1319,7 @@ pub(crate) fn stretch_items(all: bool) -> Vec<PItem> {
     v.push(pick(7));
     v.push(PItem::head("Legacy"));
     v.extend((8..STRETCH.len()).map(pick));
-    v
+    crate::views::menus::tipped(v)
 }
 
 /// Asks before setting stretch method `method` on every audio clip channel (`all`) or on the selected ones (`sel`);
