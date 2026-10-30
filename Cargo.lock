@@ -2109,6 +2109,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "lemon-voice"
+version = "0.0.1"
+dependencies = [
+ "lemon-small-fx",
+ "nih_plug",
+ "os-plugkit",
+]
+
+[[package]]
 name = "libc"
 version = "0.2.190"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2926,6 +2935,7 @@ dependencies = [
  "lemon-stereo-enhancer",
  "lemon-stereo-shaper",
  "lemon-transient-processor",
+ "lemon-voice",
  "libc",
  "midir",
  "mp3lame-encoder",

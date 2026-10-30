@@ -1,0 +1,8 @@
+OSPRESET 1
+plugin=Lemon Voice	id=clap:org.openstudio.lemon-voice	format=clap	body=params
+# 30%, 20%, 40%, 0%, natural: a light touch, level left alone.
+Denoise = 30
+Room = 20
+Tone = 40
+Level = 0
+Sound = 0
