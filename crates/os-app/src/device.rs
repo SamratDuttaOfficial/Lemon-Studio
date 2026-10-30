@@ -228,6 +228,7 @@ impl Mix {
             }
             i += 1;
         }
+        crate::audio_log::push(&self.sum, w);
         &self.sum
     }
 }
@@ -616,6 +617,10 @@ impl OutputDevice {
         let now = system_input::info().map(|i| i.name);
         if o.input.as_ref().is_some_and(|i| now.as_ref().is_some_and(|n| *n != i.name)) {
             (o.input, o.input_failed) = (None, false);
+        }
+        // Another input device chosen after one failed to open: that one is tried.
+        if system_input::take_retry() {
+            o.input_failed = false;
         }
         if o.input.is_some() || o.input_failed {
             return None;

@@ -13,7 +13,7 @@ use crate::app::{App, State};
 use crate::knobs::KnobId;
 use crate::playlist::Snap;
 use crate::step_edit::Src;
-use os_model::{ClipSource, Note};
+use os_model::{ClipSource, Note, TimeMarker};
 
 /// The undo step of a take (FL's name for it).
 pub const RECORDED: &str = "Recorded items";
@@ -23,6 +23,8 @@ pub const RECORDED: &str = "Recorded items";
 pub enum Opt {
     Notes,
     Automation,
+    /// Armed mixer tracks record (spec: audio/track-io.md §2.5).
+    Audio,
     StartsPlayback,
     DisarmOnStop,
     QuantizeStart,
@@ -52,6 +54,8 @@ pub enum RecCmd {
     /// Dump the last n minutes, replacing the pattern's notes (true) or merging with them.
     DumpAs(u32, bool),
     ClearLog,
+    /// The audio logger keeps the last n minutes.
+    AudioLog(u32),
 }
 
 impl Opt {
@@ -59,6 +63,7 @@ impl Opt {
         match self {
             Opt::Notes => ("rec_notes", true),
             Opt::Automation => ("rec_automation", true),
+            Opt::Audio => ("rec_audio", false),
             Opt::StartsPlayback => ("rec_starts_play", false),
             Opt::DisarmOnStop => ("rec_disarm_stop", false),
             Opt::QuantizeStart => ("rec_q_start", true),
@@ -87,12 +92,8 @@ impl Opt {
 
 /// The button's hint: what the filter records (spec §2 The button).
 pub fn hint() -> String {
-    let what = match (Opt::Notes.on(), Opt::Automation.on()) {
-        (true, true) => "notes, automation",
-        (true, false) => "notes",
-        (false, true) => "automation",
-        (false, false) => "nothing",
-    };
+    let what: Vec<&str> = [(Opt::Notes, "notes"), (Opt::Automation, "automation"), (Opt::Audio, "audio")].into_iter().filter(|(o, _)| o.on()).map(|(_, w)| w).collect();
+    let what = if what.is_empty() { "nothing".to_string() } else { what.join(", ") };
     format!("Record ({what}) (R) - right-click for options")
 }
 
@@ -109,7 +110,7 @@ pub fn set_precount_bars(bars: u32) {
 pub fn option_hint(o: Opt) -> &'static str {
     match o {
         Opt::Wait => "Start on input (Ctrl+I) - right-click for options",
-        Opt::Precount => "Recording precount (Ctrl+P) - right-click for the length",
+        Opt::Precount => "Count-in (Ctrl+P) - right-click for the length",
         Opt::Loop => "Loop record (off: playback runs on past the end while recording)",
         _ => "Blend recorded notes (Ctrl+B)",
     }
@@ -206,12 +207,20 @@ pub struct Rec {
     pub log: crate::score_log::Log,
     /// The history's done steps when the playback that is recording started: TOOLS ▸ Cancel recording goes back to it.
     since: Option<usize>,
+    /// SONG mode: playback has passed a Stop recording marker (and no Start recording marker since), so notes are not
+    /// recorded until playback stops or goes back (spec: audio/transport.md "Time markers in SONG mode").
+    punched_out: bool,
 }
 
 impl Rec {
     /// A take is open (for tests and the hint).
     pub fn recording(&self) -> bool {
         self.take.is_some()
+    }
+
+    /// Notes are held for the take (the piano roll draws them growing).
+    pub fn holding(&self) -> bool {
+        self.take.is_some() && !self.held.is_empty()
     }
 }
 
@@ -273,7 +282,7 @@ impl App {
             arm("Notes and automation", true, true),
             arm("Notes only", true, false),
             arm("Automation only", false, true),
-            PItem::sub("Audio, into the playlist as an audio clip", audio),
+            PItem::sub("Audio, into the arranger as an audio clip", audio),
             // Asks for the input, then records into Tesla on the master track (spec: ui/one-click-recording.md §2).
             PItem::new("Audio, into the audio editor", Cmd::OneClickEditor),
             PItem::sep(),
@@ -306,7 +315,7 @@ impl App {
                 if bars > 0 {
                     set_precount_bars(bars);
                 }
-                Some(if bars > 0 { format!("Recording precount: {bars} bar{}", if bars == 1 { "" } else { "s" }) } else { "Recording precount off".into() })
+                Some(if bars > 0 { format!("Count-in: {bars} bar{}", if bars == 1 { "" } else { "s" }) } else { "Count-in off".into() })
             }
             RecCmd::Dump(minutes) => self.dump_score_log(minutes, None),
             RecCmd::DumpAs(minutes, replace) => self.dump_score_log(minutes, Some(replace)),
@@ -314,6 +323,7 @@ impl App {
                 self.state.rec.log.clear();
                 Some("Score log cleared".into())
             }
+            RecCmd::AudioLog(m) => Some(self.set_audio_log_minutes(m)),
         };
         self.invalidate();
         msg
@@ -360,7 +370,7 @@ impl App {
             s.project.patterns.push(os_model::Pattern { number: pattern, notes: new, ..os_model::Pattern::default() });
         }
         s.piano.dirty = true;
-        Some(format!("Dumped {n} note{} into the pattern", if n == 1 { "" } else { "s" }))
+        Some(format!("Captured {n} note{} into the pattern", if n == 1 { "" } else { "s" }))
     }
 
     /// Hands the looping time selection to the playback (`Transport::set_loop`); returns it.
@@ -434,7 +444,7 @@ impl App {
             Opt::Precount => {
                 let bars = precount_bars();
                 vec![
-                    PItem::head("Precount duration"),
+                    PItem::head("Count-in length"),
                     PItem::new("1 bar", Cmd::RecPrecountBars(1)).mark(Mark::Radio(bars == 1)),
                     PItem::new("2 bars", Cmd::RecPrecountBars(2)).mark(Mark::Radio(bars == 2)),
                 ]
@@ -452,7 +462,7 @@ impl App {
         }
         let name = match o {
             Opt::Wait => "Start on input",
-            Opt::Precount => "Recording precount",
+            Opt::Precount => "Count-in",
             Opt::Loop => "Loop record",
             _ => "Blend recorded notes",
         };
@@ -468,9 +478,8 @@ impl App {
             PItem::head("Recording filter"),
             it("Notes", Opt::Notes),
             it("Automation", Opt::Automation),
-            // Audio (FL: recording into mixer tracks, then the playlist): mixer tracks don't record yet; audio comes with
-            // One-click audio recording, into the playlist or the audio editor.
-            PItem::new("Audio", Cmd::Nothing).off(),
+            // Audio: the armed mixer tracks record, into the playlist (spec: audio/track-io.md §2.5).
+            it("Audio", Opt::Audio),
             PItem::head("Options"),
             it("Ask what to record", Opt::Ask),
             it("Recording starts playback", Opt::StartsPlayback),
@@ -489,28 +498,38 @@ impl App {
         r.armed && r.count.is_none() && what.on() && self.transport.playing() && !self.transport.paused()
     }
 
-    /// A channel's volume or pan knob moved: its value goes into the current pattern as a control point at the playback
-    /// position while recording automation (spec §2 Taking automation).
+    /// A knob moved (`record_control`).
     pub(crate) fn record_knob(&mut self, id: KnobId) {
-        use os_model::ControlPoint;
-        if matches!(id, KnobId::ChanVol(_) | KnobId::ChanPan(_)) {
-            self.start_on_input(Opt::Automation);
+        self.record_control(&crate::app::Action::Knob(id));
+    }
+
+    /// A control moved (a channel's volume or pan knob, a mixer track's fader, pan, separation, equaliser or slot mix
+    /// knob, the tempo): while recording automation its value goes into the current pattern as a control point at the
+    /// playback position, in the setting's own unit (spec §2 Taking automation).
+    pub(crate) fn record_control(&mut self, a: &crate::app::Action) {
+        let Some((kind, value)) = point_of(&self.state, a) else { return };
+        self.start_on_input(Opt::Automation);
+        if self.rec_live(Opt::Automation) {
+            self.record_point(kind, value);
         }
-        if !self.rec_live(Opt::Automation) {
-            return;
+    }
+
+    /// A plugin's parameter `target` moved in its own window to normalized `level`; `range` is its plain range as the
+    /// plugin states it (spec §2 Taking automation; the value: `os_model::target::plugin_point_value`).
+    pub(crate) fn record_param(&mut self, target: u32, range: (f64, f64), level: f64) {
+        self.start_on_input(Opt::Automation);
+        if self.rec_live(Opt::Automation) {
+            self.record_point(target, os_model::target::plugin_point_value(range.0, range.1, level));
         }
-        let (row, param, value) = match id {
-            KnobId::ChanVol(i) => (i, ControlPoint::VOLUME, (self.state.knob(id) * 12800.0).round() as i32),
-            KnobId::ChanPan(i) => (i, ControlPoint::PAN, (self.state.knob(id) * 12800.0).round() as i32),
-            _ => return,
-        };
-        let Some(channel) = self.state.project.channels.get(row).map(|c| c.index) else { return };
+    }
+
+    /// Writes a control point on target word `kind` at the playback position, replacing the move's earlier points.
+    fn record_point(&mut self, kind: u32, value: i32) {
         let song = self.transport.song();
         let t = self.transport.tick();
         self.open_take(song);
         let Some(at) = self.rec_pattern_tick(t, song) else { return };
         let tick = at.max(0.0).round() as u32;
-        let kind = ControlPoint::new(tick, channel, param, value).kind;
         let s = &mut self.state;
         let Some(take) = s.rec.take.as_mut() else { return };
         let last = take.controls.iter().find(|c| c.0 == kind).map(|c| c.1);
@@ -520,7 +539,7 @@ impl App {
             let p = crate::piano::pattern_mut(s);
             p.controls.retain(|c| !(c.kind == kind && c.position > last && c.position < tick));
         }
-        crate::piano::set_control(s, channel, param, tick, value);
+        crate::piano::set_control(s, (kind >> 16) as u16, kind as u16, tick, value);
         s.piano.dirty = true;
     }
 
@@ -537,6 +556,9 @@ impl App {
         }
         let Some(channel) = target else { return };
         let song = self.transport.song();
+        if song && self.state.rec.punched_out {
+            return;
+        }
         let start = self.transport.tick();
         self.open_take(song);
         let Some(at) = self.rec_pattern_tick(start, song) else { return };
@@ -580,26 +602,20 @@ impl App {
 
     /// The current pattern's tick at playback tick `t`: the tick itself in PAT mode; in SONG mode where a clip of the
     /// pattern plays there. Past the end of the take's clip that clip is made longer (to the end of `t`'s bar); with
-    /// no clip, one is placed from the start of that bar on the first free track (spec §2).
+    /// no clip, a whole-pattern clip just before `t` becomes the take's and grows, else one is placed from the start
+    /// of that bar on the first free track (spec §2).
     fn rec_pattern_tick(&mut self, t: f64, song: bool) -> Option<f64> {
         if !song {
             return Some(t);
         }
         let s = &mut self.state;
+        if let Some((p, _)) = grow_take_clip(s, t) {
+            return Some(p);
+        }
         let bar = s.project.bar_ticks().max(1);
         let pattern = s.pattern;
         let whole = |c: &os_model::Clip| c.source == ClipSource::Pattern(pattern) && c.window.is_none();
         let ti = t.max(0.0) as u32;
-        let mine = s.rec.take.as_ref().and_then(|k| k.clip);
-        if let Some((track, at)) = mine.filter(|&(_, at)| ti >= at) {
-            if let Some(c) = crate::playlist::arr_mut(s).clips.iter_mut().find(|c| whole(c) && c.track == track && c.position == at) {
-                if ti >= at + c.length {
-                    c.length = (ti / bar + 1) * bar - at;
-                    s.piano.dirty = true;
-                }
-                return Some(t - f64::from(at));
-            }
-        }
         if let Some(p) = crate::piano::pattern_tick_in_song(s, t) {
             // The whole-pattern clip playing there becomes the take's.
             let under = crate::playlist::clips(s)
@@ -611,6 +627,20 @@ impl App {
                 k.clip = under;
             }
             return Some(p);
+        }
+        // Right after a whole-pattern clip, less than a bar past the bar line at or after its end, with its track free
+        // up to the end of `t`'s bar: that clip becomes the take's and grows instead of a second one being placed.
+        let end = (ti / bar + 1) * bar;
+        let clips = crate::playlist::clips(s);
+        let before = clips
+            .iter()
+            .filter(|c| whole(c) && !c.muted && c.end() <= ti && ti < c.end().div_ceil(bar) * bar + bar)
+            .filter(|c| !clips.iter().any(|o| o.track == c.track && o.position < end && o.end() > c.end()))
+            .max_by_key(|c| c.end())
+            .map(|c| (c.track, c.position));
+        if let Some(k) = s.rec.take.as_mut().filter(|k| k.clip.is_none() && before.is_some()) {
+            k.clip = before;
+            return grow_take_clip(s, t).map(|(p, _)| p);
         }
         let at = ti / bar * bar;
         let len = crate::piano::pattern_length(s, pattern).max(bar);
@@ -681,6 +711,7 @@ impl App {
     /// a stop disarms when "Disarm on stop" is on.
     pub(crate) fn record_tick(&mut self) {
         self.one_click_tick();
+        self.track_rec_tick();
         // A count-in ends after its beats (or with the playback); the clock shows each beat left. A wait ends when
         // something else starts playback.
         if let Some(c) = self.state.rec.count {
@@ -720,6 +751,36 @@ impl App {
                 self.write_held(h, Some(f64::MIN));
             }
             self.state.rec.take = None;
+        }
+        // SONG mode, Start / Stop recording markers (audio/transport.md): passing a Stop recording marker ends the take
+        // there (held notes end on it) and later notes are not recorded (measured in FL: notes after the marker were
+        // not); passing a Start recording marker records again (Lemon Studio's choice). Recording before any of them
+        // goes on as usual: FL recorded from the song's start with a Start recording marker later on.
+        if live && self.transport.song() {
+            let from = self.state.rec.last.filter(|&l| l <= now);
+            let mut passed: Vec<(u32, u8)> = crate::playlist::markers(&self.state)
+                .iter()
+                .filter(|m| matches!(m.kind, TimeMarker::PUNCH_IN | TimeMarker::PUNCH_OUT))
+                .filter(|m| from.is_some_and(|l| f64::from(m.position) > l && f64::from(m.position) <= now))
+                .map(|m| (m.position, m.kind))
+                .collect();
+            passed.sort_unstable();
+            for (at, kind) in passed {
+                let out = kind == TimeMarker::PUNCH_OUT;
+                if out && !self.state.rec.punched_out && self.state.rec.take.is_some() {
+                    self.state.rec.last = Some(f64::from(at));
+                    self.end_take();
+                    self.invalidate();
+                }
+                self.state.rec.punched_out = out;
+            }
+        }
+        if !live || self.state.rec.last.is_some_and(|l| now < l) {
+            self.state.rec.punched_out = false;
+        }
+        // SONG mode: a note held past the take's clip makes it longer as playback runs (spec §2).
+        if live && self.transport.song() && !self.state.rec.held.is_empty() && grow_take_clip(&mut self.state, now).is_some_and(|(_, g)| g) {
+            self.invalidate();
         }
         if live {
             self.state.rec.last = Some(now);
@@ -770,6 +831,70 @@ impl App {
             n => format!("Recording canceled: {n} takes undone"),
         }
     }
+}
+
+/// The notes held for the current pattern's take, from their start (quantized as they will be written) to playback
+/// tick `now` (spec §2 "Shown while held").
+pub fn held_notes(s: &State, now: f64) -> Vec<Note> {
+    if s.rec.take.as_ref().is_none_or(|t| t.pattern != s.pattern) {
+        return Vec::new();
+    }
+    let note = |h: &Held| {
+        let start = h.at.max(0.0).round() as u32;
+        let end = (h.at + (now - h.start)).round().max(0.0) as u32;
+        let (a, _) = quantized(s, start, end.max(start));
+        Note { length: end.saturating_sub(a).max(1), key: h.key, velocity: h.velocity, ..Note::step(h.channel, a) }
+    };
+    s.rec.held.iter().filter(|h| now >= h.start).map(note).collect()
+}
+
+/// SONG mode: the pattern tick at song tick `t` in the take's clip, when `t` is at or past its start; past its end the
+/// clip is made longer, to the end of `t`'s bar (spec §2 "one clip per performance"). Also says whether it grew.
+fn grow_take_clip(s: &mut State, t: f64) -> Option<(f64, bool)> {
+    let (track, at) = s.rec.take.as_ref().and_then(|k| k.clip)?;
+    let ti = t.max(0.0) as u32;
+    if ti < at {
+        return None;
+    }
+    let bar = s.project.bar_ticks().max(1);
+    let pattern = s.pattern;
+    let c = crate::playlist::arr_mut(s)
+        .clips
+        .iter_mut()
+        .find(|c| c.source == ClipSource::Pattern(pattern) && c.window.is_none() && c.track == track && c.position == at)?;
+    let grow = ti >= at + c.length;
+    if grow {
+        c.length = (ti / bar + 1) * bar - at;
+        s.piano.dirty = true;
+    }
+    Some((t - f64::from(at), grow))
+}
+
+/// The control point a control's present value makes: its target word and the value in the setting's own unit (spec:
+/// audio/automation.md "Pattern control points"). The main volume and pitch are not recorded (FL recorded nothing for
+/// the main volume).
+fn point_of(s: &State, a: &crate::app::Action) -> Option<(u32, i32)> {
+    use crate::app::Action;
+    use os_model::target;
+    let track = |t: u16| s.project.mixer.iter().find(|m| m.index == t);
+    let r = |v: f64| v.round() as i32;
+    Some(match *a {
+        Action::Knob(id @ (KnobId::ChanVol(row) | KnobId::ChanPan(row))) => {
+            let param = if matches!(id, KnobId::ChanVol(_)) { target::CHANNEL_VOLUME } else { target::CHANNEL_PAN };
+            (target::channel(s.project.channels.get(row)?.index, param), r(f64::from(s.knob(id)) * 12800.0))
+        }
+        Action::Fader(t) => (target::mixer(t, target::MIXER_VOLUME), r(track(t)?.volume.unwrap_or(0.8) * 16000.0)),
+        Action::Knob(KnobId::MixPan(t)) => (target::mixer(t, target::MIXER_PAN), r(track(t)?.pan.unwrap_or(0.0) * 6400.0)),
+        Action::Knob(KnobId::MixSep(t)) => (target::mixer(t, target::MIXER_SEPARATION), r(track(t)?.stereo_separation.unwrap_or(0.0) * 64.0)),
+        Action::Knob(KnobId::SlotMix(t, k)) => (target::slot(t, k.min(9), target::SLOT_MIX), r(track(t)?.slot_mix[usize::from(k.min(9))] * 12800.0)),
+        Action::Knob(KnobId::Eq(t, b, f)) => {
+            let (b, f) = (b.min(2), f.min(2));
+            let id = [target::EQ_GAIN, target::EQ_FREQ, target::EQ_WIDTH][usize::from(f)] + b;
+            (target::mixer(t, id), track(t)?.eq[usize::from(b)][usize::from(f)])
+        }
+        Action::Tempo => (target::TEMPO, r(s.tempo * 1000.0)),
+        _ => return None,
+    })
 }
 
 #[cfg(test)]
@@ -842,7 +967,7 @@ mod tests {
                 "Notes and automation",
                 "Notes only",
                 "Automation only",
-                "Audio, into the playlist as an audio clip",
+                "Audio, into the arranger as an audio clip",
                 "Audio, into the audio editor",
                 "",
                 "Don't ask again"
@@ -970,6 +1095,63 @@ mod tests {
         assert_eq!(notes(&app), [(48, 48, 0), (bar + 48, 24, 0)]);
     }
 
+    /// SONG mode: a take starting less than a bar past a whole-pattern clip's bar line takes that clip and makes it
+    /// longer; further on, or with the track taken after the clip, a clip of its own is placed (spec §2 "right after a
+    /// clip", issue 192).
+    #[test]
+    fn takes_the_clip_just_before_in_song_mode() {
+        let clips =
+            |app: &App| -> Vec<(u16, u32, u32)> { crate::playlist::clips(&app.state).iter().map(|c| (c.track, c.position, c.length)).collect() };
+        let take = |other: bool, at: f64| {
+            let mut app = app();
+            crate::playlist::arr_mut(&mut app.state).clips.clear();
+            crate::playlist::place(&mut app.state, 0, 0);
+            let bar = app.state.project.bar_ticks();
+            if other {
+                let c = os_model::Clip::new(bar + bar / 2, bar, 0, ClipSource::Pattern(2));
+                crate::playlist::arr_mut(&mut app.state).clips.push(c);
+            }
+            app.toggle_record();
+            key(&mut app, KeyCode::KeyW, true, at, true);
+            key(&mut app, KeyCode::KeyW, false, at + 24.0, true);
+            stop(&mut app);
+            (app, bar)
+        };
+        let (app, bar) = take(false, 400.0);
+        assert_eq!(clips(&app), [(0, 0, 2 * bar)]);
+        assert_eq!(notes(&app), [(408, 24, 0)]);
+        let (app, bar) = take(false, f64::from(2 * bar + 16));
+        assert_eq!(clips(&app), [(0, 0, bar), (0, 2 * bar, bar)]);
+        let (app, bar) = take(true, 400.0);
+        assert_eq!(clips(&app), [(0, 0, bar), (0, bar + bar / 2, bar), (1, bar, bar)]);
+    }
+
+    /// SONG mode: a note held past the take's clip makes it longer while playback runs, so the written note ends inside
+    /// it; the piano roll's held note grows to the playhead (spec §2, issue 192).
+    #[test]
+    fn a_held_note_grows_the_clip_and_shows() {
+        let mut app = app();
+        crate::playlist::arr_mut(&mut app.state).clips.clear();
+        crate::playlist::place(&mut app.state, 0, 0);
+        let bar = app.state.project.bar_ticks();
+        app.toggle_record();
+        key(&mut app, KeyCode::KeyW, true, 50.0, true);
+        assert!(app.state.rec.holding());
+        assert_eq!(held_notes(&app.state, 50.0).iter().map(|n| (n.position, n.length)).collect::<Vec<_>>(), [(48, 2)]);
+        let held = |at: f64| held_notes(&app.state, at).iter().map(|n| (n.position, n.length)).collect::<Vec<_>>();
+        assert_eq!(held(500.0), [(48, 452)]);
+        app.transport.pretend_at(f64::from(2 * bar + 100), true);
+        app.record_tick();
+        assert_eq!(crate::playlist::clips(&app.state)[0].length, 3 * bar);
+        key(&mut app, KeyCode::KeyW, false, f64::from(2 * bar + 200), true);
+        assert!(!app.state.rec.holding() && held_notes(&app.state, 1000.0).is_empty());
+        stop(&mut app);
+        let n = notes(&app);
+        assert_eq!(n.len(), 1);
+        assert!(n[0].0 + n[0].1 <= 3 * bar, "{n:?}");
+        assert_eq!(crate::playlist::clips(&app.state).len(), 1);
+    }
+
     /// R arms like a click when the typing keyboard is off; with it on, R is a note.
     #[test]
     fn r_arms_when_the_typing_keyboard_is_off() {
@@ -989,7 +1171,7 @@ mod tests {
         app.metronome_menu(10.0, 10.0);
         let Some(Popup { items, .. }) = app.state.playlist.popup.clone() else { panic!("no menu") };
         let labels: Vec<&str> = items.iter().map(|i| i.label.as_ref()).collect();
-        assert_eq!(labels[labels.len() - 4..], ["Recording precount", "Off", "1 bar", "2 bars"]);
+        assert_eq!(labels[labels.len() - 4..], ["Count-in", "Off", "1 bar", "2 bars"]);
         crate::playlist::run(&mut app, Cmd::Rec(RecCmd::Precount(2)));
         assert!(Opt::Precount.on() && precount_bars() == 2);
         crate::playlist::run(&mut app, Cmd::Rec(RecCmd::Precount(0)));
@@ -1020,6 +1202,40 @@ mod tests {
         assert_eq!(app.selection_loop(), None);
     }
 
+    /// SONG mode, a Stop recording marker (audio/transport.md "Time markers in SONG mode"): the take ends on it, a note
+    /// held over it ends there, later notes are not recorded; a Start recording marker before playback reaches it
+    /// changes nothing, and one passed after the Stop records again. Stopping clears it.
+    #[test]
+    fn stop_recording_marker_punches_out() {
+        let mut app = app();
+        crate::playlist::arr_mut(&mut app.state).clips.clear();
+        crate::playlist::arr_mut(&mut app.state).markers = vec![
+            TimeMarker { kind: TimeMarker::PUNCH_IN, ..TimeMarker::new(768, "In") },
+            TimeMarker { kind: TimeMarker::PUNCH_OUT, ..TimeMarker::new(1536, "Out") },
+            TimeMarker { kind: TimeMarker::PUNCH_IN, ..TimeMarker::new(2304, "In") },
+        ];
+        app.toggle_record();
+        // From the song's start: recorded before the Start recording marker too, as FL did.
+        key(&mut app, KeyCode::KeyZ, true, 24.0, true);
+        key(&mut app, KeyCode::KeyZ, false, 72.0, true);
+        // Held over the Stop recording marker: it ends there.
+        key(&mut app, KeyCode::KeyX, true, 1488.0, true);
+        app.transport.pretend_at(1560.0, true);
+        app.record_tick();
+        assert!(!app.state.rec.recording(), "the take ended on the marker");
+        key(&mut app, KeyCode::KeyX, false, 1600.0, true);
+        // Past it: not recorded.
+        key(&mut app, KeyCode::KeyC, true, 1700.0, true);
+        key(&mut app, KeyCode::KeyC, false, 1750.0, true);
+        assert_eq!(notes(&app).iter().map(|n| (n.0, n.1)).collect::<Vec<_>>(), [(24, 48), (1488, 48)]);
+        // Past the next Start recording marker: recorded again.
+        key(&mut app, KeyCode::KeyV, true, 2400.0, true);
+        key(&mut app, KeyCode::KeyV, false, 2448.0, true);
+        assert_eq!(notes(&app).len(), 3);
+        stop(&mut app);
+        assert!(!app.state.rec.punched_out);
+    }
+
     /// Dump score log: notes played (playing or not) go into the pattern at their real time offsets from the first,
     /// unquantized; a full pattern asks Merge / Replace; one undo step (spec §6).
     #[test]
@@ -1036,7 +1252,7 @@ mod tests {
         log.up(src(KeyCode::KeyX), t0 + Duration::from_millis(1000));
         let tps = crate::score_log::ticks_per_second(&app.state);
         let msg = crate::playlist::run(&mut app, Cmd::Rec(RecCmd::Dump(2)));
-        assert_eq!(msg.as_deref(), Some("Dumped 2 notes into the pattern"));
+        assert_eq!(msg.as_deref(), Some("Captured 2 notes into the pattern"));
         let t = |s: f64| (s * tps).round() as u32;
         assert_eq!(notes(&app), [(0, t(0.3), 0), (t(0.7), t(0.3), 0)]);
         assert_eq!(app.state.history.entries().last().map(|e| e.1), Some(crate::score_log::DUMPED));
@@ -1106,6 +1322,48 @@ mod tests {
         assert_eq!(crate::record::hint(), "Record (notes) (R) - right-click for options");
     }
 
+    /// A mixer track's fader and pan, the tempo and a plugin's parameter record into the current pattern as control
+    /// points on their targets, each in its setting's own unit (the plugin's parameter: its plain value in a whole
+    /// range), in the take's one undo step; a dialog's knob records nothing (spec §2 Taking automation).
+    #[test]
+    fn records_mixer_controls_the_tempo_and_plugin_parameters() {
+        use os_model::target;
+        let mut app = app();
+        if crate::mixer::track(&app.state, 1).is_none() {
+            app.state.project.mixer = (0..3).map(os_model::MixerTrack::new).collect();
+        }
+        app.toggle_record();
+        app.transport.pretend_at(24.0, false);
+        app.record_tick();
+        let m = crate::mixer::track_mut(&mut app.state, 1).unwrap();
+        (m.volume, m.pan) = (Some(0.5), Some(-0.25));
+        app.record_control(&Action::Fader(1));
+        app.record_control(&Action::Knob(KnobId::MixPan(1)));
+        app.transport.pretend_at(48.0, false);
+        app.state.tempo = 150.0;
+        app.record_control(&Action::Tempo);
+        app.record_param(target::slot_param(1, 2, 0), (-64.0, 64.0), 0.75);
+        app.record_param(target::slot_param(1, 2, 1), (0.0, 1.0), 0.25);
+        app.record_knob(KnobId::Swing);
+        let points = |app: &App| {
+            let p = app.state.project.pattern(app.state.pattern).map(|p| p.controls.clone()).unwrap_or_default();
+            p.into_iter().map(|c| (c.position, c.kind, c.value)).collect::<Vec<_>>()
+        };
+        assert_eq!(
+            points(&app),
+            [
+                (24, target::mixer(1, target::MIXER_VOLUME), 8000),
+                (24, target::mixer(1, target::MIXER_PAN), -1600),
+                (48, target::TEMPO, 150_000),
+                (48, target::slot_param(1, 2, 0), 32),
+                (48, target::slot_param(1, 2, 1), 16384),
+            ]
+        );
+        stop(&mut app);
+        crate::history::undo(&mut app.state);
+        assert_eq!(points(&app), []);
+    }
+
     /// "Disarm on stop" disarms at the stop; step edit never takes a recorded note.
     #[test]
     fn disarm_on_stop_and_step_edit() {
@@ -1143,7 +1401,7 @@ mod tests {
         app.mouse_up();
         let Some(Popup { items, .. }) = app.state.playlist.popup.take() else { panic!("no menu") };
         let labels: Vec<&str> = items.iter().map(|i| i.label.as_ref()).collect();
-        assert_eq!(labels, ["Precount duration", "1 bar", "2 bars"]);
+        assert_eq!(labels, ["Count-in length", "1 bar", "2 bars"]);
         crate::playlist::run(&mut app, Cmd::RecPrecountBars(2));
         assert_eq!(precount_bars(), 2);
         let w = hit_rect(&app, &Action::RecOpt(Opt::Wait));
@@ -1164,7 +1422,6 @@ mod tests {
         ctrl(&mut app, "p");
         ctrl(&mut app, "b");
         assert_eq!((Opt::Wait.on(), Opt::Precount.on(), Opt::Blend.on()), (true, true, false));
-        assert_eq!(crate::views::menus::record_option("Start on input"), Some(Opt::Wait));
     }
 
     /// Start on input: Play waits; the first note starts playback from the start and is recorded there; Play again

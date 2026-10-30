@@ -101,8 +101,11 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     let font = Font::new(17);
     let nx = r.x + 365.0 + ui.c.text_width(font, title);
     let nw = ui.c.text_width(font, &name);
+    // Short of the window buttons, as the title (a narrow window cuts it).
+    let room = Rect::new(r.x, r.y, super::title_room(r, true).max(0.0), 23.0);
+    ui.c.push_clip(room);
     let hov = ui.hit(
-        Rect::new(nx - 2.0, r.y + 2.0, nw + 22.0, 19.0),
+        Rect::new(nx - 2.0, r.y + 2.0, nw + 22.0, 19.0).intersect(&room),
         Action::PianoTarget,
         "Target channel (wheel: channels with notes; right-click: settings)",
     );
@@ -114,6 +117,7 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     } else {
         os_ui::kit::triangle(ui.c, ax, ay, 4.0, os_ui::kit::Dir::Right, t.text_dim);
     }
+    ui.c.pop_clip();
     let shift = if floating { -4.0 } else { 0.0 };
     toolbar(ui, s, r, shift);
     if r.h < 2.0 * crate::app::TITLE_H {
@@ -246,6 +250,14 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
             let shown = if w <= room - 5.0 { label } else { format!("{}..", &label[..1]) };
             ui.c.text_clip(label_font, nr.x + if lemon { 4.0 } else { 3.0 }, nr.y + 2.0, room - 4.0, text, &shown);
         }
+    }
+    // Notes still held while recording, growing to the playhead (spec: ui/recording.md §2 "Shown while held").
+    for n in crate::record::held_notes(s, f.tick).iter().filter(|n| f.playing && Some(n.channel) == ch) {
+        let Some(nr) = g.note_rect(n) else { continue };
+        let body = Rect::new(nr.x + 1.0, nr.y + 1.0, (nr.w - 2.0).max(1.0), nr.h - 2.0);
+        let rad = if lemon { 3.5f32.min(nr.w / 2.0).min(nr.h / 2.0) } else { 2.0 };
+        ui.c.fill_rrect(nr, rad, t.note_rim);
+        ui.c.fill_rect_gradient(body, t.note_top, t.note_bottom, (rad - 1.0).max(0.0));
     }
     // Tool overlays (§9): marquee and zoom box (orange, rounded), slice and scrub lines.
     match s.piano.overlay {

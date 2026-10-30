@@ -59,8 +59,9 @@ young, so read the warning below before trying it on real work.
 >   nothing so far; they are drawn dim and say "not available yet".
 > - **No prebuilt binaries** will be published until Lemon Studio reaches a usable state. Until then it
 >   can only be built from source.
-> - **Only projects saved by FL Studio 24.2 or later open for now** (25 and 26 included). Older projects
->   are refused with a dialog that explains how to re-save them; support for them is on the roadmap.
+> - **Projects saved by FL Studio 10 or later open** (25 and 26 included). Projects older than 24.2 are
+>   converted to the current layout as they open and are saved in it, so the version that wrote them may not
+>   read the saved copy.
 > - **Project-file support is at a very early stage.** Do not overwrite your original `.flp` projects
 >   with files saved by Lemon Studio until this support is declared stable. Work on copies and keep backups.
 
@@ -79,20 +80,21 @@ Where Lemon Studio stands against what a complete DAW offers:
 | Time-stretching | ✅ | All twelve stretch methods for samples and audio clips, played by one open-source stretcher |
 | Playback engine | 🚧 | Renders ahead of the audio device so edits do not cause dropouts; voice limits, cut groups, glides, layer channels; one audio thread for now |
 | Automation | 🚧 | Clips for channel, mixer and plugin parameters with every curve shape, their range and their LFO; channel volume and pan moves record into a pattern; not yet recording into automation clips |
-| Project files | 🚧 | Opens and saves projects from FL Studio 24.2 and later; older versions are on the roadmap. Keep backups |
-| Built-in instruments and effects | 🚧 | Instruments: Lemon Sampler (long samples can play straight from disk), Lemon Trio (three oscillators) and Citrus (a six-operator synth that plays Sytrus patches). Effects: Lemon Parametric EQ (all of FL's quality modes: HQ+, HQ Enhanced, linear phase), Limiter, Reverb, Delay, Chorus, Stereo Shaper, Stereo Enhancer, Balance, Soft Clipper, Fast Distortion, Transient Processor, Flanger, Phaser, Spritz (a de-esser), Pitch (pitch correction), Mouth (removes mouth clicks and saliva noise), Phrase (note-by-note pitch correction that keeps the vibrato) and Voice (a vocal enhancer: noise, room, tone and level). All built in, and also VST3 and CLAP plugins for other DAWs; a project's Fruity Limiter slots play Lemon Limiter's sound, sidechain included |
+| Project files | 🚧 | Opens and saves projects from FL Studio 10 and later (older layouts are converted as they open). Keep backups |
+| Built-in instruments and effects | 🚧 | Instruments: Lemon Sampler (long samples can play straight from disk), Lemon Trio (three oscillators), Citrus (a six-operator synth that plays Sytrus patches), Lemon Slicer (a loop cut into slices that plays Fruity Slicer channels) and Lemon Drum Sampler (32 pads of velocity-layered samples that plays FPC kits). Effects: Lemon Parametric EQ (all of FL's quality modes: HQ+, HQ Enhanced, linear phase), Limiter, Reverb, Delay, Chorus, Stereo Shaper, Stereo Enhancer, Balance, Soft Clipper, Fast Distortion, Transient Processor, Filter, Flanger, Phaser, Spritz (a de-esser), Pitch (pitch correction), Mouth (removes mouth clicks and saliva noise), Phrase (note-by-note pitch correction that keeps the vibrato) and Voice (a vocal enhancer: noise, room, tone and level), plus Pulp Filter (a pattern-controlled multi-filter) and Press (a multiband maximiser). All built in, and also VST3 and CLAP plugins for other DAWs; a project's Fruity Limiter slots play Lemon Limiter's sound, sidechain included |
 | Exporting audio | ✅ | Song, pattern or selection to WAV, FLAC, MP3 and OGG at once; bit depth, sample rate, interpolation, dither, mono, tails, stems and WAV markers; a pattern rendered as an audio clip (Quick render, Render and replace) |
 | MIDI file import / export | ✅ | Import into a new project, the open one or a piano roll channel (tracks, channels, tempo changes, time signatures, markers); export a pattern or the song's patterns |
 | Note input | 🚧 | Mouse, computer keyboard, MIDI controllers (velocity curves, sustain pedal, pitch bend, aftertouch) and the touch controller; note recording into patterns with loop record, precount and Start on input; step edit |
 | MIDI controllers and sync | ✅ | Link any knob, fader or plugin parameter to a controller (or many at once with Multilink); MIDI clock and time code out, external clock in |
-| Undo | 🚧 | One history for the whole project, with redo and the browser's History: edits, knobs and faders, channels added and deleted, project settings; not yet for a plugin editor's own changes |
+| Undo | 🚧 | One history for the whole project, with redo and the browser's History: edits, knobs and faders, the mixer, channels added and deleted, the tempo and project settings, and plugin parameters, those changed in their own windows too |
+| Scripting and assistants | 🚧 | Scripts, tests and AI assistants read and edit projects over a local socket, every change undoable; see [docs/control-plane.md](docs/control-plane.md) |
 | Audio drivers | 🚧 | WASAPI (shared and exclusive) and ASIO® (output, and inputs for audio recording) on Windows, ALSA (and PipeWire / PulseAudio through it) on Linux, Core Audio on macOS; no JACK yet |
 | Platforms | 🚧 | Windows 10 / 11, Linux (X11, and Wayland through XWayland) and macOS 11 or newer; macOS is supported at the same level as Linux |
 | Look and themes | 🚧 | Lemon and Citrus (formerly Classic) skins; 25 built-in themes, your own themes and `.flstheme` files colour either skin, with live adjustments and a colour picker; Lemon plugin editors in the Lemon design only |
 | Settings | 🚧 | The General, Audio, MIDI, File, Theme, Project and Info pages work; not yet the recording settings |
-| Audio recording | 🚧 | One-click audio recording into the playlist or the audio editor, from ASIO or system inputs; Tesla records what reaches its mixer slot |
+| Audio recording | 🚧 | Armed mixer tracks record into the playlist at their record source; one-click audio recording into the playlist or the audio editor, from ASIO or system inputs; Tesla records what reaches its mixer slot |
 | Audio editing | ✅ | Tesla, the audio editor and recorder after FL's Edison: a mixer effect (and VST3 / CLAP plugin) with markers, regions, destructive edits and tools; a project's Edison slots open in it |
-| Plugin delay compensation | 🚧 | Plugins' reported delays and the mixer tracks' latency settings, in playback and exports; the settings can't be edited yet |
+| Plugin delay compensation | 🚧 | Plugins' reported delays and the mixer tracks' latency settings, in playback and exports; the settings are edited from the mixer |
 
 ✅ usable · 🚧 partial · ❌ not available yet
 
@@ -128,7 +130,7 @@ cd Lemon-Studio
 `cargo run -p os-app --release` builds and runs Lemon Studio. Before Lemon Studio starts, it also rebuilds Lemon
 Studio's own plugins (Lemon Sampler, Lemon Trio, Lemon Parametric EQ, Lemon Limiter, Lemon Reverb, Lemon Delay, Lemon
 Soft Clipper, Lemon Fast Distortion, Lemon Balance, Lemon Stereo Enhancer, Lemon Transient Processor, Lemon Chorus,
-Lemon Stereo Shaper, Lemon Filter, Lemon Flanger, Lemon Phaser, Lemon Spritz, Lemon Pitch, Lemon Mouth, Lemon Phrase, Lemon Voice and Citrus) and
+Lemon Stereo Shaper, Lemon Filter, Lemon Flanger, Lemon Phaser, Lemon Spritz, Lemon Pitch, Lemon Mouth, Lemon Phrase, Lemon Voice, Pulp Filter, Press, Tesla and Citrus) and
 installs the ones that changed as VST3 and CLAP plugins, in the folders where other DAWs find them. Lemon Studio itself
 has every one of them built in and needs no plugin files. A plugin that is new or updated in the repository shows up
 in other DAWs at the next run. The first run builds every plugin, which takes
@@ -178,6 +180,10 @@ and `...\CLAP`, where DAWs find them. To build and install them without starting
 **Notes**
 
 - A plugin that crashes is stopped (its slot passes the sound through) instead of closing Lemon Studio.
+- `lemonstudio.exe` is a Windows GUI program: started from Explorer, the Start menu or a shortcut it opens no console
+  window. Under `cargo run` its output goes to the terminal as before. Started directly from a terminal it prints there
+  too, but the terminal does not wait for it: for `--render`, add `| Out-Default` in PowerShell (or use
+  `start /wait` in `cmd`) to wait until the render is done.
 - Settings, themes and presets live in `%APPDATA%\Lemon Studio`. `OPENSTUDIO_USER_DIR` overrides the folder.
 - Plugins are found in `%LOCALAPPDATA%\Programs\Common\{VST3,CLAP}`, `%COMMONPROGRAMFILES%\{VST3,CLAP}` and
   `CLAP_PATH`, plus any folder added in Settings > Plugins. VST2 plugins are found in the folder their installers
@@ -330,6 +336,22 @@ project files are never committed to this repository.
 The watermark test (`cargo test -p watermark`) checks that every source file opens with its header: a copyright line
 for each of its copyright holders, its SPDX licence identifier and the project's name.
 
+Every test binary is compiled and linked on its own, so a crate keeps its integration tests in one:
+`tests/integration/main.rs` names each file there as a module (run one with `cargo test -p os-engine --test integration
+fx_null`); a new file goes there, not beside it. The crates have no doc tests (`doctest = false`: code in doc comments is
+`text` or `ignore`), and a crate without tests has `test = false`; take that out when adding its first test.
+
+### Scripting and assistants
+
+`--control <socket>` lets scripts, tests and AI assistants read and change the open project over a local socket
+(JSON-RPC 2.0), and `--serve <socket> [project.flp]` does the same without a window. Each change is an undo step named
+after the client; clients can be limited to reading or to proposing changes the user accepts. The protocol and its
+commands are in [docs/control-plane.md](docs/control-plane.md).
+
+```bash
+cargo run -p os-app --release -- --control /tmp/lemon.sock path/to/project.flp
+```
+
 ### Command-line tools
 
 | Tool | Purpose |
@@ -362,6 +384,7 @@ Lemon Studio is a Cargo workspace of focused crates:
 | [`os-paths`](crates/os-paths) | Where Lemon Studio keeps its settings, themes and presets on each platform |
 | [`lemon-sampler`](plugins/lemon-sampler) | Lemon Sampler instrument (VST3 + CLAP) |
 | [`lemon-3x-osc`](plugins/lemon-3x-osc) | Lemon Trio instrument (VST3 + CLAP) |
+| [`lemon-drum-sampler`](plugins/lemon-drum-sampler) | Lemon Drum Sampler instrument, 32 pads of velocity-layered samples (VST3 + CLAP) |
 | [`lemon-parametric-eq-2`](plugins/lemon-parametric-eq-2) | Lemon Parametric EQ effect (VST3 + CLAP) |
 | [`lemon-limiter`](plugins/lemon-limiter) | Lemon Limiter effect (VST3 + CLAP) |
 | [`lemon-reverb`](plugins/lemon-reverb) | Lemon Reverb effect (VST3 + CLAP) |
@@ -376,20 +399,27 @@ Lemon Studio is a Cargo workspace of focused crates:
 | [`lemon-stereo-shaper`](plugins/lemon-stereo-shaper) | Lemon Stereo Shaper effect (VST3 + CLAP) |
 | [`lemon-filter`](plugins/lemon-filter) | Lemon Filter effect (VST3 + CLAP) |
 | [`lemon-flanger`](plugins/lemon-flanger) | Lemon Flanger effect (VST3 + CLAP) |
+| [`lemon-peak-controller`](plugins/lemon-peak-controller) | Lemon Peak Controller: a peak follower and LFO whose outputs drive linked controls (VST3 + CLAP) |
+| [`lemon-formula-controller`](plugins/lemon-formula-controller) | Lemon Formula Controller: a typed formula of three knobs and the song position whose output drives linked controls (VST3 + CLAP) |
 | [`lemon-phaser`](plugins/lemon-phaser) | Lemon Phaser effect (VST3 + CLAP) |
+| [`lemon-vocoder`](plugins/lemon-vocoder) | Lemon Vocoder: a band vocoder with a sidechain input for the carrier (VST3 + CLAP) |
+| [`pulp-filter`](plugins/pulp-filter) | Pulp Filter effect, a pattern-controlled multi-filter (VST3 + CLAP) |
+| [`press`](plugins/press) | Press effect, a multiband maximiser (VST3 + CLAP) |
+| [`tesla`](plugins/tesla) | Tesla, the audio editor and recorder (VST3 + CLAP) |
 | [`lemon-spritz`](plugins/lemon-spritz) | Lemon Spritz de-esser (VST3 + CLAP) |
 | [`lemon-pitch`](plugins/lemon-pitch) | Lemon Pitch pitch correction: key and scale detection, retune, humanize, vibrato (VST3 + CLAP) |
 | [`lemon-voice`](plugins/lemon-voice) | Lemon Voice vocal enhancer: less noise and room, a studio vocal's tone, a steady level (VST3 + CLAP) |
 | [`lemon-phrase`](plugins/lemon-phrase) | Lemon Phrase note-by-note pitch correction: each note moved onto the scale as a whole, its vibrato and expression kept (VST3 + CLAP) |
 | [`lemon-mouth`](plugins/lemon-mouth) | Lemon Mouth mouth-noise remover: clicks, smacks and saliva crackle out, words kept (VST3 + CLAP) |
 | [`citrus`](plugins/citrus) | Citrus instrument, a six-operator synthesizer (VST3 + CLAP) |
+| [`lemon-slicer`](plugins/lemon-slicer) | Lemon Slicer instrument, a loop cut into slices (VST3 + CLAP) |
 
 ## Roadmap
 
 The roadmap is kept on the [Lemon Studio Discord server](https://discord.gg/yC2uCuGs3M), where every item is
 marked as complete, in progress or not started. The broad next steps are the engine rework (sampler voice,
-automation), opening projects from older FL Studio versions, audio recording into mixer tracks, more
-built-in instruments and effects, and the rest of the plugin window features on Linux.
+automation), opening projects from older FL Studio versions, more built-in instruments and effects, and the rest of
+the plugin window features on Linux.
 
 ## Development approach
 

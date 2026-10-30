@@ -1,8 +1,9 @@
 // Copyright (C) 2026 ItsAlphaNeon
+// Copyright (C) 2026 thacer13
 // SPDX-License-Identifier: GPL-3.0-or-later
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
-//! Plugin parameters in the app: the parameter lists of hosted instances (shown in the browser, "Browse parameters"),
+//! Plugin parameters in the app: the parameter lists of hosted instances (shown in the browser, "Show all parameters"),
 //! the last tweaked parameter (Tools / Add menus), the parameter menu, and automation clips on plugin parameters
 //! (targets, names, value texts).
 //!
@@ -17,6 +18,11 @@ use os_model::target::{self, Target};
 use crate::app::{Action, App, State};
 use crate::playlist::{Cmd, Mark, PItem, Popup};
 use crate::plugins::{fx_key, fx_of};
+
+/// The values of an instance's parameters, by id.
+fn read_values(p: &dyn os_host::Plugin, params: &[Entry]) -> BTreeMap<u32, f64> {
+    params.iter().filter_map(|e| Some((e.id, p.param_value(e.id)?))).collect()
+}
 
 /// Browser tab of the project tree, and the sections plugin nodes live in (spec: ui/browser.md §2).
 const PROJECT_TAB: usize = 1;
@@ -41,7 +47,20 @@ pub struct List {
     pub params: Vec<Entry>,
     /// When `params_tick` last took the instance's events (`Hosted::due`).
     pub seen: crate::plugins::Look,
+    /// The parameters' values as last read or sent by the plugin, by id: what an edit in the plugin's window moves
+    /// from (its undo step's value).
+    pub values: BTreeMap<u32, f64>,
+    /// The parameters being edited in the plugin's window (a gesture begun and not ended): the value each moves from.
+    pub open: BTreeMap<u32, f64>,
+    /// When `values` were last read from the plugin, and whether they are to be read again (the host set a parameter
+    /// whose value it does not know: `ParamUi::reread`).
+    pub read_at: std::time::Instant,
+    pub reread: bool,
 }
+
+/// `values` are read again at most this often when the plugin reports something other than its editor's edits (an
+/// automation clip moving a parameter does on every tick).
+const REREAD_EVERY: std::time::Duration = std::time::Duration::from_millis(250);
 
 /// Something the user moved last (spec §5).
 #[derive(Debug, Clone, PartialEq)]
@@ -52,12 +71,29 @@ pub enum Tweak {
     Host(Action),
 }
 
+impl ParamUi {
+    /// The host set parameter `id` of instance `key` to `v` (an undo, the value box, Paste): what the plugin's window
+    /// moves it from next.
+    pub fn set_by_host(&mut self, key: usize, id: u32, v: f64) {
+        if let Some(l) = self.lists.get_mut(&key) {
+            l.values.insert(id, v);
+        }
+    }
+
+    /// The host set parameters of instance `key` it does not know the value of: they are read again next tick.
+    pub fn reread(&mut self, key: usize) {
+        if let Some(l) = self.lists.get_mut(&key) {
+            l.reread = true;
+        }
+    }
+}
+
 /// What the app knows about plugin parameters.
 #[derive(Debug, Default)]
 pub struct ParamUi {
     /// By hosted key (`plugins::Plugins::hosted`).
     pub lists: BTreeMap<usize, List>,
-    /// Newest first: "Last tweaked", "Next to last tweaked".
+    /// Newest first: "Most recent", "Second most recent".
     pub last: Vec<Tweak>,
 }
 
@@ -89,7 +125,7 @@ impl ParamUi {
 /// Commands from the parameter menus.
 #[derive(Debug, Clone, PartialEq)]
 pub enum PCmd {
-    /// Plugin window ▸ "Browse parameters": hosted key.
+    /// Plugin window ▸ "Show all parameters": hosted key.
     Browse(usize),
     /// "Copy value" / "Paste value" of parameter (hosted key, index).
     Copy(usize, usize),
@@ -156,9 +192,13 @@ pub(crate) fn param_value(s: &State, key: usize, index: usize) -> Option<f64> {
     value_of(s, key, index)
 }
 
-pub(crate) fn set_param_value(s: &State, key: usize, index: usize, v: f64) -> bool {
+pub(crate) fn set_param_value(s: &mut State, key: usize, index: usize, v: f64) -> bool {
     let Some(id) = s.params.lists.get(&key).and_then(|l| l.params.get(index)).map(|e| e.id) else { return false };
-    s.params.plugin(key).is_some_and(|p| p.lock().is_ok_and(|mut p| p.set_param(id, v)))
+    let set = s.params.plugin(key).is_some_and(|p| p.lock().is_ok_and(|mut p| p.set_param(id, v)));
+    if set {
+        s.params.set_by_host(key, id, v);
+    }
+    set
 }
 
 /// "Create automation clip" for parameter `index` of instance `key`: target, clip name, current value.
@@ -229,6 +269,9 @@ fn parameter_items(s: &State, param: Option<(usize, usize)>, create: Option<(u32
         Some(ch) => PItem::new("Edit automation clip...", Cmd::Param(PCmd::EditClip(ch))),
         None => PItem::new("Edit automation clip...", Cmd::Nothing).off(),
     };
+    // spec: ui/event-editor.md §1
+    let range = param.and_then(|(key, index)| s.params.plugin(key).and_then(|p| p.lock().ok()?.param_info(index))).map(|i| (i.min, i.max));
+    let events = crate::events::menu_item(create.as_ref(), range);
     let create = match create {
         Some((tgt, name, v)) => PItem::new("Create automation clip", Cmd::CreateAutomation(tgt, name, v)),
         None => PItem::new("Create automation clip", Cmd::Nothing).off(),
@@ -243,10 +286,10 @@ fn parameter_items(s: &State, param: Option<(usize, usize)>, create: Option<(u32
     };
     let set = param.map(|(key, index)| set_items(s, key, index)).filter(|v| !v.is_empty());
     let mut v = vec![
-        // Lemon Studio has no event editor yet; FL showed the other two disabled.
-        PItem::not_yet("Edit events"),
-        PItem::new("Edit events in new window", Cmd::Nothing).off(),
-        PItem::new("Edit events in piano roll", Cmd::Nothing).off(),
+        // FL showed the other two disabled.
+        events,
+        PItem::new("Edit automation in a window", Cmd::Nothing).off(),
+        PItem::new("Edit automation in piano roll", Cmd::Nothing).off(),
         init,
         delete,
         PItem::sep(),
@@ -258,7 +301,7 @@ fn parameter_items(s: &State, param: Option<(usize, usize)>, create: Option<(u32
     let target = param.map(|(key, index)| crate::typein::Target::Param(key, index));
     let linked = driven.is_some() || target.is_some_and(|t| crate::remote::link_of(t).is_some());
     let mut remote = crate::remote::menu_items(target);
-    if let Some(link) = remote.iter_mut().find(|i| i.label == "Link to controller...") {
+    if let Some(link) = remote.iter_mut().find(|i| i.label == "MIDI learn...") {
         link.mark = Mark::Check(linked);
     }
     v.extend(remote);
@@ -268,8 +311,8 @@ fn parameter_items(s: &State, param: Option<(usize, usize)>, create: Option<(u32
         paste,
         // spec: ui/type-in-value.md §8 (normalized mode only)
         match param {
-            Some((key, index)) => PItem::new("Type in value...", Cmd::TypeIn(crate::typein::Target::Param(key, index))),
-            None => PItem::not_yet("Type in value..."),
+            Some((key, index)) => PItem::new("Enter value...", Cmd::TypeIn(crate::typein::Target::Param(key, index))),
+            None => PItem::not_yet("Enter value..."),
         },
         match set {
             Some(values) => PItem::sub("Set...", values),
@@ -298,13 +341,14 @@ pub fn effect_label(s: &State, track: u16, slot: u8) -> Option<String> {
     Some(format!("{} ({})", crate::mixer::slot_name(s, track, slot)?, crate::mixer::name(s, track)))
 }
 
-/// Main-menu entries handled here (spec §5).
-pub const ADD_LAST: &str = "Automation for last tweaked parameter";
-pub const TOOLS_LAST: &str = "Last tweaked";
-pub const TOOLS_NEXT: &str = "Next to last tweaked";
-
-pub fn menu_handles(label: &str) -> bool {
-    matches!(label, ADD_LAST | TOOLS_LAST | TOOLS_NEXT)
+/// The menu entries for the last tweaked parameters (spec §5; `views::menus::MenuCmd::Params`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum MenuEntry {
+    /// ADD > Automation for the most recent parameter: its automation clip at once.
+    Automation,
+    /// TOOLS > Most recent ▸ / Second most recent ▸: the parameter's menu, at the mouse.
+    Last,
+    NextToLast,
 }
 
 impl App {
@@ -315,7 +359,9 @@ impl App {
         let mut moved = None;
         let mut edited = Vec::new();
         let mut automate = Vec::new();
+        let mut recorded = Vec::new();
         let mut stretch = Vec::new();
+        let (mut seen, mut steps) = (Vec::new(), Vec::new());
         for (&key, h) in &self.plugins.hosted {
             // Only an instance with something new is locked, and never waited for: one the audio thread is rendering
             // is read again next tick (its events stay queued).
@@ -325,19 +371,64 @@ impl App {
             let count = p.param_count();
             let stale = ui.lists.get(&key).is_none_or(|l| l.params.len() != count || !Weak::ptr_eq(&l.plugin, &weak));
             if stale {
-                let params = (0..count)
+                let params: Vec<Entry> = (0..count)
                     .map(|i| match p.param_info(i) {
                         Some(info) => Entry { id: info.id, name: info.name, hidden: info.hidden, default: info.default, steps: info.steps },
                         None => Entry { id: u32::MAX, name: String::new(), hidden: true, default: 0.0, steps: 0 },
                     })
                     .collect();
-                ui.lists.insert(key, List { plugin: weak, params, seen: look });
+                let values = read_values(&*p, &params);
+                let now = std::time::Instant::now();
+                ui.lists.insert(key, List { plugin: weak, params, seen: look, values, open: BTreeMap::new(), read_at: now, reread: false });
             }
+            let events = p.take_param_events();
             if let Some(l) = ui.lists.get_mut(&key) {
+                let moved_count = l.seen.count != look.count;
                 l.seen = look;
+                let owner = h.owner;
+                // What this tick's edits in the window change, by parameter: the value each moved from and to, and
+                // whether a value came without a gesture.
+                let mut changed: BTreeMap<u32, (f64, f64)> = BTreeMap::new();
+                let mut loose = false;
+                for e in &events {
+                    match *e {
+                        os_host::ParamEvent::Begin(id) => {
+                            let from = l.values.get(&id).copied().or_else(|| p.param_value(id));
+                            if let Some(from) = from {
+                                l.open.entry(id).or_insert(from);
+                            }
+                        }
+                        os_host::ParamEvent::Value(id, v) => {
+                            let from = l.values.insert(id, v);
+                            seen.push((owner, id, v));
+                            if let (false, Some(from)) = (l.open.contains_key(&id), from) {
+                                changed.entry(id).or_insert((from, v)).1 = v;
+                                loose = true;
+                            }
+                        }
+                        os_host::ParamEvent::End(id) => {
+                            if let Some(from) = l.open.remove(&id) {
+                                let now = l.values.get(&id).copied().unwrap_or(from);
+                                changed.entry(id).or_insert((from, now)).1 = now;
+                            }
+                        }
+                    }
+                }
+                let changed: Vec<(u32, f64)> = changed.into_iter().filter(|(_, (from, now))| from != now).map(|(id, (from, _))| (id, from)).collect();
+                if !changed.is_empty() && !owner.is_none() {
+                    steps.push((owner.0, changed, loose));
+                }
+                // The plugin reported something other than its editor's edits (a preset it loaded, a restart,
+                // automation), or the host set what it doesn't know: the values are read again, so an undo moves
+                // back to what was there. Never during a gesture, whose start is kept.
+                let due = l.reread || (events.is_empty() && moved_count && l.read_at.elapsed() >= REREAD_EVERY);
+                if !stale && due && l.open.is_empty() {
+                    l.values = read_values(&*p, &l.params);
+                    (l.read_at, l.reread) = (std::time::Instant::now(), false);
+                }
             }
             let sampler = key < crate::plugins::FX_KEY && p.desc().name == crate::plugins::LEMON_SAMPLER;
-            for e in p.take_param_events() {
+            for e in events {
                 if let (true, os_host::ParamEvent::Value(id, v)) = (sampler, &e) {
                     if let Some(x) = ui.lists.get(&key).and_then(|l| l.params.iter().find(|x| x.id == *id)) {
                         stretch.push((key, x.name.clone(), *v));
@@ -347,6 +438,10 @@ impl App {
                 edited.push(key);
                 if let Some(index) = ui.lists.get(&key).and_then(|l| l.params.iter().position(|x| x.id == id)) {
                     moved = Some(Tweak::Plugin { key, index });
+                    // What automation recording takes: the value with the parameter's stated range.
+                    if let (os_host::ParamEvent::Value(_, v), Some(info)) = (e, p.param_info(index)) {
+                        recorded.push((key, index, (info.min, info.max), v));
+                    }
                 }
             }
             // "Create automation clip" picked in the plugin's own menu (CLAP context menu).
@@ -355,6 +450,16 @@ impl App {
                     automate.push((key, index));
                 }
             }
+        }
+        // An edit in a plugin's window is an undo step (by the owner's id, so it follows moves): a gesture's from its
+        // begin to its end, values sent without one joined while they come in a row.
+        for (owner, id, v) in seen {
+            if !owner.is_none() {
+                self.state.control.saw_param(owner.0, id, v);
+            }
+        }
+        for (owner, changed, run) in steps {
+            crate::control::param_edit(&mut self.state, owner, &changed, run);
         }
         // A knob moved in a plugin's own window is the user's edit (`Plugins::mark_edited`).
         for key in edited {
@@ -379,9 +484,23 @@ impl App {
             self.state.params.note(t);
             self.tweak_hint();
         }
+        for (key, index, range, v) in recorded {
+            if let Some(target) = target_of(&self.state, key, index) {
+                self.record_param(target, range, v);
+            }
+        }
         for (key, index) in automate {
             self.state.message = self.params_automate(key, index);
             self.invalidate();
+        }
+    }
+
+    /// A plugin parameter set from outside its window (a remote control) to `level`, for automation recording.
+    pub(crate) fn record_plugin_param(&mut self, key: usize, index: usize, level: f64) {
+        let Some(target) = target_of(&self.state, key, index) else { return };
+        let range = self.state.params.plugin(key).and_then(|p| p.lock().ok()?.param_info(index)).map(|i| (i.min, i.max));
+        if let Some(range) = range {
+            self.record_param(target, range, level);
         }
     }
 
@@ -412,11 +531,11 @@ impl App {
     }
 
     /// ADD / TOOLS menu entries for the last tweaked parameters (spec §5); returns a message.
-    pub(crate) fn params_menu(&mut self, label: &str) -> Option<String> {
-        let nth = usize::from(label == TOOLS_NEXT);
+    pub(crate) fn params_menu(&mut self, entry: MenuEntry) -> Option<String> {
+        let nth = usize::from(entry == MenuEntry::NextToLast);
         let tweak = self.state.params.last.get(nth).cloned();
         let create = tweak.as_ref().and_then(|t| self.tweak_automation(t));
-        if label == ADD_LAST {
+        if entry == MenuEntry::Automation {
             let Some((tgt, name, v)) = create else {
                 return Some("No parameter tweaked yet: move a plugin control or a knob first".into());
             };
@@ -432,7 +551,7 @@ impl App {
         let head = create.as_ref().map_or_else(|| "No parameter".to_string(), |c| c.1.clone());
         let mut items = vec![PItem { head: true, ..PItem::new(head, Cmd::Nothing) }, PItem::head("Automation")];
         items.extend(parameter_items(&self.state, param, create));
-        items.extend([PItem::sep(), PItem::not_yet("Override volatile link...")]);
+        items.extend([PItem::sep(), PItem::not_yet("Override temporary mapping...")]);
         self.state.playlist.popup = Some(Popup { x, y, items, sub: None, scroll: [0; 2] });
         self.invalidate();
         None
@@ -471,19 +590,19 @@ impl App {
     }
 
     /// Parameter `index` of instance `key` set to `v` from a menu (Paste value, Set...): a host edit (spec §2) that
-    /// counts as the user's edit of the plugin; one undo step, "Plugin parameter" (`history::param`). Returns a message
+    /// counts as the user's edit of the plugin; one undo step, "Plugin parameter" (`control::param_set`). Returns a message
     /// when the plugin did not take it.
     fn params_set(&mut self, key: usize, index: usize, v: f64) -> Option<String> {
         let before = param_value(&self.state, key, index);
-        let ok = set_param_value(&self.state, key, index, v);
+        let ok = set_param_value(&mut self.state, key, index, v);
         if ok {
-            crate::history::param(&mut self.state, key, index, before, v);
+            crate::control::param_set(&mut self.state, key, index, before, v);
             self.plugins.mark_edited(key);
         }
         (!ok).then(|| "The plugin did not take the value".to_string())
     }
 
-    /// "Browse parameters" (spec §6): the browser shows the instance's parameters in the Current project tab.
+    /// "Show all parameters" (spec §6): the browser shows the instance's parameters in the Current project tab.
     pub(crate) fn browse_params(&mut self, key: usize) -> Option<String> {
         self.params_tick();
         let s = &mut self.state;
@@ -543,7 +662,7 @@ mod tests {
         assert_eq!(key_of(s, Target::ChannelParam(ch, 7)), Some((0, 7)));
         assert_eq!(key_of(s, Target::SlotParam(2, 3, 35)), Some((fx_key(2, 3), 35)));
         let cutoff = Entry { id: 9, name: "Cutoff".into(), hidden: false, default: 1.0, steps: 0 };
-        s.params.lists.insert(0, List { plugin: Weak::<Mutex<Dummy>>::new(), params: vec![cutoff], seen: crate::plugins::Look::never() });
+        s.params.lists.insert(0, List { plugin: Weak::<Mutex<Dummy>>::new(), params: vec![cutoff], seen: crate::plugins::Look::never(), values: BTreeMap::new(), open: BTreeMap::new(), read_at: std::time::Instant::now(), reread: false });
         assert_eq!(clip_name(s, 0, 0), "Lead - Cutoff");
         // Last tweaked keeps the two newest, newest first, without repeats.
         let p = &mut s.params;
@@ -553,7 +672,7 @@ mod tests {
         assert_eq!(p.last, vec![Tweak::Plugin { key: 0, index: 0 }, Tweak::Host(Action::Tempo)]);
     }
 
-    /// The built-in EQ in a mixer slot: "Browse parameters" lists its parameters in the browser, a parameter row makes
+    /// The built-in EQ in a mixer slot: "Show all parameters" lists its parameters in the browser, a parameter row makes
     /// an automation clip (menu or drop on the playlist) aimed at the slot parameter and named after it, clip values read
     /// as the plugin's text, and the last tweaked parameter feeds the ADD / TOOLS entries.
     #[test]
@@ -563,13 +682,13 @@ mod tests {
         a.state.project = crate::app::test_project();
         a.reset_hosted();
         a.plugins.effects = crate::plugins::builtin_effects();
-        let eq = os_model::SlotPlugin { name: crate::plugins::EQ_FILE_NAME.into(), state: lemon_parametric_eq_2::params::default_state() };
+        let eq = os_model::SlotPlugin { id: os_model::Id::NONE, name: crate::plugins::EQ_FILE_NAME.into(), state: lemon_parametric_eq_2::params::default_state() };
         a.state.project.mixer[2].slots[1] = Some(eq);
         a.sync_effects();
         let key = fx_key(2, 1);
         assert_eq!(a.browse_params(key), None);
         assert_eq!(a.state.params.visible(key).count(), 36);
-        let node = "1:Current project/Effects/Lemon Parametric EQ (Insert 2)";
+        let node = "1:Current project/Effects/Lemon Parametric EQ (Bus 2)";
         assert_eq!((a.state.show_browser, a.state.browser_tab, a.state.browser_sel.as_deref()), (true, PROJECT_TAB, Some(node)));
         let list = rows(&a.state);
         let names: Vec<&str> = list.iter().filter(|r| matches!(r.item, Item::Param(k, _) if k == key)).map(|r| r.label.as_str()).collect();
@@ -582,7 +701,7 @@ mod tests {
         let menu = a.state.playlist.popup.take().unwrap();
         let tgt = target::slot_param(2, 1, 35);
         let create = menu.items.iter().find(|i| i.label == "Create automation clip").unwrap();
-        assert_eq!(create.cmd, Cmd::CreateAutomation(tgt, "Lemon Parametric EQ - Insert 2 - Main level".into(), 0.5));
+        assert_eq!(create.cmd, Cmd::CreateAutomation(tgt, "Lemon Parametric EQ - Bus 2 - Main level".into(), 0.5));
         // A plugin parameter's stored units aren't known: no initial value (spec: ui/settings-choices.md "Advanced:
         // Initialize controls automatically").
         let init = menu.items.iter().find(|i| i.label == crate::init::INIT_LABEL).unwrap();
@@ -597,7 +716,7 @@ mod tests {
 
         // Dropped on the playlist: a clip there, aimed at the parameter.
         let msg = a.params_drop(key, 35, 3, 384);
-        assert_eq!(msg.as_deref(), Some("Created automation clip \"Lemon Parametric EQ - Insert 2 - Main level\""));
+        assert_eq!(msg.as_deref(), Some("Created automation clip \"Lemon Parametric EQ - Bus 2 - Main level\""));
         let ch = a.state.project.channels.last().unwrap().index;
         assert_eq!(a.state.project.automations.last().map(|x| (x.channel, x.target())), Some((ch, Some(tgt))));
         let clip = crate::playlist::arr_mut(&mut a.state).clips.last().cloned().unwrap();
@@ -606,22 +725,22 @@ mod tests {
 
         // Last tweaked: nothing yet ("No parameter", disabled entries), then a plugin parameter; a second clip on it
         // gets a numbered name.
-        assert!(a.params_menu(ADD_LAST).is_some_and(|m| m.starts_with("No parameter")));
-        assert_eq!(a.params_menu(TOOLS_LAST), None);
+        assert!(a.params_menu(MenuEntry::Automation).is_some_and(|m| m.starts_with("No parameter")));
+        assert_eq!(a.params_menu(MenuEntry::Last), None);
         let menu = a.state.playlist.popup.take().unwrap();
         assert_eq!((menu.items[0].label.as_ref(), menu.items[0].head), ("No parameter", true));
         assert!(menu.items.iter().any(|i| i.label == "Create automation clip" && !i.enabled));
         a.state.params.note(Tweak::Plugin { key, index: 35 });
-        a.params_menu(ADD_LAST);
+        a.params_menu(MenuEntry::Automation);
         let last = a.state.project.channels.last().unwrap();
-        assert_eq!(last.name.as_deref(), Some("Lemon Parametric EQ - Insert 2 - Main level #2"));
+        assert_eq!(last.name.as_deref(), Some("Lemon Parametric EQ - Bus 2 - Main level #2"));
         // A plugin's own knob menu (host link): a clip on band 1 frequency.
         a.params_automate(key, 7);
         let last = a.state.project.channels.last().unwrap();
-        assert_eq!(last.name.as_deref(), Some("Lemon Parametric EQ - Insert 2 - Band 1 freq"));
+        assert_eq!(last.name.as_deref(), Some("Lemon Parametric EQ - Bus 2 - Band 1 freq"));
         assert_eq!(a.state.project.automations.last().and_then(|x| x.target()), Some(target::slot_param(2, 1, 7)));
         a.note_host_tweak(&Action::Tempo);
-        assert_eq!(a.params_menu(TOOLS_NEXT), None);
+        assert_eq!(a.params_menu(MenuEntry::NextToLast), None);
         let menu = a.state.playlist.popup.take().unwrap();
         assert!(menu.items.iter().any(|i| matches!(&i.cmd, Cmd::CreateAutomation(t, _, _) if *t == tgt)));
     }
@@ -632,7 +751,7 @@ mod tests {
         a.state.project = crate::app::test_project();
         a.reset_hosted();
         a.plugins.effects = crate::plugins::builtin_effects();
-        let eq = os_model::SlotPlugin { name: crate::plugins::EQ_FILE_NAME.into(), state: lemon_parametric_eq_2::params::default_state() };
+        let eq = os_model::SlotPlugin { id: os_model::Id::NONE, name: crate::plugins::EQ_FILE_NAME.into(), state: lemon_parametric_eq_2::params::default_state() };
         a.state.project.mixer[2].slots[1] = Some(eq);
         a.sync_effects();
         let key = fx_key(2, 1);
@@ -656,9 +775,9 @@ mod tests {
     /// events "not yet", the other two disabled as FL shows them); "Set..." lists a stepped parameter's values by the
     /// plugin's text and a continuous one's default and quarter values, the current one marked, and a pick sets the
     /// parameter; "Edit automation clip..." is enabled once a clip drives the parameter and shows that clip in the
-    /// playlist; "Link to controller..." is ticked while a clip drives the parameter or a controller is linked to it.
+    /// playlist; "MIDI learn..." is ticked while a clip drives the parameter or a controller is linked to it.
     /// Set... is one undo step, "Plugin parameter": Ctrl+Z puts the parameter back, redo sets it again; a pick of the
-    /// value it has makes none (OS, `history::param`).
+    /// value it has makes none (OS, `control::param_set`).
     #[test]
     fn parameter_set_is_an_undo_step() {
         let (mut a, key) = eq_app();
@@ -668,11 +787,13 @@ mod tests {
         crate::playlist::run(&mut a, Cmd::Param(PCmd::Set(key, 35, 1.0)));
         idle(&a);
         assert!((value_of(&a.state, key, 35).unwrap() - 1.0).abs() < 1e-6);
-        assert_eq!(a.state.history.entries().last().map(|e| e.1), Some(crate::history::PLUGIN_PARAMETER));
-        assert_eq!(crate::history::undo(&mut a.state), Some(crate::history::PLUGIN_PARAMETER));
+        assert_eq!(a.state.history.entries().last().map(|e| e.1), Some(crate::control::command::PLUGIN_PARAMETER));
+        assert_eq!(crate::history::undo(&mut a.state).as_deref(), Some(crate::control::command::PLUGIN_PARAMETER));
+        a.host_commands();
         idle(&a);
         assert!((value_of(&a.state, key, 35).unwrap() - v0).abs() < 1e-6, "back");
-        assert_eq!(crate::history::redo(&mut a.state), Some(crate::history::PLUGIN_PARAMETER));
+        assert_eq!(crate::history::redo(&mut a.state).as_deref(), Some(crate::control::command::PLUGIN_PARAMETER));
+        a.host_commands();
         idle(&a);
         assert!((value_of(&a.state, key, 35).unwrap() - 1.0).abs() < 1e-6, "redone");
         crate::playlist::run(&mut a, Cmd::Param(PCmd::Set(key, 35, 1.0)));
@@ -683,15 +804,16 @@ mod tests {
     fn parameter_menu_set_edit_clip_and_link() {
         let (mut a, key) = eq_app();
         let m = row_menu(&mut a, key, 35);
-        let ev = entry(&m, "Edit events");
-        assert!(!ev.enabled && matches!(ev.cmd, Cmd::NotYet(_)));
-        for label in ["Edit events in new window", "Edit events in piano roll"] {
+        // spec: ui/event-editor.md §1: the parameter's events, in the range the plugin states.
+        let ev = entry(&m, "Edit automation");
+        assert!(ev.enabled && matches!(ev.cmd, Cmd::EditEvents(_, _, _, Some(_))), "{:?}", ev.cmd);
+        for label in ["Edit automation in a window", "Edit automation in piano roll"] {
             let i = entry(&m, label);
             assert!(!i.enabled && i.cmd == Cmd::Nothing, "{label}");
         }
         assert!(!entry(&m, "Edit automation clip...").enabled);
-        assert!(!entry(&m, "Override global link...").enabled);
-        assert_eq!(entry(&m, "Link to controller...").mark, Mark::Check(false));
+        assert!(!entry(&m, "Override global mapping...").enabled);
+        assert_eq!(entry(&m, "MIDI learn...").mark, Mark::Check(false));
 
         // Set... on Main level (continuous, at its default 0.5): default, then the quarters, with the plugin's text.
         let set = entry(&m, "Set...");
@@ -727,7 +849,7 @@ mod tests {
         crate::playlist::run(&mut a, Cmd::CreateAutomation(tgt, name, v));
         let ch = a.state.project.channels.last().unwrap().index;
         let m = row_menu(&mut a, key, 35);
-        assert_eq!(entry(&m, "Link to controller...").mark, Mark::Check(true));
+        assert_eq!(entry(&m, "MIDI learn...").mark, Mark::Check(true));
         let edit = entry(&m, "Edit automation clip...");
         assert_eq!((edit.enabled, &edit.cmd), (true, &Cmd::Param(PCmd::EditClip(ch))));
         // Picked: the clip is the current source, selected and in view, the playlist in front.
@@ -750,16 +872,16 @@ mod tests {
         // Another parameter: no clip, not linked; a controller linked to it ticks Link to controller... too.
         let m = row_menu(&mut a, key, 0);
         assert!(!entry(&m, "Edit automation clip...").enabled);
-        assert_eq!(entry(&m, "Link to controller...").mark, Mark::Check(false));
+        assert_eq!(entry(&m, "MIDI learn...").mark, Mark::Check(false));
         crate::remote::add(crate::remote::Link::new(0, 7, crate::typein::Target::Param(key, 0)), true);
-        assert_eq!(entry(&row_menu(&mut a, key, 0), "Link to controller...").mark, Mark::Check(true));
+        assert_eq!(entry(&row_menu(&mut a, key, 0), "MIDI learn...").mark, Mark::Check(true));
         crate::remote::remove(crate::typein::Target::Param(key, 0));
 
         // TOOLS ▸ Last tweaked on the tempo (a host control): Edit automation clip... follows a tempo clip too.
         a.note_host_tweak(&Action::Tempo);
         let (tgt, name, v) = a.automation_target(&Action::Tempo).unwrap();
         crate::playlist::run(&mut a, Cmd::CreateAutomation(tgt, name, v));
-        assert_eq!(a.params_menu(TOOLS_LAST), None);
+        assert_eq!(a.params_menu(MenuEntry::Last), None);
         let m = a.state.playlist.popup.take().unwrap();
         let tempo = a.state.project.channels.last().unwrap().index;
         assert_eq!(entry(&m, "Edit automation clip...").cmd, Cmd::Param(PCmd::EditClip(tempo)));

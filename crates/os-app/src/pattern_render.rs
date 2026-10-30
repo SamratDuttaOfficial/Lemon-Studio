@@ -21,7 +21,7 @@ pub const FOLDER: &str = "Rendered";
 /// The warning box's title when there is nothing to render.
 pub const TITLE: &str = "Render as audio clip";
 /// The undo steps (§2, §3).
-pub const QUICK: &str = "Quick render as audio clip";
+pub const QUICK: &str = "Render to audio clip";
 pub const REPLACE: &str = "Render and replace";
 
 /// A render under way: what to do with the file once it is written.
@@ -82,6 +82,7 @@ pub fn job(s: &State, dir: &Path, stem: &str) -> ex::Job {
         loop_frames: None,
         tempo: (tempo, f64::from(ticks) / f64::from(s.project.ppq.max(1))),
         track_names: Vec::new(),
+        tracks: Vec::new(),
     }
 }
 
@@ -94,6 +95,7 @@ pub fn add_channel(s: &mut State, path: &str, pattern: u16) -> u16 {
     let name = crate::playlist::unique_channel_name(s, &crate::patterns::name_of(s, pattern));
     let color = s.project.pattern(pattern).and_then(|p| p.color).or_else(|| Some(s.clip_colors.new_channel(index)));
     s.project.channels.push(Channel {
+        id: os_model::Id::NONE,
         index,
         kind: ChannelKind::AudioClip,
         name: Some(name),
@@ -170,7 +172,7 @@ pub fn place(s: &mut State, p: &Pending, path: &Path) -> String {
         return format!("Rendered {} to {file}", crate::patterns::name_of(s, p.pattern));
     }
     match replace_clips(s, p.pattern, ch) {
-        0 => format!("Rendered {} to {file} (no clips of it in the playlist to replace)", crate::patterns::name_of(s, p.pattern)),
+        0 => format!("Rendered {} to {file} (no clips of it in the arranger to replace)", crate::patterns::name_of(s, p.pattern)),
         n => format!("Rendered {} to {file}: replaced {n} clip(s)", crate::patterns::name_of(s, p.pattern)),
     }
 }
