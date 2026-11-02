@@ -936,7 +936,7 @@ mod gui {
 mod tests {
     use super::*;
     use crate::tests::SPECS;
-    use crate::{balance, chorus, fast_distortion, filter, flanger, formula_controller, mouth, peak_controller, phaser, phrase, pitch, soft_clipper, spritz, stereo_enhancer, stereo_shaper, transient_processor, voice, Control};
+    use crate::{balance, chorus, fast_distortion, filter, flanger, formula_controller, halo, mouth, peak_controller, phaser, phrase, pitch, soft_clipper, spritz, stereo_enhancer, stereo_shaper, transient_processor, voice, Control};
 
     fn logic(spec: &'static Spec) -> Logic {
         let mut l = Logic::new(spec, Arc::new(FxParams::new(spec)), Arc::new(Shared::default()), None);
@@ -999,7 +999,7 @@ mod tests {
     /// The vocal plugins say what each setting does, in a tooltip over the control the pointer rests on.
     #[test]
     fn vocal_settings_have_tooltips() {
-        for spec in [spritz::SPEC, pitch::SPEC, mouth::SPEC, phrase::SPEC, voice::SPEC] {
+        for spec in [spritz::SPEC, pitch::SPEC, mouth::SPEC, phrase::SPEC, voice::SPEC, halo::SPEC] {
             let mut l = logic(spec);
             for s in spec.settings {
                 assert!(!crate::tip(spec, s.id).is_empty(), "{} {}", spec.name, s.id);
@@ -1070,6 +1070,32 @@ mod tests {
         l.down(x, y, Btn::Left, Mods::default(), false);
         assert_eq!(l.params.v(6), -1);
         assert_eq!(l.hint, "Effects position: Off");
+    }
+
+    /// A dial: a click on a place's name goes there; a drag and the wheel stop at each place on their way, Shift goes past.
+    #[test]
+    fn a_dial_goes_to_its_places() {
+        let mut l = logic(halo::SPEC);
+        let (x, y) = centre(&l, &Target::Choice("place".into(), 300));
+        l.down(x, y, Btn::Left, Mods::default(), false);
+        assert_eq!(l.params.v(halo::PLACE), 300);
+        assert_eq!(l.hint, "Place: Behind");
+        let (x, y) = centre(&l, &Target::Knob("place".into()));
+        l.down(x, y, Btn::Left, Mods::default(), false);
+        // 200 px is the whole dial (300 steps): 66 px down would be 201 without the place.
+        for _ in 0..66 {
+            l.delta(0.0, 1.0, Mods::default());
+        }
+        assert_eq!(l.vals.plain("place"), 200.0);
+        l.delta(0.0, 0.0, Mods { shift: true, ..Mods::default() });
+        assert_eq!(l.vals.plain("place"), 201.0);
+        l.up(Btn::Left);
+        // The wheel: 2 of the 300 a notch, stopping at the place it would pass.
+        l.vals.edit_plain("place", 101.0);
+        l.wheel(x, y, -1.0, Mods::default());
+        assert_eq!(l.vals.plain("place"), 100.0);
+        l.wheel(x, y, -1.0, Mods::default());
+        assert_eq!(l.vals.plain("place"), 98.0);
     }
 
     /// A fader drags over its travel; a shape button steps through the shapes; a whole tile turns its dial.
@@ -1176,7 +1202,7 @@ mod tests {
             }
             pm.save_png(std::path::Path::new(&dir).join(format!("{name}.png"))).unwrap();
         };
-        let settings: [(&Spec, &str, &[(&str, i32)]); 18] = [
+        let settings: [(&Spec, &str, &[(&str, i32)]); 19] = [
             (soft_clipper::SPEC, "soft_clipper", &[("threshold", 64), ("post", 150)]),
             (fast_distortion::SPEC, "fast_distortion", &[("pre", 192), ("threshold", 3), ("type", 1), ("mix", 100), ("post", 110)]),
             (balance::SPEC, "balance", &[("balance", -70), ("volume", 220)]),
@@ -1199,6 +1225,7 @@ mod tests {
             (voice::SPEC, "voice", &[("denoise", 70), ("room", 40), ("tone", 80), ("level", 60), ("target", 1), ("ai", 50)]),
             (phrase::SPEC, "phrase", &[("key", 9), ("scale", 2), ("auto", 0), ("voice", 0), ("amount", 80), ("tighten", 25), ("glide", 60)]),
             (mouth::SPEC, "mouth", &[("sensitivity", 70), ("amount", 90), ("length", 25), ("low", 900), ("listen", 1)]),
+            (halo::SPEC, "halo", &[("place", 200), ("amount", 80), ("reverb", 45), ("size", 90)]),
         ];
         for (spec, name, values) in settings {
             let mut l = logic(spec);

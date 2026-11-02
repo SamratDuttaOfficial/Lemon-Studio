@@ -1,0 +1,7 @@
+OSPRESET 1
+plugin=Lemon Halo	id=clap:org.openstudio.lemon-halo	format=clap	body=params
+# Ahead, in a small room.
+Place = 100
+Amount = 100
+Reverb = 25
+Size = 20

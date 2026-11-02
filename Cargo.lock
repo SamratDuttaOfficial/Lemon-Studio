@@ -2153,6 +2153,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "lemon-halo"
+version = "0.0.1"
+dependencies = [
+ "lemon-small-fx",
+ "nih_plug",
+ "os-plugkit",
+]
+
+[[package]]
 name = "lemon-limiter"
 version = "0.0.1"
 dependencies = [
@@ -3278,6 +3287,7 @@ dependencies = [
  "lemon-filter",
  "lemon-flanger",
  "lemon-formula-controller",
+ "lemon-halo",
  "lemon-limiter",
  "lemon-mouth",
  "lemon-parametric-eq-2",

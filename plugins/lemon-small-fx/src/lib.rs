@@ -4,7 +4,7 @@
 
 //! Lemon Studio's small effects as VST3 / CLAP plugins (nih-plug): Lemon Soft Clipper, Lemon Fast Distortion, Lemon
 //! Balance, Lemon Stereo Enhancer, Lemon Transient Processor, Lemon Chorus, Lemon Stereo Shaper, Lemon Filter, Lemon
-//! Flanger, Lemon Phaser, Lemon Spritz, Lemon Pitch, Lemon Mouth, Lemon Phrase and Lemon Voice (and the settings and
+//! Flanger, Lemon Phaser, Lemon Spritz, Lemon Pitch, Lemon Mouth, Lemon Phrase, Lemon Voice and Lemon Halo (and the settings and
 //! editors of the controllers, Lemon Peak Controller's [`peak_controller`] and Lemon Formula Controller's
 //! [`formula_controller`], with the ticks they share, [`ticks`], and Lemon Vocoder's, [`vocoder`]).
 //! Each is a handful of settings over a sound, so they share everything but their description: the plugin, its
@@ -25,6 +25,7 @@ pub mod fast_distortion;
 pub mod filter;
 pub mod flanger;
 pub mod formula_controller;
+pub mod halo;
 pub mod params;
 pub mod peak_controller;
 pub mod phaser;
@@ -81,8 +82,17 @@ pub fn tip(spec: &Spec, id: &str) -> &'static str {
         "Lemon Mouth" => mouth::tip(id),
         "Lemon Phrase" => phrase::tip(id),
         "Lemon Voice" => voice::tip(id),
+        "Lemon Halo" => halo::tip(id),
         _ => "",
     }
+}
+
+/// A named place on a [`Control::Dial`], its name centred at (`cx`, `cy`).
+pub struct Stop {
+    pub value: i32,
+    pub cx: f32,
+    pub cy: f32,
+    pub name: &'static str,
 }
 
 /// A control of the editor.
@@ -90,6 +100,9 @@ pub enum Control {
     /// A Pith dial of radius `r` centred at (`cx`, `cy`), its caption under it (the value text, in lemon, when the
     /// caption is empty).
     Knob { id: &'static str, cx: f32, cy: f32, r: f32, caption: &'static str, bipolar: bool },
+    /// A big dial with its named places around it (the value text under it): a click on a name goes there, and a drag or
+    /// the wheel stops at each on its way.
+    Dial { id: &'static str, cx: f32, cy: f32, r: f32, stops: &'static [Stop] },
     /// A radio list: one row per value from the range's minimum, 16 px apart from `top`, a toggle at `x` and the name
     /// beside it.
     Choice { id: &'static str, x: f32, top: f32, names: &'static [&'static str] },
@@ -115,6 +128,7 @@ impl Control {
     pub fn id(&self) -> &'static str {
         match self {
             Control::Knob { id, .. }
+            | Control::Dial { id, .. }
             | Control::Choice { id, .. }
             | Control::Fader { id, .. }
             | Control::Shape { id, .. }
@@ -391,7 +405,7 @@ impl<K: Kind> Vst3Plugin for SmallFx<K> {
 mod tests {
     use super::*;
 
-    pub const SPECS: [&Spec; 18] = [
+    pub const SPECS: [&Spec; 19] = [
         soft_clipper::SPEC,
         fast_distortion::SPEC,
         balance::SPEC,
@@ -410,6 +424,7 @@ mod tests {
         mouth::SPEC,
         phrase::SPEC,
         voice::SPEC,
+        halo::SPEC,
     ];
 
     /// Every effect: ids unique, starts inside the ranges, a control per setting, the plugin ids distinct.
@@ -449,6 +464,7 @@ mod tests {
             <mouth::LemonMouth as ClapPlugin>::CLAP_ID,
             <phrase::LemonPhrase as ClapPlugin>::CLAP_ID,
             <voice::LemonVoice as ClapPlugin>::CLAP_ID,
+            <halo::LemonHalo as ClapPlugin>::CLAP_ID,
         ];
         let classes = [
             <soft_clipper::LemonSoftClipper as Vst3Plugin>::VST3_CLASS_ID,
@@ -466,6 +482,7 @@ mod tests {
             <mouth::LemonMouth as Vst3Plugin>::VST3_CLASS_ID,
             <phrase::LemonPhrase as Vst3Plugin>::VST3_CLASS_ID,
             <voice::LemonVoice as Vst3Plugin>::VST3_CLASS_ID,
+            <halo::LemonHalo as Vst3Plugin>::VST3_CLASS_ID,
         ];
         for i in 0..ids.len() {
             for j in i + 1..ids.len() {
@@ -534,7 +551,7 @@ mod tests {
             }
             v.into_iter().map(|x| x.expect("every parameter listed")).collect()
         };
-        for spec in [soft_clipper::SPEC, fast_distortion::SPEC, stereo_enhancer::SPEC, transient_processor::SPEC, chorus::SPEC, stereo_shaper::SPEC, filter::SPEC, spritz::SPEC, pitch::SPEC, mouth::SPEC, phrase::SPEC, voice::SPEC] {
+        for spec in [soft_clipper::SPEC, fast_distortion::SPEC, stereo_enhancer::SPEC, transient_processor::SPEC, chorus::SPEC, stereo_shaper::SPEC, filter::SPEC, spritz::SPEC, pitch::SPEC, mouth::SPEC, phrase::SPEC, voice::SPEC, halo::SPEC] {
             for name in all(spec) {
                 read(spec, &name);
             }
@@ -574,6 +591,9 @@ mod tests {
         assert_eq!(all(phrase::SPEC).len(), 7);
         assert_eq!(read(voice::SPEC, "Phone or laptop mic"), [30, 40, 90, 70, 1, 90]);
         assert_eq!(all(voice::SPEC).len(), 6);
+        assert_eq!(read(halo::SPEC, "Behind you"), [300, 100, 0, 40]);
+        assert_eq!(read(halo::SPEC, "Around, big hall"), [200, 100, 45, 90]);
+        assert_eq!(all(halo::SPEC).len(), 8);
         // FL's 27 Flanger and 27 Phaser presets. Their Default presets are not what a new instance holds: the Flanger's has
         // the phase at 119 and the feedback at 24 (a new one 118 and 23), the Phaser's is a slower, all-wet sweep.
         for spec in [flanger::SPEC, phaser::SPEC] {

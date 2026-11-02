@@ -53,6 +53,7 @@ lemon-vocoder = { path = "../../plugins/lemon-vocoder", features = ["linked"] }
 lemon-spritz = { path = "../../plugins/lemon-spritz", features = ["linked"] }
 lemon-pitch = { path = "../../plugins/lemon-pitch", features = ["linked"] }
 lemon-voice = { path = "../../plugins/lemon-voice", features = ["linked"] }
+lemon-halo = { path = "../../plugins/lemon-halo", features = ["linked"] }
 lemon-phrase = { path = "../../plugins/lemon-phrase", features = ["linked"] }
 lemon-mouth = { path = "../../plugins/lemon-mouth", features = ["linked"] }
 winit = "0.30"

@@ -266,17 +266,24 @@ pub fn values_of(spec: &Spec, fl: &[u8]) -> Vec<i32> {
 /// `None` = where the drag is.
 pub fn snap(spec: &Spec, k: usize, plain: f32) -> Option<i32> {
     let s = &spec.settings[k];
-    let m = s.magnet?;
-    ((plain - m as f32).abs() <= MAGNET_ZONE * (s.range.1 - s.range.0) as f32).then_some(m)
+    let zone = MAGNET_ZONE * (s.range.1 - s.range.0) as f32;
+    magnets(spec, k).find(|&m| (plain - m as f32).abs() <= zone)
+}
+
+/// What setting `k` is drawn to: its magnet, and the places of its dial.
+fn magnets(spec: &Spec, k: usize) -> impl Iterator<Item = i32> + '_ {
+    let s = &spec.settings[k];
+    let stops = spec.controls.iter().find_map(|c| match c {
+        crate::Control::Dial { id, stops, .. } if *id == s.id => Some(*stops),
+        _ => None,
+    });
+    s.magnet.into_iter().chain(stops.unwrap_or(&[]).iter().map(|t| t.value))
 }
 
 /// The wheel's next stored value from `v` given the plain step `next`: a setting with a magnet stops on it when the
 /// step would pass it.
 pub fn snap_step(spec: &Spec, k: usize, v: i32, next: i32) -> i32 {
-    match spec.settings[k].magnet {
-        Some(m) if (v < m && m <= next) || (next <= m && m < v) => m,
-        _ => next,
-    }
+    magnets(spec, k).filter(|&m| (v < m && m <= next) || (next <= m && m < v)).min_by_key(|&m| (m - v).abs()).unwrap_or(next)
 }
 
 // ---------------------------------------------------------------------------------------------------------------

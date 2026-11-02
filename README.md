@@ -130,7 +130,7 @@ cd Lemon-Studio
 `cargo run -p os-app --release` builds and runs Lemon Studio. Before Lemon Studio starts, it also rebuilds Lemon
 Studio's own plugins (Lemon Sampler, Lemon Trio, Lemon Parametric EQ, Lemon Limiter, Lemon Reverb, Lemon Delay, Lemon
 Soft Clipper, Lemon Fast Distortion, Lemon Balance, Lemon Stereo Enhancer, Lemon Transient Processor, Lemon Chorus,
-Lemon Stereo Shaper, Lemon Filter, Lemon Flanger, Lemon Phaser, Lemon Spritz, Lemon Pitch, Lemon Mouth, Lemon Phrase, Lemon Voice, Pulp Filter, Press, Tesla and Citrus) and
+Lemon Stereo Shaper, Lemon Filter, Lemon Flanger, Lemon Phaser, Lemon Spritz, Lemon Pitch, Lemon Mouth, Lemon Phrase, Lemon Voice, Lemon Halo, Pulp Filter, Press, Tesla and Citrus) and
 installs the ones that changed as VST3 and CLAP plugins, in the folders where other DAWs find them. Lemon Studio itself
 has every one of them built in and needs no plugin files. A plugin that is new or updated in the repository shows up
 in other DAWs at the next run. The first run builds every plugin, which takes
@@ -409,6 +409,7 @@ Lemon Studio is a Cargo workspace of focused crates:
 | [`lemon-spritz`](plugins/lemon-spritz) | Lemon Spritz de-esser (VST3 + CLAP) |
 | [`lemon-pitch`](plugins/lemon-pitch) | Lemon Pitch pitch correction: key and scale detection, retune, humanize, vibrato (VST3 + CLAP) |
 | [`lemon-voice`](plugins/lemon-voice) | Lemon Voice vocal enhancer: AI denoise (DeepFilterNet 3, built in), less room, a studio vocal's tone, a steady level (VST3 + CLAP) |
+| [`lemon-halo`](plugins/lemon-halo) | Lemon Halo vocal placer: center, front, around or behind on one dial, no reverb needed, with a simple reverb too (VST3 + CLAP) |
 | [`lemon-phrase`](plugins/lemon-phrase) | Lemon Phrase note-by-note pitch correction: each note moved onto the scale as a whole, its vibrato and expression kept (VST3 + CLAP) |
 | [`lemon-mouth`](plugins/lemon-mouth) | Lemon Mouth mouth-noise remover: clicks, smacks and saliva crackle out, words kept (VST3 + CLAP) |
 | [`citrus`](plugins/citrus) | Citrus instrument, a six-operator synthesizer (VST3 + CLAP) |

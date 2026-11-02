@@ -1,0 +1,7 @@
+OSPRESET 1
+plugin=Lemon Halo	id=clap:org.openstudio.lemon-halo	format=clap	body=params
+# Dead in the middle of the head.
+Place = 0
+Amount = 100
+Reverb = 0
+Size = 40

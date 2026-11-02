@@ -1,0 +1,7 @@
+OSPRESET 1
+plugin=Lemon Halo	id=clap:org.openstudio.lemon-halo	format=clap	body=params
+# From every side, outside the head, with no reverb.
+Place = 200
+Amount = 100
+Reverb = 0
+Size = 40

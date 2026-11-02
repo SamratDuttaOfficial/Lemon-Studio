@@ -18,7 +18,7 @@ use os_ui::kit::lemon::{self, plug};
 use os_ui::kit::{inst, State};
 use os_ui::{Canvas, Color, Font, Rect};
 
-use crate::{Control, Mark, Spec, LIVE, MAX};
+use crate::{Control, Mark, Spec, Stop, LIVE, MAX};
 
 /// Dials bigger than this get the thicker arc.
 const SMALL: f32 = 19.0;
@@ -129,6 +129,7 @@ pub fn paint(spec: &Spec, c: &mut Canvas, t: &Palette, m: &dyn Model, st: &ViewS
     for control in spec.controls {
         match *control {
             Control::Knob { id, cx, cy, r, caption, bipolar } => knob(&mut ui, id, cx, cy, r, caption, bipolar),
+            Control::Dial { id, cx, cy, r, stops } => dial(&mut ui, id, cx, cy, r, stops),
             Control::Choice { id, x, top, names } => {
                 let min = spec.index(id).map_or(0, |k| spec.settings[k].range.0);
                 choices(&mut ui, id, x, top, min, names);
@@ -242,6 +243,23 @@ fn knob(ui: &mut Ui, id: &str, cx: f32, cy: f32, r: f32, cap: &str, bipolar: boo
         inst::caption(ui.c, ui.t, cx, cy + r + 7.0, cap, false);
     }
     ui.hit(hr, target);
+}
+
+/// A big dial, its value text under it, with the names of its places around it: the one it is on in lemon, a click
+/// goes to one.
+fn dial(ui: &mut Ui, id: &str, cx: f32, cy: f32, r: f32, stops: &[Stop]) {
+    knob(ui, id, cx, cy, r, "", false);
+    let now = ui.m.plain(id).round() as i32;
+    let lh = ui.c.line_height(LABEL);
+    for s in stops {
+        let target = Target::Choice(id.into(), s.value);
+        let w = ui.c.text_width(LABEL, s.name).ceil() + 8.0;
+        let rect = Rect::new((s.cx - w / 2.0).round(), (s.cy - lh / 2.0 - 2.0).round(), w, lh + 4.0);
+        let st = ui.state(rect, &target);
+        let ink = if now == s.value { brand::MAIN } else if st.hover { brand::TEXT } else { plug::DIM };
+        ui.c.text_center(LABEL, rect, ink, s.name);
+        ui.hit(rect, target);
+    }
 }
 
 /// A radio list (as the original's): one row per position from `top` (the first is the range's minimum), a toggle
