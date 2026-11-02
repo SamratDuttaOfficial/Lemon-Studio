@@ -109,7 +109,13 @@ pub fn paint_hint_bar(ui: &mut Ui, s: &State, f: &FrameInfo) {
     let half = (r.h / 2.0).round();
     ui.c.fill_rect_gradient(Rect::new(r.x, r.y, r.w, half), edge, mid, 0.0);
     ui.c.fill_rect_gradient(Rect::new(r.x, r.y + half, r.w, r.h - half), mid, edge, 0.0);
-    let hint: &str = if !f.hint.is_empty() { &f.hint } else { s.message.as_deref().unwrap_or("") };
+    let hint: &str = if s.rec.writing() {
+        crate::record::WRITING
+    } else if !f.hint.is_empty() {
+        &f.hint
+    } else {
+        s.message.as_deref().unwrap_or("")
+    };
     let font = Font::new(14);
     let (w, lh) = (r.w - 50.0, ui.c.line_height(font));
     let chars: Vec<char> = hint.chars().collect();
@@ -297,7 +303,12 @@ fn hint_panel(ui: &mut Ui, c: &Ctx) {
     let hp = a.span(72.0, 376.0, 4.0, 36.0);
     sunken(ui, hp, t.sunken);
     ui.hit(hp, Action::DragWindow, "Status bar");
-    ui.c.text_clip(Font::new(13), a.x(76.0), a.y(6.0), 280.0, t.text_dim.shade(-0.05), &f.title);
+    if s.rec.writing() {
+        let dot = crate::high_visibility::record_dot(t, crate::high_visibility::on());
+        ui.c.text_clip(Font::new(13), a.x(76.0), a.y(6.0), 280.0, dot, crate::record::WRITING);
+    } else {
+        ui.c.text_clip(Font::new(13), a.x(76.0), a.y(6.0), 280.0, t.text_dim.shade(-0.05), &f.title);
+    }
     let hint: &str = if !f.hint.is_empty() { &f.hint } else { s.message.as_deref().unwrap_or("") };
     ui.c.text_clip(Font::new(14), a.x(77.0), a.y(19.0), 280.0, t.text, hint);
     icons::draw(ui.c, Icon::MidiControl, a.span(360.0, 374.0, 17.0, 32.0), ui.t.s(0x515457));

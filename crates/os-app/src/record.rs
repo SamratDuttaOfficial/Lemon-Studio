@@ -65,7 +65,9 @@ impl Opt {
             Opt::Automation => ("rec_automation", true),
             Opt::Audio => ("rec_audio", false),
             Opt::StartsPlayback => ("rec_starts_play", false),
-            Opt::DisarmOnStop => ("rec_disarm_stop", false),
+            // On unless turned off (Lemon Studio's choice; FL leaves Record on): an arm that outlives the stop quietly writes
+            // every later mixer or plugin move into a pattern, and playback then holds the control at what was written.
+            Opt::DisarmOnStop => ("rec_disarm_stop", true),
             Opt::QuantizeStart => ("rec_q_start", true),
             Opt::QuantizeEnd => ("rec_q_end", true),
             Opt::Wait => ("rec_wait", false),
@@ -210,6 +212,8 @@ pub struct Rec {
     /// SONG mode: playback has passed a Stop recording marker (and no Start recording marker since), so notes are not
     /// recorded until playback stops or goes back (spec: audio/transport.md "Time markers in SONG mode").
     punched_out: bool,
+    /// `writing` as last drawn.
+    shown_writing: bool,
 }
 
 impl Rec {
@@ -222,7 +226,16 @@ impl Rec {
     pub fn holding(&self) -> bool {
         self.take.is_some() && !self.held.is_empty()
     }
+
+    /// The take has written a control's moves: playback holds that control at what was written, so the status bar says
+    /// so ([`WRITING`]).
+    pub fn writing(&self) -> bool {
+        self.take.as_ref().is_some_and(|t| !t.controls.is_empty())
+    }
 }
+
+/// What the status bar says while [`Rec::writing`].
+pub const WRITING: &str = "Recording moves as automation (R stops)";
 
 /// The main snap step that quantizing rounds to; None for Line, Cell and (none), which leave times as played.
 fn unit(s: &State) -> Option<u32> {
@@ -492,10 +505,10 @@ impl App {
     }
 
     /// Whether something played now is recorded: armed, `what` on in the filter, playing and not paused.
-    /// Nothing is recorded during a count-in (spec §3).
+    /// Nothing is recorded during a count-in (spec §3), and nothing during a microphone take: audio was what it asked for.
     fn rec_live(&self, what: Opt) -> bool {
         let r = &self.state.rec;
-        r.armed && r.count.is_none() && what.on() && self.transport.playing() && !self.transport.paused()
+        r.armed && !r.audio && r.count.is_none() && what.on() && self.transport.playing() && !self.transport.paused()
     }
 
     /// A knob moved (`record_control`).
@@ -801,6 +814,11 @@ impl App {
             self.state.rec.since = self.state.rec.armed.then(|| self.state.history.done());
         }
         self.state.rec.was_live = live;
+        let writing = self.state.rec.writing();
+        if writing != self.state.rec.shown_writing {
+            self.state.rec.shown_writing = writing;
+            self.invalidate();
+        }
     }
 
     /// TOOLS ▸ Cancel recording (spec: ui/cancel-recording.md §2): while Record is armed
@@ -909,6 +927,7 @@ mod tests {
     /// Record arms without asking.
     fn app() -> App {
         crate::settings_file::set_flag("rec_ask", false);
+        crate::settings_file::set_flag("rec_disarm_stop", false);
         let mut app = App::new(None);
         app.state.project = crate::app::test_project();
         app.state.selected_channel = 0;
@@ -1362,6 +1381,31 @@ mod tests {
         stop(&mut app);
         crate::history::undo(&mut app.state);
         assert_eq!(points(&app), []);
+    }
+
+    /// Unless told otherwise Record turns itself off at a stop: what it took stays, and the next playback's moves of a
+    /// mixer control are plain moves. While moves are being written, the status bar says so.
+    #[test]
+    fn record_turns_off_at_a_stop_and_says_what_it_records() {
+        let mut app = app();
+        crate::settings_file::write("rec_disarm_stop", "");
+        if crate::mixer::track(&app.state, 1).is_none() {
+            app.state.project.mixer = (0..3).map(os_model::MixerTrack::new).collect();
+        }
+        let points = |app: &App| app.state.project.pattern(app.state.pattern).map_or(0, |p| p.controls.len());
+        app.toggle_record();
+        app.transport.pretend_at(96.0, false);
+        app.record_tick();
+        app.record_control(&Action::Fader(1));
+        assert_eq!(points(&app), 1);
+        assert!(app.state.rec.writing());
+        stop(&mut app);
+        assert!(!app.state.rec.writing());
+        assert!(!app.state.rec.armed, "Record stayed on after the stop");
+        app.transport.pretend_at(96.0, false);
+        app.record_tick();
+        app.record_control(&Action::Fader(1));
+        assert_eq!(points(&app), 1, "a mixer move while listening back");
     }
 
     /// "Disarm on stop" disarms at the stop; step edit never takes a recorded note.

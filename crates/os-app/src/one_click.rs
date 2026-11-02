@@ -208,6 +208,8 @@ impl App {
             }
             r.ending = true;
             self.state.rec.audio = false;
+            // The arm was for this take: left on, the next playback's mixer and plugin moves would be recorded.
+            self.state.rec.armed = false;
             self.invalidate();
             return;
         }
@@ -333,6 +335,44 @@ mod tests {
         assert_eq!(clip.position, 0);
         assert!(app.state.history.entries().iter().any(|e| e.1 == RECORDED));
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// A take is audio and nothing else: a mixer move during it is only a move, and Record is off once it ends, so the
+    /// next playback's moves are not written into patterns on the playlist.
+    #[test]
+    fn a_take_records_only_audio_and_leaves_record_off() {
+        let _one = RECORDING.lock().unwrap_or_else(|e| e.into_inner());
+        let mut app = app();
+        if crate::mixer::track(&app.state, 1).is_none() {
+            app.state.project.mixer = (0..3).map(os_model::MixerTrack::new).collect();
+        }
+        let points = |app: &App| app.state.project.patterns.iter().map(|p| p.controls.len()).sum::<usize>();
+        let clips = |app: &App| app.state.project.arrangement().map_or(0, |a| a.clips.len());
+        let before = points(&app);
+        app.one_click_begin(Input { device: "Test ASIO".into(), asio: true, first: 0, stereo: true }, None, false).unwrap();
+        app.transport.pretend_at(96.0, true);
+        app.state.rec.armed = true;
+        app.one_click_tick();
+        app.record_control(&Action::Fader(1));
+        assert_eq!(points(&app), before, "a mixer move during the take");
+        capture().push(4800, |ch, f| if ch == 0 { f as f32 / 4800.0 } else { 0.5 });
+        app.transport.stop();
+        for _ in 0..500 {
+            app.one_click_tick();
+            if app.audio_rec.is_none() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(!app.state.rec.armed, "Record stayed on after the take");
+        let placed = clips(&app);
+        app.transport.pretend_at(96.0, true);
+        app.record_tick();
+        app.record_control(&Action::Fader(1));
+        assert_eq!((points(&app), clips(&app)), (before, placed), "a mixer move while listening back");
+        if let Some(path) = app.state.project.channels.last().and_then(|c| c.sample_path.clone()) {
+            let _ = std::fs::remove_file(path);
+        }
     }
 
     /// Into the audio editor: asks for the input, then the take goes into Tesla on the master track instead of the
