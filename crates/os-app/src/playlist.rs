@@ -340,6 +340,8 @@ pub enum Cmd {
     Browser(crate::browser::BCmd),
     /// Plugin menus (spec: ui/plugin-menu.md).
     Plugin(crate::plugin_menu::PlugCmd),
+    /// The plugin window's Cut part and Whole audio tabs (`clip_fx`).
+    ClipFx(crate::clip_fx::C),
     /// The project picker (spec: ui/project-picker.md).
     Project(crate::project_picker::ProjCmd),
     /// Channel rack menus (spec: ui/channel-rack.md §17-21).
@@ -706,6 +708,11 @@ impl PlaylistState {
     /// The shown picker list's item pitch.
     pub fn pick_row(&self) -> f32 {
         self.pick_rows[self.picker as usize]
+    }
+
+    /// The waveform of a sample path if it has been loaded already.
+    pub fn wave_loaded(&self, path: &str) -> Option<Rc<Wave>> {
+        self.waves.borrow().get(path).cloned().flatten()
     }
 
     /// The waveform of a sample path (loaded and summarised once).
@@ -2040,7 +2047,7 @@ pub fn create_automation(s: &mut State, tgt: u32, name: &str, value: f64) -> u16
         pitch_cents: 0,
         mixer_track: 0,
         sample_path: None,
-        layer_children: Vec::new(),
+        layer_children: Vec::new(), whole_fx: 0,
         envelopes: Default::default(), rack: Default::default(), misc: Default::default(), sound: Default::default(),
     });
     s.project.automations.push(os_flp::project::new_automation(index, tgt, value.clamp(0.0, 1.0), beats));
@@ -2083,7 +2090,7 @@ pub fn automation_channel(s: &mut State, target: u32, name: &str, points: Vec<os
         pitch_cents: 0,
         mixer_track: 0,
         sample_path: None,
-        layer_children: Vec::new(),
+        layer_children: Vec::new(), whole_fx: 0,
         envelopes: Default::default(), rack: Default::default(), misc: Default::default(), sound: Default::default(),
     });
     let beats = points.last().map_or(0.0, |p| p.beat);
@@ -2144,7 +2151,7 @@ pub fn add_clip_channel(s: &mut State, kind: ChannelKind) -> usize {
         pitch_cents: 0,
         mixer_track: 0,
         sample_path: None,
-        layer_children: Vec::new(),
+        layer_children: Vec::new(), whole_fx: 0,
         envelopes: Default::default(), rack: Default::default(), misc: Default::default(), sound: Default::default(),
     });
     if !audio {
@@ -2185,7 +2192,7 @@ pub fn add_layer_channel(s: &mut State) -> usize {
         pitch_cents: 0,
         mixer_track: 0,
         sample_path: None,
-        layer_children: children,
+        layer_children: children, whole_fx: 0,
         envelopes: Default::default(), rack: Default::default(), misc: Default::default(), sound: Default::default(),
     });
     let row = s.project.channels.len() - 1;
@@ -2230,7 +2237,7 @@ pub fn add_audio_clip_in(s: &mut State, path: &str, track: u16, tick: u32, mixer
         pitch_cents: 0,
         mixer_track,
         sample_path: Some(path.to_string()),
-        layer_children: Vec::new(),
+        layer_children: Vec::new(), whole_fx: 0,
         envelopes: Default::default(), rack: Default::default(), misc: Default::default(),
         sound: os_model::ChannelSound { sampler_flags: Some(os_model::ChannelSound::AUDIO_CLIP_FLAGS), ..Default::default() },
     });
@@ -3072,8 +3079,9 @@ pub fn press_grid(app: &mut App, grid: Rect, right: bool) {
         // Double-clicking an audio clip opens its channel's sampler and selects that channel in the rack (§9); a
         // pattern clip makes its pattern the current one and opens the piano roll (§2b, as FL does). Which modifier
         // opens what on an audio clip is General ▸ Input ▸ Manage shortcuts' (`crate::shortcuts::clip_double_click`):
-        // Show clip properties does nothing yet (no clip properties window); with neither row's modifier (a row set to
-        // "(disabled)"), the second click is a plain one.
+        // Show clip properties opens the same window on this piece's Cut part tab, Show channel settings on the tab it
+        // last showed; with neither row's modifier (a row set to "(disabled)"), the second click is a plain one. The
+        // window's Cut part tab shows the clip double-clicked last (`clip_fx`).
         if !right && matches!(tool, PlTool::Draw | PlTool::Paint | PlTool::Select) {
             let audio = audio_clip_row(s, &c);
             if audio.is_some() || matches!(c.source, ClipSource::Pattern(_)) {
@@ -3083,11 +3091,11 @@ pub fn press_grid(app: &mut App, grid: Rect, right: bool) {
                 let opens = audio.map(|_| crate::shortcuts::clip_double_click(alt));
                 if double && opens != Some(None) {
                     if let Some(row) = audio {
-                        if opens == Some(Some(crate::shortcuts::ClipOpen::Channel)) {
-                            s.rack.select_only(row);
-                            s.pending_open = Some(row);
-                            app.focus_channel(row);
-                        }
+                        let tab = (opens == Some(Some(crate::shortcuts::ClipOpen::Properties))).then_some(crate::clip_page::Tab::Cut);
+                        crate::clip_fx::show_piece(s, row, &c, tab);
+                        s.rack.select_only(row);
+                        s.pending_open = Some(row);
+                        app.focus_channel(row);
                     } else {
                         run(app, Cmd::ClipEditSource(ci));
                     }
@@ -3988,6 +3996,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
     match cmd {
         Cmd::Browser(b) => return app.browser_cmd(b),
         Cmd::Plugin(c) => return crate::plugin_menu::run(app, c),
+        Cmd::ClipFx(c) => return crate::clip_fx::run(app, c),
         Cmd::Project(c) => return crate::project_picker::run(app, c),
         Cmd::Rack(c) => return crate::rack::run(app, c),
         Cmd::Mixer(c) => return crate::mixer::run(app, c),
@@ -4257,7 +4266,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
     let grid_w = grid.map_or(1400.0, |g| g.w);
     let grid_wh = grid.map_or((1400.0, 800.0), |g| (g.w, g.h));
     let msg = match cmd {
-        Cmd::Nothing | Cmd::Pick(..) | Cmd::Browser(_) | Cmd::Plugin(_) | Cmd::Project(_) | Cmd::Rack(_) | Cmd::Mixer(_) | Cmd::SlotWin(..) | Cmd::Timing(_) | Cmd::Param(_) | Cmd::EditEvents(..) | Cmd::Events(_) | Cmd::Preset(_) | Cmd::Misc(..) | Cmd::PluginMenu(..) | Cmd::PluginDetach(..) | Cmd::Piano(_) | Cmd::Audio(_) | Cmd::Cpu(_) | Cmd::MetronomeSound(_) | Cmd::MetronomeVolume(_) | Cmd::Record(_) | Cmd::RecPrecountBars(_) | Cmd::OneClick(..) | Cmd::OneClickEditor | Cmd::Rec(_) | Cmd::ContinuousScrolling | Cmd::Pattern(_) | Cmd::ClockMode(_) | Cmd::ClockBeat(_) | Cmd::Toolbar(_) | Cmd::ToolbarPreset(_) | Cmd::ToolbarSave | Cmd::ToolbarDelete | Cmd::Arrange(_) | Cmd::Wallpaper | Cmd::TimeSig(..) | Cmd::AddSignature | Cmd::MarkerSigAt(_) | Cmd::MarkerEveryMenu | Cmd::Bar(..) | Cmd::PanningLaw(_) | Cmd::TimeMode(_) | Cmd::Timebase(_) | Cmd::KeyMarkerMenu | Cmd::KeyRoot(_) => None,
+        Cmd::Nothing | Cmd::Pick(..) | Cmd::Browser(_) | Cmd::Plugin(_) | Cmd::ClipFx(_) | Cmd::Project(_) | Cmd::Rack(_) | Cmd::Mixer(_) | Cmd::SlotWin(..) | Cmd::Timing(_) | Cmd::Param(_) | Cmd::EditEvents(..) | Cmd::Events(_) | Cmd::Preset(_) | Cmd::Misc(..) | Cmd::PluginMenu(..) | Cmd::PluginDetach(..) | Cmd::Piano(_) | Cmd::Audio(_) | Cmd::Cpu(_) | Cmd::MetronomeSound(_) | Cmd::MetronomeVolume(_) | Cmd::Record(_) | Cmd::RecPrecountBars(_) | Cmd::OneClick(..) | Cmd::OneClickEditor | Cmd::Rec(_) | Cmd::ContinuousScrolling | Cmd::Pattern(_) | Cmd::ClockMode(_) | Cmd::ClockBeat(_) | Cmd::Toolbar(_) | Cmd::ToolbarPreset(_) | Cmd::ToolbarSave | Cmd::ToolbarDelete | Cmd::Arrange(_) | Cmd::Wallpaper | Cmd::TimeSig(..) | Cmd::AddSignature | Cmd::MarkerSigAt(_) | Cmd::MarkerEveryMenu | Cmd::Bar(..) | Cmd::PanningLaw(_) | Cmd::TimeMode(_) | Cmd::Timebase(_) | Cmd::KeyMarkerMenu | Cmd::KeyRoot(_) => None,
         Cmd::NotYet(name) => Some(format!("{name}: not available yet")),
         Cmd::Tool(t) => {
             s.playlist.tool = t;

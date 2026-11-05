@@ -93,12 +93,9 @@ pub fn settle(ids: &mut Ids, p: &mut Project) -> bool {
     changed |= settle_kind(ids, p.arrangements.iter_mut().enumerate().map(|(i, c)| (i, &mut c.id)).collect(), |x| &mut x.arrangements);
     let clips = p.arrangements.iter_mut().enumerate().flat_map(|(a, arr)| arr.clips.iter_mut().map(move |c| ((a, c.track, c.position), &mut c.id))).collect();
     changed |= settle_kind(ids, clips, |x| &mut x.clips);
-    let slots = p
-        .mixer
-        .iter_mut()
-        .enumerate()
-        .flat_map(|(t, m)| m.slots.iter_mut().enumerate().filter_map(move |(k, s)| s.as_mut().map(|s| ((t, k), &mut s.id))))
-        .collect();
+    // A clip's or whole audio's chain counts its slots by its handle, past any mixer track.
+    let tracks = p.mixer.iter_mut().enumerate().chain(p.fx_units.iter_mut().map(|u| (1 << 20 | u.handle as usize, &mut u.track)));
+    let slots = tracks.flat_map(|(t, m)| m.slots.iter_mut().enumerate().filter_map(move |(k, s)| s.as_mut().map(|s| ((t, k), &mut s.id)))).collect();
     changed |= settle_kind(ids, slots, |x| &mut x.slots);
     changed
 }

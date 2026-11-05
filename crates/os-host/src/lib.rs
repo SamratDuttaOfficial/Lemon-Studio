@@ -239,6 +239,12 @@ pub trait Plugin: Instrument + HostedEffect + Send {
     /// Sends the gains the engine gives audio clip voices (`Instrument::voice_gain`) to the instance, which then puts
     /// each clip's fades and gain on that clip's voice (UI thread). For Lemon Sampler only (it moves to them as the
     /// engine expects). False when the format cannot.
+    /// Hands out the extra output ports as buses voices can play on (`Instrument::voice_start_on`); false when the
+    /// instance cannot.
+    fn use_voice_buses(&mut self) -> bool {
+        false
+    }
+
     fn use_voice_gains(&mut self) -> bool {
         false
     }

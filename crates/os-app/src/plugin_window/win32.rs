@@ -361,8 +361,7 @@ impl FrameWindow {
 
     pub fn set_info(&self, info: ChannelInfo) {
         let mut st = self.state.borrow_mut();
-        if st.info != info && st.drag.is_none() && st.misc_ui.drag.is_none() {
-            st.info = info;
+        if st.take_info(info) {
             drop(st);
             unsafe { InvalidateRect(self.hwnd, std::ptr::null(), 0) };
         }
@@ -458,6 +457,12 @@ impl FrameWindow {
             self.state.borrow_mut().strip = on;
             unsafe { layout(self.hwnd) };
         }
+    }
+
+    /// Shows the Cut part or Whole audio tab.
+    pub fn show_clip_tab(&self, tab: crate::clip_page::Tab) {
+        self.state.borrow_mut().open_clip_tab(tab);
+        unsafe { layout(self.hwnd) };
     }
 
     pub fn take_events(&self) -> Vec<FrameEvent> {
@@ -589,7 +594,7 @@ unsafe fn layout(hwnd: HWND) {
     let st = w.state.borrow();
     let (fw, fh) = st.size();
     let px = |v: f32| (v * w.scale).round() as i32;
-    let tab_plugin = !st.misc;
+    let tab_plugin = !st.over_editor();
     let (ay, ed, detached) = (st.area_y(), st.editor, st.detached);
     drop(st);
     unsafe {
@@ -1194,7 +1199,7 @@ mod tests {
             CreateWindowExW(0, class.as_ptr(), std::ptr::null(), WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, 0, 0, 900, 700, std::ptr::null_mut(), std::ptr::null_mut(), GetModuleHandleW(std::ptr::null()), std::ptr::null())
         };
         assert!(!owner.is_null());
-        let info = ChannelInfo { name: "Keys".into(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None };
+        let info = ChannelInfo { name: "Keys".into(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None, clip: None };
         let docked = || {
             let mut r: RECT = unsafe { std::mem::zeroed() };
             unsafe { GetWindowRect(owner, &mut r) };
@@ -1257,7 +1262,7 @@ mod tests {
             CreateWindowExW(0, class.as_ptr(), std::ptr::null(), WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, 0, 0, 900, 700, std::ptr::null_mut(), std::ptr::null_mut(), GetModuleHandleW(std::ptr::null()), std::ptr::null())
         };
         assert!(!owner.is_null());
-        let info = ChannelInfo { name: "Keys".into(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None };
+        let info = ChannelInfo { name: "Keys".into(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None, clip: None };
         let mut r: RECT = unsafe { std::mem::zeroed() };
         unsafe { GetWindowRect(owner, &mut r) };
         let f = FrameWindow::new(owner as isize, info, (480.0, 270.0), 1.0, (r.left + 20, r.top + 20), false).unwrap();
@@ -1303,7 +1308,7 @@ mod tests {
             CreateWindowExW(0, class.as_ptr(), std::ptr::null(), WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, 0, 0, 1300, 900, std::ptr::null_mut(), std::ptr::null_mut(), GetModuleHandleW(std::ptr::null()), std::ptr::null())
         };
         assert!(!owner.is_null());
-        let info = ChannelInfo { name: "Tesla".into(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None };
+        let info = ChannelInfo { name: "Tesla".into(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None, clip: None };
         let mut r: RECT = unsafe { std::mem::zeroed() };
         unsafe { GetWindowRect(owner, &mut r) };
         let f = FrameWindow::new(owner as isize, info, (480.0, 270.0), 1.0, (r.left + 300, r.top + 200), false).unwrap();

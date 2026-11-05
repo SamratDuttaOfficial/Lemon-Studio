@@ -153,7 +153,7 @@ fn project(samples: &Path) -> Project {
                 pitch_cents: 0,
                 mixer_track: insert,
                 sample_path: sample.map(|s| samples.join(s).to_string_lossy().into_owned()),
-                layer_children: Vec::new(),
+                layer_children: Vec::new(), whole_fx: 0,
                 envelopes: Default::default(),
                 rack: ChannelRack { stored_color: Some(color), ..Default::default() },
                 misc: Default::default(),

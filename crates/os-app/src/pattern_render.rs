@@ -108,7 +108,7 @@ pub fn add_channel(s: &mut State, path: &str, pattern: u16) -> u16 {
         pitch_cents: 0,
         mixer_track: 0,
         sample_path: Some(path.to_string()),
-        layer_children: Vec::new(),
+        layer_children: Vec::new(), whole_fx: 0,
         envelopes: Default::default(), rack: Default::default(), misc: Default::default(),
         sound: os_model::ChannelSound { sampler_flags: Some(os_model::ChannelSound::AUDIO_CLIP_FLAGS), ..Default::default() },
     });

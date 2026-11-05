@@ -192,6 +192,8 @@ pub enum Request {
     Misc(usize, crate::misc_page::M, f32),
     /// A Misc tab list asks for its menu at this screen point.
     MiscMenu(usize, crate::misc_page::M, i32, i32),
+    /// Something done on the window's Cut part or Whole audio tab (`clip_page`).
+    Clip(usize, crate::clip_page::Event),
     /// A strip knob of channel row `.0` asks for its menu at this screen point.
     KnobMenu(usize, crate::knobs::Control, i32, i32),
     /// A greyed-out control of the window was clicked: the app says it is not available yet.
@@ -395,6 +397,12 @@ pub fn format_name(f: os_host::Format) -> &'static str {
 }
 
 impl Plugins {
+    /// The built-in plugins at 48 kHz (tests that render).
+    #[cfg(test)]
+    pub(crate) fn at_48k() -> Plugins {
+        Plugins { available: builtin(), effects: builtin_effects(), scale: 1.0, rate: 48000, ..Plugins::default() }
+    }
+
     /// The built-in plugins only (what the app knows before the scan cache is read).
     pub fn builtins() -> Plugins {
         let native_checks = (!cfg!(test)).then(|| os_native::check::Checks::load(os_paths::user_file(NATIVE_CHECKS)));
@@ -516,6 +524,8 @@ impl Plugins {
             p.use_note_levels();
             if a.desc.name == LEMON_SAMPLER {
                 p.use_voice_gains();
+                // A cut with plugins of its own plays on a bus of its own (`os_model::clip_fx`).
+                p.use_voice_buses();
             }
         }
         drop(p);
@@ -1072,6 +1082,14 @@ impl Plugins {
         self.hosted.get(&row).and_then(|h| h.window.as_ref()).map(|w| (w.hwnd(), w.detached()))
     }
 
+    /// Row `row`'s window shows its Cut part or Whole audio tab.
+    #[cfg(plugin_windows)]
+    pub fn show_clip_tab(&self, row: usize, tab: crate::clip_page::Tab) {
+        if let Some(w) = self.hosted.get(&row).and_then(|h| h.window.as_ref()) {
+            w.show_clip_tab(tab);
+        }
+    }
+
     /// Docks or detaches row `row`'s window (window menu > Detached); closed, it opens that way next time.
     #[cfg(plugin_windows)]
     pub fn set_detached(&mut self, row: usize, on: bool) {
@@ -1271,6 +1289,7 @@ impl Plugins {
                         FrameEvent::DropFile(p) => Request::DropFile(row, p),
                         FrameEvent::Misc(m, v) => Request::Misc(row, m, v),
                         FrameEvent::MiscMenu(m, x, y) => Request::MiscMenu(row, m, x, y),
+                        FrameEvent::Clip(e) => Request::Clip(row, e),
                         FrameEvent::KnobMenu(k, x, y) => {
                             use crate::knobs::{Control, KnobId};
                             use crate::plugin_window::Knob;
@@ -2148,6 +2167,82 @@ mod tests {
         }
     }
 
+    /// The Cut part and Whole audio tabs in a real window, drawn and captured with a project's values
+    /// (`OS_SHOT_DIR=<dir> cargo test -p os-app --bin lemonstudio clip_tab_shots -- --ignored`).
+    #[test]
+    #[ignore]
+    fn clip_tab_shots() {
+        use crate::clip_page::{LaneVals, Mark, PageVals, Side, SlotVals};
+        use os_model::clip_fx::{point, Lane};
+        let dir = std::path::PathBuf::from(std::env::var("OS_SHOT_DIR").expect("OS_SHOT_DIR"));
+        let wave: Vec<(f32, f32)> = (0..548).map(|i| {
+            let t = i as f32 / 548.0;
+            let a = 0.15 + 0.75 * (t * 31.0).sin().abs() * (1.0 - t * 0.5);
+            (-a, a)
+        }).collect();
+        let rows = |r: &[(&str, &str)]| r.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect::<Vec<_>>();
+        let mut slots = vec![SlotVals::default(); 10];
+        slots[0] = SlotVals { name: Some("Lemon Reverb".into()), on: true, mix: 0.35 };
+        slots[1] = SlotVals { name: Some("Lemon Delay".into()), on: false, mix: 1.0 };
+        let cut = Side {
+            available: true,
+            rows: rows(&[("File", "lead vocal take 3.wav"), ("Part", "00:12.340 to 00:15.120  (2.780 s)"), ("On playlist", "Bar 9.1 to 10.3, track 2"), ("Gain", "-1.5 dB"), ("Fades", "in 40 ms, out 120 ms"), ("Pitch", "As recorded"), ("Mixer", "Vocals")]),
+            slots: slots.clone(),
+            lanes: vec![
+                LaneVals { lane: Lane::Volume, name: "Volume".into(), own: vec![point(12.34, 0.8), point(13.2, 0.55), point(14.1, 0.72), point(15.12, 0.2)], inherited: vec![point(11.0, 0.5), point(16.0, 0.75)] },
+                LaneVals { lane: Lane::Pan, name: "Pan".into(), own: Vec::new(), inherited: vec![point(11.0, 0.3), point(16.0, 0.7)] },
+                LaneVals { lane: Lane::Param { whole: false, slot: 0, param: 3 }, name: "Lemon Reverb: Mix".into(), own: vec![point(12.34, 0.2), point(15.0, 0.9)], inherited: Vec::new() },
+            ],
+            from_s: 12.34,
+            to_s: 15.12,
+            wave: std::sync::Arc::new(wave.clone()),
+            marks: Vec::new(),
+            focus: Lane::Volume,
+            focus_serial: 0,
+        };
+        let whole = Side {
+            rows: rows(&[("File", "lead vocal take 3.wav"), ("Length", "03:12.000 (192.000 s)"), ("Rate", "48000 Hz"), ("Cuts", "5 on the playlist"), ("Pitch", "As recorded"), ("Volume", "78%"), ("Mixer", "Vocals")]),
+            slots: { let mut s = vec![SlotVals::default(); 10]; s[0] = SlotVals { name: Some("Lemon Parametric EQ".into()), on: true, mix: 1.0 }; s },
+            lanes: vec![
+                LaneVals { lane: Lane::Volume, name: "Volume".into(), own: vec![point(0.0, 0.6), point(40.0, 0.8), point(120.0, 0.72), point(192.0, 0.3)], inherited: Vec::new() },
+                LaneVals { lane: Lane::Pan, name: "Pan".into(), own: Vec::new(), inherited: Vec::new() },
+            ],
+            from_s: 0.0,
+            to_s: 192.0,
+            marks: vec![
+                Mark { from_s: 12.0, to_s: 15.0, own: vec![Lane::Volume] },
+                Mark { from_s: 30.0, to_s: 42.0, own: Vec::new() },
+                Mark { from_s: 60.0, to_s: 66.0, own: Vec::new() },
+                Mark { from_s: 100.0, to_s: 130.0, own: vec![Lane::Volume] },
+                Mark { from_s: 150.0, to_s: 155.0, own: Vec::new() },
+            ],
+            ..cut.clone()
+        };
+        let page = PageVals { cut, whole, playhead: Some(13.6) };
+        let mut pl = Plugins { available: builtin(), scale: 1.0, rate: 48000, ..Plugins::default() };
+        let index = pl.index_of(LEMON_SAMPLER).expect("built-in Lemon Sampler");
+        pl.create_with(0, index, None).unwrap();
+        let info = ChannelInfo { name: "lead vocal take 3".into(), target: "Vocals".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: Some(Default::default()), clip: Some(Box::new(page)) };
+        pl.open_window(0, info).unwrap();
+        pump(&mut pl, 400);
+        let w = pl.hosted[&0].window.as_ref().unwrap().hwnd();
+        // The tabs after the plugin's own pages and the Misc wrench: 45 px cells from x 7.
+        let pages = 2;
+        let tab_x = |i: i32| 7 + 45 * i + 22;
+        capture(w, &dir.join("clip-tab-0-existing.bmp"));
+        click(w, tab_x(pages + 1), 50);
+        pump(&mut pl, 300);
+        capture(w, &dir.join("clip-tab-1-cut.bmp"));
+        click(w, tab_x(pages + 2), 50);
+        pump(&mut pl, 300);
+        capture(w, &dir.join("clip-tab-2-whole.bmp"));
+        click(w, tab_x(0), 50);
+        pump(&mut pl, 300);
+        capture(w, &dir.join("clip-tab-3-back.bmp"));
+        pl.drop_key(0);
+        pump(&mut pl, 50);
+    }
+
     /// Plugin editors draw at the window's DPI scale and follow a scale change (spec: ui/ui-scaling.md §3). Opens real
     /// windows: `cargo test -p os-app --bin lemonstudio plugin_editors_follow_the_scale -- --ignored`.
     #[test]
@@ -2161,7 +2256,7 @@ mod tests {
         let mut pl = Plugins { available: builtin(), scale: 1.5, rate: 48000, ..Plugins::default() };
         let index = pl.index_of(LEMON_SAMPLER).expect("built-in Lemon Sampler");
         pl.create_with(0, index, None).unwrap();
-        let info = ChannelInfo { name: LEMON_SAMPLER.into(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None };
+        let info = ChannelInfo { name: LEMON_SAMPLER.into(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None, clip: None };
         pl.open_window(0, info).unwrap();
         pump(&mut pl, 200);
         let w = pl.hosted[&0].window.as_ref().unwrap();
@@ -2193,7 +2288,7 @@ mod tests {
         let desc = lib.plugins[0].clone();
         let mut pl = Plugins { available: vec![Available { lib, desc }], scale: 1.0, ..Plugins::default() };
         pl.create(0, 0).unwrap();
-        let info = ChannelInfo { name: "Lemon Sampler".into(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None };
+        let info = ChannelInfo { name: "Lemon Sampler".into(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None, clip: None };
         pl.open_window(0, info).unwrap();
         pump(&mut pl, 400);
         let hwnd = pl.hosted[&0].window.as_ref().unwrap().hwnd();
@@ -2222,7 +2317,7 @@ mod tests {
         let index = pl.effect_index(LEMON_EQ).expect("built-in EQ");
         pl.create_effect(1, 0, index, None).unwrap();
         let key = fx_key(1, 0);
-        let info = ChannelInfo { name: LEMON_EQ.into(), target: "Bus 1".into(), enabled: true, volume: 0.8, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None };
+        let info = ChannelInfo { name: LEMON_EQ.into(), target: "Bus 1".into(), enabled: true, volume: 0.8, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None, clip: None };
         pl.open_window(key, info).unwrap();
         pump(&mut pl, 400);
         let frame = pl.hosted[&key].window.as_ref().unwrap().hwnd();
@@ -2248,7 +2343,7 @@ mod tests {
         let mut pl = Plugins { available: builtin(), scale: 1.0, rate: 48000, ..Plugins::default() };
         let index = pl.index_of(crate::osc3::LEMON_TRIO).expect("built-in Lemon Trio");
         pl.create_with(0, index, None).unwrap();
-        let info = ChannelInfo { name: crate::osc3::LEMON_TRIO.into(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None };
+        let info = ChannelInfo { name: crate::osc3::LEMON_TRIO.into(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None, clip: None };
         pl.open_window(0, info).unwrap();
         pump(&mut pl, 400);
         let frame = pl.hosted[&0].window.as_ref().unwrap().hwnd();
@@ -2300,7 +2395,7 @@ mod tests {
         let mut pl = Plugins { available: builtin(), scale: 1.0, rate: 48000, ..Plugins::default() };
         let index = pl.index_of(crate::citrus::CITRUS).expect("built-in Citrus");
         pl.create_with(0, index, None).unwrap();
-        let info = ChannelInfo { name: crate::citrus::CITRUS.into(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None };
+        let info = ChannelInfo { name: crate::citrus::CITRUS.into(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None, clip: None };
         pl.open_window(0, info).unwrap();
         pump(&mut pl, 400);
         let frame = pl.hosted[&0].window.as_ref().unwrap().hwnd();
@@ -2341,7 +2436,7 @@ mod tests {
         let desc = lib.plugins[0].clone();
         let mut pl = Plugins { available: vec![Available { lib, desc }], scale: 1.0, ..Plugins::default() };
         pl.create(0, 0).unwrap();
-        let info = ChannelInfo { name: "Lemon Sampler".into(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None };
+        let info = ChannelInfo { name: "Lemon Sampler".into(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None, clip: None };
         pl.open_window(0, info).unwrap();
         pump(&mut pl, 300);
         let frame = pl.hosted[&0].window.as_ref().unwrap().hwnd();
@@ -2432,7 +2527,7 @@ mod tests {
         let desc = lib.plugins[0].clone();
         let mut pl = Plugins { available: vec![Available { lib, desc }], scale: 1.0, ..Plugins::default() };
         pl.create(0, 0).unwrap();
-        let info = ChannelInfo { name: "Lemon Sampler".into(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None };
+        let info = ChannelInfo { name: "Lemon Sampler".into(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None, clip: None };
         pl.open_window(0, info).unwrap();
         pump(&mut pl, 300);
         let frame = pl.hosted[&0].window.as_ref().unwrap().hwnd();
@@ -2506,7 +2601,7 @@ mod tests {
         let desc = lib.plugins[0].clone();
         let mut pl = Plugins { available: vec![Available { lib, desc }], scale: 1.0, ..Plugins::default() };
         pl.create(0, 0).unwrap();
-        let info = ChannelInfo { name: "Lemon Sampler".into(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None };
+        let info = ChannelInfo { name: "Lemon Sampler".into(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None, clip: None };
         pl.open_window(0, info).unwrap();
         pump(&mut pl, 300);
         // A bright 2 s saw so a low-pass is audible.
@@ -2589,7 +2684,7 @@ mod tests {
         let desc = lib.plugins[0].clone();
         let mut pl = Plugins { available: vec![Available { lib, desc }], scale: 1.0, ..Plugins::default() };
         pl.create(0, 0).unwrap();
-        let info = ChannelInfo { name: "Lemon Sampler".into(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None };
+        let info = ChannelInfo { name: "Lemon Sampler".into(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None, clip: None };
         pl.open_window(0, info).unwrap();
         pump(&mut pl, 300);
         // A bright 2 s saw so a low-pass is audible.
@@ -2675,7 +2770,7 @@ mod tests {
         let name = desc.name.clone();
         let mut pl = Plugins { available: vec![Available { lib, desc }], scale: 1.0, ..Plugins::default() };
         pl.create(0, 0).unwrap();
-        let info = ChannelInfo { name, target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None };
+        let info = ChannelInfo { name, target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None, clip: None };
         pl.open_window(0, info).unwrap();
         pump(&mut pl, 300);
         let frame = pl.hosted[&0].window.as_ref().unwrap().hwnd();
@@ -2731,7 +2826,7 @@ mod tests {
         let name = desc.name.clone();
         let mut pl = Plugins { available: vec![Available { lib, desc }], scale: monitor, rate: 48000, ..Plugins::default() };
         pl.create(0, 0).unwrap();
-        let info = ChannelInfo { name: name.clone(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None };
+        let info = ChannelInfo { name: name.clone(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None, clip: None };
         pl.open_window(0, info).unwrap();
         pump(&mut pl, 500);
         let size = |h: HWND| unsafe {
@@ -3286,7 +3381,7 @@ mod tests {
         use windows_sys::Win32::Foundation::RECT;
         let mut pl = Plugins { available: builtin(), scale: 1.0, rate: 48000, ..Plugins::default() };
         pl.create(0, pl.index_of(LEMON_SAMPLER).unwrap()).unwrap();
-        let info = ChannelInfo { name: "Lemon Sampler".into(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None };
+        let info = ChannelInfo { name: "Lemon Sampler".into(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None, clip: None };
         pl.open_window(0, info).unwrap();
         pump(&mut pl, 300);
         let frame = pl.hosted[&0].window.as_ref().unwrap().hwnd();
@@ -3446,7 +3541,7 @@ mod tests {
                 pl.create(0, 0).unwrap();
                 0
             };
-            let info = ChannelInfo { name: name.clone(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None };
+            let info = ChannelInfo { name: name.clone(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None, clip: None };
             pl.open_window(key, info).unwrap();
             let frame = pl.hosted[&key].window.as_ref().unwrap().hwnd();
             unsafe { SetWindowPos(frame as HWND, std::ptr::null_mut(), -20000, -20000, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE) };
@@ -3477,7 +3572,7 @@ mod tests {
             let mut pl = Plugins { scale: 1.0, rate: 48000, effects: vec![a], ..Plugins::default() };
             pl.create_effect(1, 0, 0, None).unwrap();
             let key = fx_key(1, 0);
-            let info = ChannelInfo { name: name.into(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None };
+            let info = ChannelInfo { name: name.into(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None, clip: None };
             for round in 0..2 {
                 pl.open_window(key, info.clone()).unwrap();
                 let frame = pl.hosted[&key].window.as_ref().unwrap().hwnd();
@@ -3543,7 +3638,7 @@ mod tests {
             })
         };
         eprintln!("STEP window");
-        let info = ChannelInfo { name: name.clone(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None };
+        let info = ChannelInfo { name: name.clone(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None, clip: None };
         match pl.open_window(key, info) {
             Ok(()) => {
                 let frame = pl.hosted[&key].window.as_ref().unwrap().hwnd();
@@ -3737,7 +3832,7 @@ mod tests {
             (held, tail, finite)
         });
         eprintln!("STEP window");
-        let info = ChannelInfo { name: name.clone(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None };
+        let info = ChannelInfo { name: name.clone(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None, clip: None };
         match pl.open_window(0, info) {
             Ok(()) => {
                 let frame = pl.hosted[&0].window.as_ref().unwrap().hwnd();
@@ -3971,7 +4066,7 @@ mod tests {
             for i in 0..pl.effects.len() {
                 pl.create_effect(1, i as u8, i, None).unwrap();
                 let name = pl.effects[i].desc.name.clone();
-                let info = ChannelInfo { name, target: "Bus 1".into(), enabled: true, volume: 0.8, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None };
+                let info = ChannelInfo { name, target: "Bus 1".into(), enabled: true, volume: 0.8, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None, clip: None };
                 pl.open_window(fx_key(1, i as u8), info).unwrap();
                 transport.set_effects(pl.effects());
                 pump(&mut pl, 400);
@@ -4029,7 +4124,7 @@ mod tests {
     fn editor_limit_and_reopen_place() {
         let mut pl = Plugins { effects: builtin_effects(), scale: 1.0, rate: 48000, ..Plugins::default() };
         let index = pl.effect_index(LEMON_EQ).expect("built-in EQ");
-        let info = |t: u16| ChannelInfo { name: LEMON_EQ.into(), target: format!("Bus {t}"), enabled: true, volume: 0.8, pan: 0.0, pitch_cents: 0, range: 2, track: t, max_track: 125, misc: None };
+        let info = |t: u16| ChannelInfo { name: LEMON_EQ.into(), target: format!("Bus {t}"), enabled: true, volume: 0.8, pan: 0.0, pitch_cents: 0, range: 2, track: t, max_track: 125, misc: None, clip: None };
         let keys: Vec<usize> = (0..26u16).map(|i| fx_key(1 + i / 8, (i % 8) as u8)).collect();
         for &k in &keys {
             let (t, s) = fx_of(k).unwrap();

@@ -216,7 +216,7 @@ impl Control {
 /// The things `settle` gives ids to, counted.
 fn count(p: &os_model::Project) -> [usize; 6] {
     let clips = p.arrangements.iter().map(|a| a.clips.len()).sum();
-    let slots = p.mixer.iter().map(|m| m.slots.iter().flatten().count()).sum();
+    let slots = p.slot_tracks().map(|m| m.slots.iter().flatten().count()).sum();
     [p.channels.len(), p.patterns.len(), p.mixer.len(), p.arrangements.len(), clips, slots]
 }
 

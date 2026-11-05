@@ -649,7 +649,27 @@ fn take(engine: &mut dsp::Engine, p: &Processed) {
     engine.file_frames = p.file_frames;
 }
 
+/// The extra outputs linked into Lemon Studio, each a cut's voice on its way to the cut's own plugins (`voice_buses` in
+/// the host); the stereo plugin other hosts load has none.
+#[cfg(feature = "linked")]
+const VOICE_BUSES: &[NonZeroU32] = &[new_nonzero_u32(2); 15];
+#[cfg(not(feature = "linked"))]
+const VOICE_BUSES: &[NonZeroU32] = &[];
+
 impl LemonSampler {
+    /// Frames `at..end` of the block: the main output's voices, then those of each extra output in use.
+    fn render_span(&mut self, out: &mut [&mut [f32]], aux: &mut [Buffer], at: usize, end: usize, blk: &dsp::Block) {
+        let (left, right) = out.split_at_mut(1);
+        self.engine.render_bus(0, &mut left[0][at..end], &mut right[0][at..end], blk);
+        for (k, b) in aux.iter_mut().enumerate() {
+            let bus = (k + 1) as u8;
+            if self.engine.bus_in_use(bus) {
+                let (left, right) = b.as_slice().split_at_mut(1);
+                self.engine.render_bus(bus, &mut left[0][at..end], &mut right[0][at..end], blk);
+            }
+        }
+    }
+
     /// Takes a newer processed sample when the background task has one ready (never blocks).
     fn pick_up_sample(&mut self, ctx: &mut impl ProcessContext<Self>) {
         let p = &self.params;
@@ -675,7 +695,8 @@ impl LemonSampler {
     /// One note event (between the block's renders): `blk` follows a pitch bend.
     fn event(&mut self, ev: NoteEvent<()>, blk: &mut dsp::Block, tempo: f64) {
         match ev {
-            NoteEvent::NoteOn { note, velocity, voice_id, .. } => self.engine.note_on_id(note, velocity, voice_id, blk),
+            // The note's channel names the output it plays on.
+            NoteEvent::NoteOn { note, velocity, voice_id, channel, .. } => self.engine.note_on_bus(note, velocity, voice_id, channel, blk),
             NoteEvent::NoteOff { note, .. } => self.engine.note_off(note, blk),
             NoteEvent::Choke { note, voice_id, .. } => self.engine.choke(voice_id, note, blk),
             // An audio clip's fades and gain, on its own voice.
@@ -722,6 +743,7 @@ impl Plugin for LemonSampler {
     const AUDIO_IO_LAYOUTS: &'static [AudioIOLayout] = &[AudioIOLayout {
         main_input_channels: None,
         main_output_channels: NonZeroU32::new(2),
+        aux_output_ports: VOICE_BUSES,
         ..AudioIOLayout::const_default()
     }];
     const MIDI_INPUT: MidiConfig = MidiConfig::MidiCCs;
@@ -777,7 +799,7 @@ impl Plugin for LemonSampler {
         self.publish_sounding();
     }
 
-    fn process(&mut self, buffer: &mut Buffer, _aux: &mut AuxiliaryBuffers, ctx: &mut impl ProcessContext<Self>) -> ProcessStatus {
+    fn process(&mut self, buffer: &mut Buffer, aux: &mut AuxiliaryBuffers, ctx: &mut impl ProcessContext<Self>) -> ProcessStatus {
         if let Some(t) = ctx.transport().tempo {
             self.shared.set_tempo(t);
         }
@@ -802,19 +824,24 @@ impl Plugin for LemonSampler {
         for ch in out.iter_mut() {
             ch.fill(0.0);
         }
+        // The extra outputs the host's voices can play on (`os_model::clip_fx`).
+        self.engine.buses = aux.outputs.len().min(usize::from(u8::MAX)) as u8;
+        for b in aux.outputs.iter_mut() {
+            for ch in b.as_slice().iter_mut() {
+                ch.fill(0.0);
+            }
+        }
         let mut at = 0;
         while let Some(ev) = ctx.next_event() {
             let t = (ev.timing() as usize).min(len);
             if t > at {
-                let (left, right) = out.split_at_mut(1);
-                self.engine.render(&mut left[0][at..t], &mut right[0][at..t], &blk);
+                self.render_span(out, aux.outputs, at, t, &blk);
                 at = t;
             }
             self.event(ev, &mut blk, tempo);
         }
         if at < len {
-            let (left, right) = out.split_at_mut(1);
-            self.engine.render(&mut left[0][at..len], &mut right[0][at..len], &blk);
+            self.render_span(out, aux.outputs, at, len, &blk);
         }
         // Voice ends go back to the host, at the end of the block (spec: audio/voices.md §4).
         let last = (len as u32).saturating_sub(1);

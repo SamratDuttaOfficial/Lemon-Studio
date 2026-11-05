@@ -149,6 +149,25 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
   projects expect
 - Audio clips in the playlist take their length (and redraw their waveform) whenever the sampler's
   stretch settings, the channel pitch or the tempo change
+- Plugins and automation on a piece of audio. Double-clicking an audio clip opens its channel's window as before, with
+  two more tabs in its strip (Alt+double-click opens straight on the first of them; General ▸ Input ▸ Manage shortcuts):
+  - **Cut part** is the piece double-clicked: which part of the sample it plays, where it stands, its gain and fades,
+    ten plugin slots of its own, and its own automation lines.
+  - **Whole audio** is the sample: its file, length and cuts, ten plugin slots for all of it, and automation lines every
+    cut of it follows.
+
+  A line's points stand on the sample's own clock, so they stay with the audio when a clip is moved or trimmed. A line
+  of the whole audio moves every cut of the sample at the part of the sample it plays, and shows on each of them, on the
+  playlist as well. A cut with its own line for the same thing uses that one for the whole of the cut; every other cut,
+  and each thing the cut has no line for, goes on following the whole audio. Volume and pan always have a line to draw;
+  plugin parameters are added from the plugin's list, and a cut can also override a parameter of a whole-audio plugin
+  while it plays. The sound goes: the clip's fades and gain, its volume and pan lines, the cut's plugins, the whole
+  audio's plugins (one chain every cut shares), the channel's mixer track.
+
+  It is all stored in a chunk of its own after the project's events, so the events stay as they are and a project that
+  uses none of this is the same file as before. Up to 15 cuts of one sample with plugins of their own sound at once; past
+  that the rest play without their own plugins while they overlap. Consolidate leaves hosted plugins out here as it does
+  on mixer tracks.
 - Playlist stretch mode (Shift+M)
 - One open-source stretcher (Signalsmith Stretch) plays every method, so the sound differs from the
   original stretchers

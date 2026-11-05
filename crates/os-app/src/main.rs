@@ -33,6 +33,8 @@ mod track_rec;
 mod audio_log;
 mod score_log;
 mod clip_colors;
+mod clip_fx;
+mod clip_page;
 mod clock;
 mod control;
 mod cpu;

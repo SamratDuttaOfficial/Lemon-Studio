@@ -326,7 +326,7 @@ fn engine_plays_a_pattern() {
         id: os_model::Id::NONE,
         index: 0, kind: os_model::ChannelKind::Plugin, name: None, plugin: Some("Lemon Sampler".into()), plugin_state: None, color: None,
         enabled: true, volume: 0.78125, pan: 0.0, pitch_cents: 0, mixer_track: 0, sample_path: None,
-        layer_children: vec![], envelopes: Default::default(), rack: Default::default(), misc: Default::default(), sound: Default::default(),
+        layer_children: vec![], whole_fx: 0, envelopes: Default::default(), rack: Default::default(), misc: Default::default(), sound: Default::default(),
     };
     let note = os_model::Note { length: 24, ..os_model::Note::step(0, 0) };
     let project = os_model::Project {
@@ -361,7 +361,7 @@ fn mono_portamento_glides_through_the_tuning_expression() {
         id: os_model::Id::NONE,
         index: 0, kind: os_model::ChannelKind::Plugin, name: None, plugin: Some("Lemon Sampler".into()), plugin_state: None, color: None,
         enabled: true, volume: 0.78125, pan: 0.0, pitch_cents: 0, mixer_track: 0, sample_path: None,
-        layer_children: vec![], envelopes: Default::default(), rack: Default::default(), misc, sound: Default::default(),
+        layer_children: vec![], whole_fx: 0, envelopes: Default::default(), rack: Default::default(), misc, sound: Default::default(),
     };
     let project = os_model::Project { ppq: 96, tempo: Some(130.0), channels: vec![ch], ..Default::default() };
     let mut lib = os_engine::SampleLibrary::default();

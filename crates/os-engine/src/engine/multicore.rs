@@ -91,6 +91,9 @@ pub(super) struct MixScratch {
     pub key: Vec<f32>,
     pub main: Vec<f32>,
     pub rec: Vec<f32>,
+    /// An instrument's voice bus on its way out (`instrument_job`).
+    pub bus_l: Vec<f32>,
+    pub bus_r: Vec<f32>,
 }
 
 /// Every track's output for the slots that listen to it (`Engine::key_out`), shared by the tracks of a tick: the
@@ -343,7 +346,7 @@ impl Multicore {
         // The voices into their tracks, in voice order, then the ones that ended go.
         if let Some((v, _)) = p.voices {
             for (i, voice) in v.iter().enumerate() {
-                let into = &mut p.bus[cx.channels[voice.channel].insert];
+                let into = &mut p.bus[cx.channels[voice.channel].voice_track(voice.unit)];
                 for (x, s) in into.iter_mut().zip(&self.voice_buf[i]) {
                     *x += *s;
                 }
@@ -532,6 +535,9 @@ pub(super) struct InstOut {
     /// The delay it reported, and whether it said it still sounds.
     pub delay: u32,
     pub active: bool,
+    /// What its voice buses put out, interleaved (bit `k` of `bus_used`: `buses[k]` holds this tick's).
+    pub buses: Vec<Vec<f32>>,
+    pub bus_used: u32,
 }
 
 /// The audio clips with shapes on instrument channels (`Engine::inst_shapes`), shared by the channels of a tick: each
@@ -711,7 +717,7 @@ pub(super) mod tests {
             pitch_cents: 0,
             mixer_track: track,
             sample_path: None, // the built-in tone
-            layer_children: vec![],
+            layer_children: vec![], whole_fx: 0,
             envelopes: Default::default(),
             rack: Default::default(),
             misc: Default::default(),

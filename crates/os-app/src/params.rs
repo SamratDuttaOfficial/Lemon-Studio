@@ -149,6 +149,8 @@ pub fn key_of(s: &State, t: Target) -> Option<(usize, usize)> {
 pub fn target_of(s: &State, key: usize, index: usize) -> Option<u32> {
     let k = u16::try_from(index).ok().filter(|&k| k < 0x8000)?;
     Some(match fx_of(key) {
+        // A clip's or whole audio's chain has lanes of its own, and no number among FL's targets.
+        Some((track, _)) if os_model::clip_fx::handle_of(track).is_some() => return None,
         Some((track, slot)) => target::slot_param(track, slot, k),
         None => target::channel_param(s.project.channels.get(key)?.index, k),
     })

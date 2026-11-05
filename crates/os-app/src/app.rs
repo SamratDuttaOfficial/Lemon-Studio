@@ -970,6 +970,8 @@ pub struct State {
     pub rec: crate::record::Rec,
     /// Mixer selection, slot requests, meters (spec: ui/mixer.md).
     pub mixer: crate::mixer::MixerUi,
+    /// The plugin window's Cut part and Whole audio tabs.
+    pub clip_fx: crate::clip_fx::ClipFxUi,
     /// Rack rows played by a hosted plugin.
     pub hosted_rows: Vec<usize>,
     /// Requests for the plugin host, handled on the next tick: (row, `Plugins::available` index) to create, row to open.
@@ -1375,6 +1377,7 @@ impl App {
                 plugdb: Default::default(),
                 hosted_rows: Vec::new(),
                 pending_plugin: None,
+                clip_fx: Default::default(),
                 pending_open: None,
                 sample_loads: Vec::new(),
                 retimed: false,
@@ -2245,7 +2248,7 @@ impl App {
         use crate::plugins::{EDISON_FILE_NAME, EQ_FILE_NAME, LOVE_PHILTER_FILE_NAME, MAXIMUS_FILE_NAME};
         for key in self.plugins.hosted.keys().copied().filter(|&k| k >= crate::plugins::FX_KEY).collect::<Vec<_>>() {
             let Some((t, k)) = crate::plugins::fx_of(key) else { continue };
-            let Some(slot) = self.state.project.mixer.iter_mut().find(|m| m.index == t).and_then(|m| m.slots[usize::from(k)].as_mut()) else { continue };
+            let Some(slot) = self.state.project.slot_track_mut(t).and_then(|m| m.slots[usize::from(k)].as_mut()) else { continue };
             let st = match slot.name.as_str() {
                 EQ_FILE_NAME => self.plugins.eq_file_state(key),
                 EDISON_FILE_NAME => self.plugins.edison_file_state(key),
@@ -2263,8 +2266,21 @@ impl App {
         crate::drums::store(&mut self.state.project, &self.plugins);
     }
 
+    /// Where a popup asked for by row `row`'s window at screen point (x, y) opens on the canvas; over a detached window
+    /// it is lifted above it.
+    pub(crate) fn popup_at(&mut self, row: usize, x: i32, y: i32) -> (f32, f32) {
+        #[cfg(plugin_windows)]
+        {
+            self.popup_lift = self.plugins.window_of(row).filter(|w| w.1).map(|_| row);
+        }
+        #[cfg(not(plugin_windows))]
+        let _ = row;
+        self.screen_to_canvas(x, y)
+    }
+
     /// Drops every hosted instance (a new or opened project); `sync_samplers` hosts the new project's samplers.
     pub(crate) fn reset_hosted(&mut self) {
+        self.state.clip_fx = Default::default();
         self.plugins.clear();
         self.loading = None;
         self.state.playlist.wave_wait = false;
@@ -2411,8 +2427,7 @@ impl App {
         let todo: Vec<(u16, u8, String)> = self
             .state
             .project
-            .mixer
-            .iter()
+            .slot_tracks()
             .flat_map(|m| m.slots.iter().enumerate().map(move |(k, s)| (m.index, k as u8, s)))
             .filter(|&(t, k, _)| !self.plugins.hosted.contains_key(&fx_key(t, k)) && !self.fx_failed.contains(&fx_key(t, k)))
             .filter_map(|(t, k, s)| {
@@ -2437,7 +2452,7 @@ impl App {
                 _ => recreation.unwrap_or(TESLA),
             };
             let Some(index) = self.plugins.effect_index(name) else { continue };
-            let track = self.state.project.mixer.iter().find(|m| m.index == t);
+            let track = self.state.project.slot_track(t);
             let Some(fl) = track.and_then(|m| m.slots.get(usize::from(k))?.as_ref()).map(|s| s.state.as_slice()) else { continue };
             let st = if file == EQ_FILE_NAME {
                 Some(lemon_parametric_eq_2::params::plugin_state_from_fl(fl))
@@ -2554,6 +2569,10 @@ impl App {
                     Ok(()) => {
                         self.state.raise(Win::Hosted(row));
                         self.select_window_track(row);
+                        // A double-click that asks for the piece's own tab.
+                        if let Some((r, tab)) = self.state.clip_fx.pending_tab.take() {
+                            self.plugins.show_clip_tab(r, tab);
+                        }
                     }
                     Err(e) => {
                         self.state.message = Some(format!("Plugin: {e}"));
@@ -2566,8 +2585,14 @@ impl App {
         // windows' requests come with it.
         #[cfg(plugin_windows)]
         let requests = {
-            let (project, mixer) = (&self.state.project, &self.state.mixer);
-            self.plugins.idle(|row| if row >= crate::plugins::FX_KEY { crate::mixer::fx_info(project, mixer, row) } else { channel_info(project, row) })
+            let (project, mixer, state) = (&self.state.project, &self.state.mixer, &self.state);
+            self.plugins.idle(|row| {
+                if row >= crate::plugins::FX_KEY {
+                    crate::mixer::fx_info(project, mixer, row)
+                } else {
+                    channel_info(project, row).map(|i| crate::plugin_window::ChannelInfo { clip: crate::clip_fx::page_vals(state, row).map(Box::new), ..i })
+                }
+            })
         };
         // No plugin windows here, so no requests.
         #[cfg(not(plugin_windows))]
@@ -2619,7 +2644,7 @@ impl App {
                     }
                     // A native Wayland main window (Linux): the popups cannot be lifted above a plugin window there.
                     #[cfg(not(windows))]
-                    Request::Menu(..) | Request::Presets(..) | Request::MiscMenu(..) | Request::KnobMenu(..) if self.plugins.owner == 0 => {
+                    Request::Menu(..) | Request::Presets(..) | Request::MiscMenu(..) | Request::KnobMenu(..) | Request::Clip(_, crate::clip_page::Event::Pick { .. } | crate::clip_page::Event::SlotMenu { .. } | crate::clip_page::Event::AddLane { .. }) if self.plugins.owner == 0 => {
                         self.state.message = Some(off_text(PLUGIN_POPUPS));
                         self.invalidate();
                         continue;
@@ -2678,6 +2703,10 @@ impl App {
                     }
                     Request::Misc(row, m, v) => {
                         crate::misc::set(self, row, m, v);
+                        continue;
+                    }
+                    Request::Clip(row, e) => {
+                        crate::clip_fx::event(self, row, e);
                         continue;
                     }
                     Request::MiscMenu(row, m, x, y) => {
@@ -3953,6 +3982,8 @@ impl App {
         // Things the interface added get their ids before anything looks them up (`control::ids`).
         let s = &mut self.state;
         s.control.settle_tick(&mut s.project, s.piano.dirty);
+        crate::clip_fx::settle(self);
+        self.state.clip_fx.play_tick = self.transport.playing().then(|| self.transport.tick());
         self.control_tick();
         self.plugin_tick();
         // Playback loops over the time selection, as it is now (spec: ui/recording.md §5).
@@ -9085,7 +9116,7 @@ fn sampler_channel(i: u16, name: &str, mixer_track: u16) -> Channel {
         pitch_cents: 0,
         mixer_track,
         sample_path: None,
-        layer_children: Vec::new(),
+        layer_children: Vec::new(), whole_fx: 0,
         envelopes: Default::default(),
         rack: Default::default(),
         misc: Default::default(), sound: Default::default(),
@@ -9114,6 +9145,7 @@ fn channel_info(p: &Project, row: usize) -> Option<crate::plugin_window::Channel
         track: ch.mixer_track,
         max_track: crate::mixer::max_insert(p),
         misc: Some(crate::misc::vals_of(ch)),
+        clip: None,
     })
 }
 
@@ -17737,7 +17769,7 @@ mod tests {
     }
 
     /// Double-click on audio clips follows General ▸ Input ▸ Manage shortcuts: the row whose modifier is held wins,
-    /// Show clip properties does nothing yet, and a row set to "(disabled)" never fires (spec: ui/settings-choices.md
+    /// Show clip properties opens the window on the Cut part tab, and a row set to "(disabled)" never fires (spec: ui/settings-choices.md
     /// "Input: Manage shortcuts (2026-10-16)").
     #[test]
     fn audio_clip_double_click_follows_manage_shortcuts() {
@@ -17761,22 +17793,377 @@ mod tests {
             app.alt = false;
             app.state.pending_open.take()
         };
-        // The defaults: Alt is Show clip properties (no window yet), no modifier Show channel settings.
-        assert_eq!(double(&mut app, &mut c, true), None, "Show clip properties opens nothing yet");
+        // The defaults: Alt is Show clip properties (the window on the piece's own tab), no modifier Show channel settings.
+        assert_eq!(double(&mut app, &mut c, true), Some(row), "Show clip properties opens the window");
+        assert_eq!(app.state.clip_fx.pending_tab.take(), Some((row, crate::clip_page::Tab::Cut)), "on the piece's own tab");
         assert_eq!(double(&mut app, &mut c, false), Some(row));
+        assert_eq!(app.state.clip_fx.pending_tab, None, "on the tab it last showed");
         // Show channel settings to Alt (Show clip properties takes "(none)"): only Alt opens the sampler.
         let mut f = Form::applied();
         f.pick(8, 2);
         f.apply();
         assert_eq!((crate::prefs::choice(&CLIP_PROPERTIES), crate::prefs::choice(&CLIP_CHANNEL)), ("(none)", "Alt"));
-        assert_eq!(double(&mut app, &mut c, false), None);
+        assert_eq!(double(&mut app, &mut c, false), Some(row), "no modifier is Show clip properties now");
+        assert_eq!(app.state.clip_fx.pending_tab.take(), Some((row, crate::clip_page::Tab::Cut)));
         assert_eq!(double(&mut app, &mut c, true), Some(row));
-        // Show channel settings "(disabled)": no double-click opens it.
+        assert_eq!(app.state.clip_fx.pending_tab, None);
+        // Show channel settings "(disabled)": no double-click opens it; no modifier is still Show clip properties.
         f.pick(8, 0);
         f.apply();
         assert_eq!(double(&mut app, &mut c, true), None, "(disabled) never fires");
-        assert_eq!(double(&mut app, &mut c, false), None);
+        assert_eq!(double(&mut app, &mut c, false), Some(row));
+        assert_eq!(app.state.clip_fx.pending_tab.take(), Some((row, crate::clip_page::Tab::Cut)));
         let _ = std::fs::remove_file(&wav);
+    }
+
+    /// The whole of it, as the user does it, in the running app's own code: a real double-click on a piece, the real plugin
+    /// window, real messages on its tabs, the real menus, real plugins, the real audio stream (the main volume is down, so
+    /// nothing is heard), a real save and a real reopening. Opens windows and the audio device, so it is ignored:
+    /// `cargo test -p os-app --bin lemonstudio clip_fx_through_the_real_app -- --ignored`.
+    #[cfg(all(windows, plugin_windows))]
+    #[test]
+    #[ignore]
+    fn clip_fx_through_the_real_app() {
+        use crate::clip_page::{plot_rect, slot_rect, Tab};
+        use crate::playlist::{self as pl, Cmd, PItem};
+        use crate::plugin_menu::PlugCmd;
+        use os_model::clip_fx::{track_of, Lane};
+        use windows_sys::Win32::Foundation::HWND;
+        use windows_sys::Win32::UI::WindowsAndMessaging::*;
+
+        fn pump(app: &mut App, ms: u64) {
+            let end = std::time::Instant::now() + std::time::Duration::from_millis(ms);
+            while std::time::Instant::now() < end {
+                unsafe {
+                    let mut m: MSG = std::mem::zeroed();
+                    while PeekMessageW(&mut m, std::ptr::null_mut(), 0, 0, PM_REMOVE) != 0 {
+                        TranslateMessage(&m);
+                        DispatchMessageW(&m);
+                    }
+                }
+                app.tick();
+                std::thread::sleep(std::time::Duration::from_millis(8));
+            }
+        }
+        let send = |h: isize, msg: u32, wp: usize, x: f32, y: f32| unsafe {
+            SendMessageW(h as HWND, msg, wp, ((x as i32) | ((y as i32) << 16)) as isize);
+        };
+        let click = |h: isize, x: f32, y: f32| {
+            send(h, WM_MOUSEMOVE, 0, x, y);
+            send(h, WM_LBUTTONDOWN, 1, x, y);
+            send(h, WM_LBUTTONUP, 0, x, y);
+        };
+        let right_click = |h: isize, x: f32, y: f32| {
+            send(h, WM_MOUSEMOVE, 0, x, y);
+            send(h, WM_RBUTTONDOWN, 2, x, y);
+            send(h, WM_RBUTTONUP, 0, x, y);
+        };
+        let drag = |h: isize, a: (f32, f32), b: (f32, f32)| {
+            send(h, WM_MOUSEMOVE, 0, a.0, a.1);
+            send(h, WM_LBUTTONDOWN, 1, a.0, a.1);
+            for k in 1..=6 {
+                let t = k as f32 / 6.0;
+                send(h, WM_MOUSEMOVE, 1, a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t);
+            }
+            send(h, WM_LBUTTONUP, 0, b.0, b.1);
+        };
+        // The strip's cells: 45 px from x 7; the plugin's two pages, the Misc wrench, then ours. The page starts below the
+        // strip, inside the frame's border.
+        let tab_at = |i: usize| (7.0 + 45.0 * i as f32 + 22.0, 50.0);
+        let (ax, ay) = (crate::plugin_window::BORDER, crate::plugin_window::TITLE_H + crate::plugin_window::STRIP_H + 1.0);
+        let on_page = |x: f32, y: f32| (x + ax, y + ay);
+        let on_plot = |fx: f32, fy: f32| {
+            let p = plot_rect();
+            on_page(p.x + p.w * fx, p.y + p.h * fy)
+        };
+        fn find_cmd(items: &[PItem], want: &dyn Fn(&Cmd) -> bool) -> Option<Cmd> {
+            items.iter().find_map(|i| if want(&i.cmd) { Some(i.cmd.clone()) } else { find_cmd(&i.children, want) })
+        }
+
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let (mut app, _, g, bar) = ruler_app(&mut c);
+        app.plugins = crate::plugins::Plugins::builtins();
+        app.state.plugdb.rebuild(&app.plugins);
+
+        // A sample, cut into three pieces on one track.
+        let wav = std::env::temp_dir().join(format!("os-app-whole-{}.wav", std::process::id()));
+        let tone: Vec<f32> = (0..48000 * 8).flat_map(|i| {
+            let v = ((2.0 * std::f64::consts::PI * 440.0 * f64::from(i) / 48000.0).sin() * 0.5) as f32;
+            [v, v]
+        }).collect();
+        os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 48000, &tone).unwrap();
+        crate::playlist::add_audio_clip(&mut app.state, &wav.to_string_lossy(), 1, 0).expect("an audio clip");
+        let row = app.state.project.channels.len() - 1;
+        let first = *pl::clips(&app.state).last().unwrap();
+        let ms = |s: &State, ticks: u32| pl::to_src(s, first.source, f64::from(ticks));
+        let piece = |s: &State, pos: u32, from: u32| os_model::Clip { position: pos, length: bar, window: Some((ms(s, from), ms(s, from + bar))), ..first };
+        let pieces = [piece(&app.state, 0, 0), piece(&app.state, bar * 2, bar), piece(&app.state, bar * 4, bar * 2)];
+        let arr = pl::arr_mut(&mut app.state);
+        arr.clips.retain(|x| x.source != first.source);
+        arr.clips.extend(pieces);
+        // Nothing to hear from the speakers, whatever plays.
+        app.state.project.main_volume = Some(0);
+        app.state.song_mode = true;
+        app.state.piano.dirty = true;
+        pump(&mut app, 400);
+        assert!(app.state.hosted_rows.contains(&row), "the sample's channel is hosted");
+
+        // A real double-click on the second piece.
+        frame(&mut app, &mut c, None);
+        let at = |tick: u32| (g.x_of(tick as f32) + 12.0, g.y_of(1) + 30.0);
+        for _ in 0..2 {
+            let (x, y) = at(bar * 2);
+            app.mouse_move(x, y);
+            app.mouse_down();
+            app.mouse_up();
+            frame(&mut app, &mut c, None);
+        }
+        assert_eq!(app.state.pending_open, Some(row), "a double-click opens the channel's window");
+        let piece_id = pl::clips(&app.state).iter().find(|x| x.position == bar * 2).unwrap().id.0;
+        assert_eq!(app.state.clip_fx.cut.get(&row), Some(&piece_id), "and names the piece");
+        pump(&mut app, 400);
+        let (frame_hwnd, _) = app.plugins.window_of(row).expect("the window is open");
+
+        // The first tab is what it was; the frame fits the plugin's editor.
+        let width = |h: isize| unsafe {
+            let mut r: windows_sys::Win32::Foundation::RECT = std::mem::zeroed();
+            windows_sys::Win32::UI::WindowsAndMessaging::GetWindowRect(h as HWND, &mut r);
+            r.right - r.left
+        };
+        let page_width = (crate::clip_page::PAGE_W + 2.0 * crate::plugin_window::BORDER) as i32;
+        assert_ne!(width(frame_hwnd), page_width, "the plugin's own page shows");
+        // Alt+double-click: the same window, on the piece's own tab, for the piece double-clicked. The frame fits that page.
+        let third = pl::clips(&app.state).iter().find(|x| x.position == bar * 4).unwrap().id.0;
+        app.alt = true;
+        for _ in 0..2 {
+            let (x, y) = at(bar * 4);
+            app.mouse_move(x, y);
+            app.mouse_down();
+            app.mouse_up();
+            frame(&mut app, &mut c, None);
+        }
+        app.alt = false;
+        pump(&mut app, 200);
+        assert_eq!(app.plugins.window_of(row).map(|w| w.0), Some(frame_hwnd), "the same window");
+        assert_eq!(width(frame_hwnd), page_width, "on the Cut part tab");
+        assert_eq!(app.state.clip_fx.cut.get(&row), Some(&third), "it shows the piece double-clicked last");
+        // Back to the plugin's own page by its tab, and a plain double-click on the second piece keeps that page.
+        let (px, py) = tab_at(0);
+        click(frame_hwnd, px, py);
+        pump(&mut app, 100);
+        assert_ne!(width(frame_hwnd), page_width, "the plugin's own page again");
+        for _ in 0..2 {
+            let (x, y) = at(bar * 2);
+            app.mouse_move(x, y);
+            app.mouse_down();
+            app.mouse_up();
+            frame(&mut app, &mut c, None);
+        }
+        pump(&mut app, 200);
+        assert_ne!(width(frame_hwnd), page_width, "a plain double-click stays on the tab it was on");
+        assert_eq!(app.state.clip_fx.cut.get(&row), Some(&piece_id));
+
+        // The CUT tab shows the piece.
+        let vals = crate::clip_fx::page_vals(&app.state, row).unwrap();
+        assert!(vals.cut.available);
+        let pages = 2;
+        let (cx, cy) = tab_at(pages + 1);
+        click(frame_hwnd, cx, cy);
+        pump(&mut app, 100);
+
+        // Add a plugin to this cut alone: an empty slot, the app's own plugin menu, a real plugin.
+        let r = slot_rect(0);
+        let (x, y) = on_page(r.x + 40.0, r.cy());
+        click(frame_hwnd, x, y);
+        pump(&mut app, 60);
+        let menu = app.state.playlist.popup.take().expect("the plugin menu");
+        let index = app.plugins.effect_index("Lemon Reverb").expect("Lemon Reverb");
+        let cmd = find_cmd(&menu.items, &|c| matches!(c, Cmd::Plugin(PlugCmd::ClipEffect { index: i, slot: 0, .. }) if *i == index)).expect("the menu offers it for this slot");
+        pl::run(&mut app, cmd);
+        pump(&mut app, 300);
+        let cut = pl::clips(&app.state).iter().find(|x| x.id.0 == piece_id).unwrap().fx;
+        assert_ne!(cut, 0, "the piece has its unit");
+        let key = crate::plugins::fx_key(track_of(cut), 0);
+        assert!(app.plugins.hosted.contains_key(&key), "the plugin is hosted");
+        assert!(app.plugins.window_of(key).is_some(), "its window opened, as a mixer slot's does");
+        assert_eq!(app.state.project.mixer.iter().filter(|m| m.slots.iter().any(Option::is_some)).count(), 0, "no mixer track has it");
+        app.plugins.close_if_open(key);
+        pump(&mut app, 60);
+
+        // Draw this cut's volume line with the mouse: one point dragged, then another; each one undo step.
+        let before = app.state.project.fx_unit(cut).unwrap().volume.len();
+        assert_eq!(before, 0);
+        drag(frame_hwnd, on_plot(0.25, 0.5), on_plot(0.3, 0.4));
+        pump(&mut app, 60);
+        click(frame_hwnd, on_plot(0.8, 0.7).0, on_plot(0.8, 0.7).1);
+        pump(&mut app, 60);
+        let line = app.state.project.fx_unit(cut).unwrap().volume.clone();
+        assert_eq!(line.len(), 2, "{line:?}");
+        assert!(line[0].beat < line[1].beat);
+        let span = pl::clips(&app.state).iter().find(|x| x.id.0 == piece_id).map(|x| {
+            let a = pl::window(&app.state, x).0 / 1000.0;
+            (a, a + f64::from(x.length) * pl::to_src(&app.state, x.source, 1.0) / 1000.0)
+        }).unwrap();
+        assert!(line[0].beat > span.0 && line[1].beat < span.1, "on the piece's part of the sample: {line:?} in {span:?}");
+        assert!((line[0].value - 0.6).abs() < 0.03, "{:?}", line[0]);
+        crate::history::undo(&mut app.state);
+        pump(&mut app, 60);
+        assert_eq!(app.state.project.fx_unit(cut).unwrap().volume.len(), 1, "one undo: one point");
+        crate::history::redo(&mut app.state);
+        pump(&mut app, 60);
+        assert_eq!(app.state.project.fx_unit(cut).unwrap().volume.len(), 2, "redone");
+
+        // A right click takes a point away.
+        let p = line[1];
+        let vals = crate::clip_fx::page_vals(&app.state, row).unwrap();
+        let fx = (p.beat - vals.cut.from_s) / (vals.cut.to_s - vals.cut.from_s);
+        let (x, y) = on_plot(fx as f32, 1.0 - p.value as f32);
+        right_click(frame_hwnd, x, y);
+        pump(&mut app, 60);
+        assert_eq!(app.state.project.fx_unit(cut).unwrap().volume.len(), 1);
+        crate::history::undo(&mut app.state);
+        pump(&mut app, 60);
+
+        // The WHOLE tab: a line for every cut of the audio.
+        let (wx, wy) = tab_at(pages + 2);
+        click(frame_hwnd, wx, wy);
+        pump(&mut app, 100);
+        click(frame_hwnd, on_plot(0.5, 0.9).0, on_plot(0.5, 0.9).1);
+        pump(&mut app, 60);
+        let whole = app.state.project.channels[row].whole_fx;
+        assert_ne!(whole, 0);
+        assert_eq!(app.state.project.fx_unit(whole).unwrap().volume.len(), 1);
+        let clips: Vec<os_model::Clip> = pl::clips(&app.state).iter().filter(|x| x.source == first.source).copied().collect();
+        assert_eq!(clips.len(), 3);
+        for x in &clips {
+            let r = app.state.project.clip_lane(x, Lane::Volume).expect("every cut has a line to follow");
+            if x.id.0 == piece_id {
+                assert!(r.own && r.points.len() == 2, "the cut's own stays: {r:?}");
+            } else {
+                assert!(!r.own && r.points.len() == 1, "the others follow the whole audio");
+            }
+        }
+        // A plugin on the whole audio too, and a parameter line for it through the real list of its parameters.
+        let r = slot_rect(0);
+        let (x, y) = on_page(r.x + 40.0, r.cy());
+        click(frame_hwnd, x, y);
+        pump(&mut app, 60);
+        let menu = app.state.playlist.popup.take().expect("the plugin menu");
+        let bal = app.plugins.effect_index("Lemon Balance").expect("Lemon Balance");
+        let cmd = find_cmd(&menu.items, &|c| matches!(c, Cmd::Plugin(PlugCmd::ClipEffect { index: i, slot: 0, .. }) if *i == bal)).expect("offered");
+        pl::run(&mut app, cmd);
+        pump(&mut app, 400);
+        let whole_key = crate::plugins::fx_key(track_of(whole), 0);
+        assert!(app.plugins.hosted.contains_key(&whole_key));
+        app.plugins.close_if_open(whole_key);
+        pump(&mut app, 60);
+        // "Plugin parameter...": the row after Volume and Pan.
+        let add = crate::clip_page::lane_row_rect(2);
+        let (x, y) = on_page(add.cx(), add.cy());
+        click(frame_hwnd, x, y);
+        pump(&mut app, 60);
+        let menu = app.state.playlist.popup.take().expect("the list of parameters");
+        let cmd = find_cmd(&menu.items, &|c| matches!(c, Cmd::ClipFx(crate::clip_fx::C::AddLane { whole: true, slot: 0, .. }))).expect("a parameter to automate");
+        pl::run(&mut app, cmd);
+        pump(&mut app, 60);
+        let vals = crate::clip_fx::page_vals(&app.state, row).unwrap();
+        assert!(vals.whole.lanes.iter().any(|l| matches!(l.lane, Lane::Param { whole: true, slot: 0, .. }) && !l.own.is_empty()), "{:?}", vals.whole.lanes);
+        assert!(matches!(vals.whole.focus, Lane::Param { .. }), "and it shows");
+
+        // Off and on, by its LED: the undo history takes it, the plugin stays.
+        let led = crate::clip_page::led_rect(0);
+        let (x, y) = on_page(led.cx(), led.cy());
+        click(frame_hwnd, x, y);
+        pump(&mut app, 60);
+        assert!(!app.state.project.fx_unit(whole).unwrap().track.slot_on[0]);
+        click(frame_hwnd, x, y);
+        pump(&mut app, 60);
+        assert!(app.state.project.fx_unit(whole).unwrap().track.slot_on[0]);
+
+        // Play the song on the real stream: sound reaches the channel's mixer track through both chains.
+        let insert = usize::from(app.state.project.channels[row].mixer_track);
+        app.act(Action::Play);
+        let mut peak = 0.0f32;
+        let mut playing = false;
+        let end = std::time::Instant::now() + std::time::Duration::from_millis(1800);
+        while std::time::Instant::now() < end {
+            pump(&mut app, 40);
+            playing |= app.transport.playing();
+            peak = app.transport.take_track_peaks().get(insert).map_or(peak, |p| peak.max(p[0]));
+        }
+        assert!(playing, "the song plays");
+        assert!(peak > 0.01, "sound reaches the mixer track: {peak}");
+        assert_eq!(app.transport.take_track_peaks().len(), app.state.project.mixer.len(), "the meters count the project's tracks only");
+
+        // Edit while it plays: a new line on the piece's tab, a plugin switched off; it goes on playing.
+        let (cx, cy) = tab_at(pages + 1);
+        click(frame_hwnd, cx, cy);
+        pump(&mut app, 100);
+        drag(frame_hwnd, on_plot(0.6, 0.5), on_plot(0.65, 0.3));
+        pump(&mut app, 300);
+        assert!(app.transport.playing(), "it plays on");
+        assert_eq!(app.state.project.fx_unit(cut).unwrap().volume.len(), 3);
+        // Between the clips there is nothing to hear: on to the piece with the plugin and the new line, which sounds from
+        // its own bus through its chain into the whole audio's.
+        let piece_start = f64::from(bar * 2);
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(8);
+        while app.transport.tick() < piece_start + f64::from(bar) / 4.0 && std::time::Instant::now() < end {
+            pump(&mut app, 40);
+            app.transport.take_track_peaks();
+        }
+        assert!(app.transport.tick() >= piece_start, "playback reached the piece: {}", app.transport.tick());
+        let mut peak = 0.0f32;
+        let until = std::time::Instant::now() + std::time::Duration::from_millis(500);
+        while std::time::Instant::now() < until {
+            pump(&mut app, 40);
+            peak = app.transport.take_track_peaks().get(insert).map_or(peak, |p| peak.max(p[0]));
+        }
+        assert!(peak > 0.01, "the piece sounds through its chain after the edits: {peak}");
+        app.act(Action::Stop);
+        pump(&mut app, 100);
+
+        // A split of the piece: both parts keep what the piece had, each its own from now on.
+        let i = pl::clips(&app.state).iter().position(|x| x.id.0 == piece_id).unwrap();
+        let split = os_model::Clip { position: pl::clips(&app.state)[i].position + bar / 2, ..pl::clips(&app.state)[i] };
+        pl::arr_mut(&mut app.state).clips.push(split);
+        pump(&mut app, 200);
+        let two: Vec<u32> = pl::clips(&app.state).iter().filter(|x| x.position == bar * 2 || x.position == bar * 2 + bar / 2).map(|x| x.fx).collect();
+        assert_eq!(two.len(), 2);
+        assert!(two[0] != 0 && two[1] != 0 && two[0] != two[1], "{two:?}");
+        assert!(app.plugins.hosted.contains_key(&crate::plugins::fx_key(track_of(two[1]), 0)), "the copy's plugin is hosted too");
+        assert_eq!(app.state.project.fx_unit(two[1]).unwrap().volume.len(), 3);
+
+        // Save, open in a fresh app: everything is back, the plugins hosted.
+        let flp = std::env::temp_dir().join(format!("os-app-whole-{}.flp", std::process::id()));
+        assert_eq!(app.save_copy(flp.clone()), Some(Ok(())), "{:?}", app.state.message);
+        let held: Vec<(u32, usize)> = pl::clips(&app.state).iter().filter(|x| x.source == first.source).map(|x| (x.position, app.state.project.fx_unit(x.fx).map_or(0, |u| u.volume.len()))).collect();
+        drop(app);
+
+        let mut again = App::new(None);
+        again.plugins = crate::plugins::Plugins::builtins();
+        again.state.plugdb.rebuild(&again.plugins);
+        again.open(flp.clone());
+        let end = std::time::Instant::now() + std::time::Duration::from_millis(1500);
+        while std::time::Instant::now() < end {
+            pump(&mut again, 50);
+        }
+        let row = again.state.project.channels.iter().position(|x| x.sample_path.as_deref().is_some_and(|p| p.ends_with(".wav"))).expect("the channel");
+        let src = os_model::ClipSource::Channel(again.state.project.channels[row].index);
+        let back: Vec<(u32, usize)> = pl::clips(&again.state).iter().filter(|x| x.source == src).map(|x| (x.position, again.state.project.fx_unit(x.fx).map_or(0, |u| u.volume.len()))).collect();
+        let (mut a, mut b) = (held.clone(), back.clone());
+        a.sort_unstable();
+        b.sort_unstable();
+        assert_eq!(a, b, "the cuts' lines are back");
+        let whole = again.state.project.channels[row].whole_fx;
+        let unit = again.state.project.fx_unit(whole).expect("the whole audio's unit is back");
+        assert_eq!(unit.volume.len(), 1);
+        assert!(unit.params.iter().any(|l| !l.points.is_empty()), "its parameter line");
+        assert!(again.plugins.hosted.contains_key(&crate::plugins::fx_key(track_of(whole), 0)), "its plugin is hosted again");
+        let some_cut = pl::clips(&again.state).iter().find(|x| x.source == src && x.fx != 0).unwrap().fx;
+        assert!(again.plugins.hosted.contains_key(&crate::plugins::fx_key(track_of(some_cut), 0)), "the cut's too");
+        drop(again);
+        let _ = std::fs::remove_file(&wav);
+        let _ = std::fs::remove_file(&flp);
     }
 
     /// A pattern playing when the ruler is clicked goes on as the song from the clicked position (needs an audio

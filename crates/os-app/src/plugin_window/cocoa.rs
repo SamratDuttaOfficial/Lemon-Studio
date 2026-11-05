@@ -522,8 +522,7 @@ impl FrameWindow {
 
     pub fn set_info(&self, info: ChannelInfo) {
         let mut st = self.f.state.borrow_mut();
-        if st.info != info && st.drag.is_none() && st.misc_ui.drag.is_none() {
-            st.info = info;
+        if st.take_info(info) {
             self.f.view.setNeedsDisplay(true);
         }
     }
@@ -618,6 +617,12 @@ impl FrameWindow {
             self.f.state.borrow_mut().strip = on;
             self.f.layout();
         }
+    }
+
+    /// Shows the Cut part or Whole audio tab.
+    pub fn show_clip_tab(&self, tab: crate::clip_page::Tab) {
+        self.f.state.borrow_mut().open_clip_tab(tab);
+        self.f.layout();
     }
 
     pub fn take_events(&self) -> Vec<FrameEvent> {
@@ -727,7 +732,7 @@ impl Frame {
     fn layout(&self) {
         let st = self.state.borrow();
         let (fw, fh) = st.size();
-        let (ay, ed, show) = (st.area_y(), st.editor, !st.misc);
+        let (ay, ed, show) = (st.area_y(), st.editor, !st.over_editor());
         drop(st);
         let (w, h) = (f64::from(fw), f64::from(fh));
         match self.panel.borrow().as_ref() {

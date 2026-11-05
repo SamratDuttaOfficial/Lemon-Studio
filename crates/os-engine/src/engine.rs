@@ -28,6 +28,7 @@ use crate::instrument::{Instrument, SharedInstrument, Slot, TransportInfo};
 use crate::laws;
 use crate::sample::{Sample, SampleLibrary};
 
+mod clip_fx;
 mod controllers;
 mod layers;
 mod marks;
@@ -36,6 +37,7 @@ mod param_auto;
 mod multicore;
 mod pdc;
 mod rec;
+pub use clip_fx::lane_gain;
 pub use param_auto::PARAM_STEP;
 pub use rec::{Point as RecordPoint, RecordTap};
 
@@ -106,6 +108,8 @@ struct Trigger {
     slide: bool,
     /// The note's own portamento switch (spec: audio/note-rules.md, "A note's own portamento switch").
     porta: bool,
+    /// An audio clip's own chain (the unit's handle, `clip_fx`); 0 = none.
+    unit: u32,
     /// A note a layer handed on: the layer and the child's crossfade gain.
     via: Option<Via>,
     /// The group it cuts and the group its voice belongs to as the note carries them from a layer (`None`: the
@@ -147,6 +151,8 @@ struct ClipShape {
     gain: f32,
     /// Frames of the short fade a late start begins with (0 = none).
     declick: u64,
+    /// The clip's volume and pan lanes: the place + 1 in `ChannelState::lanes` (0 = none; `clip_fx`).
+    lanes: u32,
 }
 
 impl ClipShape {
@@ -167,6 +173,22 @@ impl ClipShape {
             g *= os_model::fade_curve(age as f64 / self.declick as f64, 0.0);
         }
         g as f32
+    }
+
+    /// The clip's lanes on channel `ch`.
+    fn lanes<'a>(&self, ch: &'a ChannelState) -> Option<&'a clip_fx::ClipLanes> {
+        ch.lanes.get((self.lanes as usize).checked_sub(1)?)
+    }
+
+    /// The whole gain `age` frames after the voice started, its volume lane included.
+    fn gain_on(&self, ch: &ChannelState, age: u64) -> f32 {
+        let g = self.at(age);
+        self.lanes(ch).map_or(g, |l| g * l.gain(self.since + age))
+    }
+
+    /// The pan lane's pan `age` frames after the voice started.
+    fn pan_on(&self, ch: &ChannelState, age: u64) -> Option<f32> {
+        self.lanes(ch)?.pan(self.since + age)
     }
 }
 
@@ -218,6 +240,11 @@ struct InstClip {
     shape: ClipShape,
     age: u64,
     sent: Option<f32>,
+    /// The pan last given (a clip's pan lane); `None` before the first.
+    pan: Option<f32>,
+    /// The instrument's output it plays on (0: the main one), for its chain.
+    bus: u8,
+    unit: u32,
 }
 
 /// An audio clip's fades (milliseconds, tension) and gain: the fades it plays (with automatic crossfades on, an edge
@@ -313,6 +340,12 @@ struct ChannelState {
     /// levels on its channel's (a Lemon Studio choice: the host does not reach a plugin's voices one by one, so a
     /// child that also plays notes of its own, or of two layers, hears them all with the levels of the last one).
     via: Option<Via>,
+    /// The chains of its clips: (the unit's handle, its track). A clip without one plays into `insert`.
+    chains: Vec<(u32, usize)>,
+    /// The volume and pan lanes of its clips (`ClipShape::lanes`).
+    lanes: Vec<clip_fx::ClipLanes>,
+    /// The voice buses its instrument has, when it could be asked (`Instrument::voice_buses`).
+    buses: Option<usize>,
 }
 
 /// A channel's level adjustments (event 229) and filter knob positions (spec: audio/voice-levels.md "The channel's
@@ -418,6 +451,14 @@ fn stretched_frames(frames: usize, factor: f64) -> usize {
 }
 
 impl ChannelState {
+    /// The track a voice of the clip with unit `unit` plays into: its chain's, else the channel's insert.
+    fn voice_track(&self, unit: u32) -> usize {
+        match unit {
+            0 => self.insert,
+            u => self.chains.iter().find(|c| c.0 == u).map_or(self.insert, |c| c.1),
+        }
+    }
+
     /// The buffer a voice plays (`Trigger::buf`).
     fn buffer(&self, buf: u16) -> Option<&Arc<Sample>> {
         match buf {
@@ -643,6 +684,8 @@ struct Voice {
     slide: VoiceSlide,
     /// The layer its note came through.
     via: Option<Via>,
+    /// Its audio clip's own chain (0 = none).
+    unit: u32,
 }
 
 /// A voice's levels as slide notes move them (spec: audio/song-structure.md "Slide notes", audio/note-rules.md
@@ -996,6 +1039,9 @@ pub struct Engine {
     exporting: bool,
     channels: Vec<ChannelState>,
     tracks: Vec<MixTrack>,
+    /// The project's own tracks, of `tracks`; the chains (`clip_fx`) come after them.
+    real_tracks: usize,
+    chains: Vec<clip_fx::Chain>,
     /// Mixer tracks in processing order: every track before the tracks it sends to.
     order: Vec<usize>,
     triggers: Vec<Trigger>,
@@ -1327,6 +1373,9 @@ impl Engine {
                     layer: (ch.kind == ChannelKind::Layer).then(|| layers::Layer::of(ch)),
                     voicing: crate::instrument::ChannelVoicing::of(ch, ppq),
                     via: None,
+                    chains: Vec::new(),
+                    lanes: Vec::new(),
+                    buses: None,
                 };
                 state.retune(knob);
                 state.init.2 = state.base_rate;
@@ -1350,25 +1399,29 @@ impl Engine {
             })
             .collect();
 
-        let tracks: Vec<MixTrack> = if project.mixer.is_empty() {
+        let mut slots_of = |m: &os_model::MixerTrack| {
+            let mut effects = Vec::new();
+            for (k, slot) in m.slots.iter().enumerate() {
+                let Some(slot) = slot else { continue };
+                match crate::effects::from_slot(&slot.name, &slot.state, rate) {
+                    Some(mut fx) => {
+                        fx.set_tempo(tempo);
+                        effects.push(FxSlot::new(k, m.slot_on[k], mix_level(m.slot_mix[k]), Fx::Own(fx)));
+                        report.effects_active += 1;
+                    }
+                    None => report.effects_bypassed += 1,
+                }
+            }
+            effects
+        };
+        let mut tracks: Vec<MixTrack> = if project.mixer.is_empty() {
             vec![MixTrack { eq: os_dsp::mixer::TrackEq::new(os_dsp::mixer::EQ_DEFAULT, rate), law: pan_law, output: 0, ..MixTrack::unity() }]
         } else {
             project
                 .mixer
                 .iter()
                 .map(|m| {
-                    let mut effects = Vec::new();
-                    for (k, slot) in m.slots.iter().enumerate() {
-                        let Some(slot) = slot else { continue };
-                        match crate::effects::from_slot(&slot.name, &slot.state, rate) {
-                            Some(mut fx) => {
-                                fx.set_tempo(tempo);
-                                effects.push(FxSlot::new(k, m.slot_on[k], mix_level(m.slot_mix[k]), Fx::Own(fx)));
-                                report.effects_active += 1;
-                            }
-                            None => report.effects_bypassed += 1,
-                        }
-                    }
+                    let effects = slots_of(m);
                     let routes = if m.index == 0 {
                         vec![]
                     } else {
@@ -1411,6 +1464,28 @@ impl Engine {
                 })
                 .collect()
         };
+        // The chains of the clips and whole samples (`clip_fx`), on tracks after the project's: a chain has its slots, a
+        // flat equaliser and a fader at unity, and plays into its destination.
+        let real_tracks = tracks.len();
+        let chains = clip_fx::plan(project, mode == PlayMode::Song, real_tracks, &mut channels);
+        for c in &chains {
+            let Some(u) = project.fx_unit(c.handle) else { continue };
+            let effects = slots_of(&u.track);
+            let mut t = MixTrack {
+                law: pan_law,
+                slots_enabled: u.track.slots_enabled,
+                eq: os_dsp::mixer::TrackEq::new(os_dsp::mixer::EQ_DEFAULT, rate),
+                effects,
+                slot_on: u.track.slot_on,
+                slot_mix: u.track.slot_mix.map(mix_level),
+                routes: vec![Route { dest: c.dest, gain: 1.0, glide: Glide::new(1.0), pad: pdc::Pad::default() }],
+                ..MixTrack::unity()
+            };
+            t.matrix = t.compute_matrix();
+            t.gains = t.matrix.map(|r| r.map(Glide::new));
+            t.store();
+            tracks.push(t);
+        }
         let order = processing_order(&tracks);
 
         let mut controls: Vec<CtlEvent> = schedule_controls(project, mode)
@@ -1421,6 +1496,13 @@ impl Engine {
         controls.sort_by_key(|c| c.tick); // stable: equal ticks keep their order
         let (mut sched, end_tick) = schedule(project, mode, &mut report);
         sched.sort_by_key(|s| s.tick);
+        // A clip's voice takes its chain and its lanes from its units (`clip_fx`).
+        if let Some(a) = project.arrangement().filter(|_| mode == PlayMode::Song) {
+            for n in &mut sched {
+                let (Some(c), Some(state)) = (n.source.and_then(|i| a.clips.get(i)), channels.get_mut(n.channel)) else { continue };
+                (n.unit, n.lanes) = clip_fx::voice_of(project, c, state, n.from_s);
+            }
+        }
         let mut triggers: Vec<Trigger> = sched
             .into_iter()
             .filter_map(|n: Sched| {
@@ -1456,7 +1538,9 @@ impl Engine {
                     from,
                     start,
                     buf: 0,
-                    shape: n.clip.map(|fx| {
+                    unit: n.unit,
+                    // A clip with lanes or a chain has a shape whatever its fades (`Engine::inst_shapes` holds its bus).
+                    shape: n.clip.or_else(|| (n.lanes != 0 || n.unit != 0).then_some(ClipFx { fade_in: (0.0, 0.0), fade_out: (0.0, 0.0), gain: 1.0 })).map(|fx| {
                         let ms = |v: f32| (f64::from(v.max(0.0)) * f64::from(rate) / 1000.0).round() as u64;
                         let total = Clock::frame_of_tick(rate, ppq, tick_tempo, n.tick + n.len) - Clock::frame_of_tick(rate, ppq, tick_tempo, n.tick);
                         ClipShape {
@@ -1468,6 +1552,7 @@ impl Engine {
                             tension_out: f64::from(fx.fade_out.1),
                             gain: fx.gain,
                             declick: 0,
+                            lanes: n.lanes,
                         }
                     }),
                     slide: n.slide,
@@ -1542,6 +1627,9 @@ impl Engine {
                 });
             }
         }
+        if mode == PlayMode::Song {
+            clip_fx::param_clips(project, &chains, &channels, ppq, tick_tempo, &mut curves, &mut autos);
+        }
         // Later clips win where clips on the same target overlap.
         autos.sort_by_key(|a| a.start);
         // The initial values, in song mode. Where playback starts the app has already set them in the project.
@@ -1580,6 +1668,8 @@ impl Engine {
             init,
             rate,
             channels,
+            real_tracks,
+            chains,
             bus: vec![Vec::new(); tracks.len()],
             tracks,
             order,
@@ -1727,6 +1817,7 @@ impl Engine {
             if let Ok(h) = inst.try_lock() {
                 let mine = |g: Target| matches!(g, Target::ChannelParam(c, _) if usize::from(c) == channel);
                 param_points(&mut self.controls, mine, |k| h.param_range(k));
+                ch.buses = Some(h.voice_buses());
             }
             ch.instrument = Slot(Some(inst));
             // Its delay is read after it processes; the pads are worked out again then.
@@ -1739,8 +1830,18 @@ impl Engine {
         }
     }
 
+    /// The place in `tracks` of the track numbered `track`: a mixer track, or a unit's chain by its own number
+    /// (`os_model::clip_fx::track_of`), `None` when that chain has no part in this song.
+    fn track_at(&self, track: usize) -> Option<usize> {
+        match u16::try_from(track).ok().and_then(os_model::clip_fx::handle_of) {
+            Some(h) => self.chains.iter().find(|c| c.handle == h).map(|c| c.track),
+            None => Some(track).filter(|&t| t < self.real_tracks),
+        }
+    }
+
     /// Runs mixer slot `slot` of track `track` through a hosted effect plugin (replacing whatever the slot had).
     pub fn set_effect(&mut self, track: usize, slot: usize, fx: crate::instrument::SharedEffect) {
+        let Some(track) = self.track_at(track) else { return };
         let Some(t) = self.tracks.get_mut(track) else { return };
         if slot >= 10 {
             return;
@@ -1759,6 +1860,7 @@ impl Engine {
     /// its first auxiliary one, each the number of a track's input counted from 1, or 0 for none (spec:
     /// audio/sidechain.md "Hosted plugins' input buses").
     pub fn set_effect_ports(&mut self, track: usize, slot: usize, main: usize, aux: usize) {
+        let Some(track) = self.track_at(track) else { return };
         let Some(fx) = self.tracks.get_mut(track).and_then(|t| t.effects.iter_mut().find(|e| e.slot == slot)) else { return };
         if let Fx::Hosted(_) = fx.fx {
             if fx.ports != [main, aux] {
@@ -1777,7 +1879,7 @@ impl Engine {
     /// Peak level per mixer track (L, R) since the last call, after each track's fader; resets them. `out` keeps the
     /// larger of its old and the new values.
     pub fn take_track_peaks(&mut self, out: &mut Vec<[f32; 2]>) {
-        out.resize(self.tracks.len(), [0.0; 2]);
+        out.resize(self.real_tracks, [0.0; 2]);
         for (o, t) in out.iter_mut().zip(&mut self.tracks) {
             o[0] = o[0].max(t.peak[0]);
             o[1] = o[1].max(t.peak[1]);
@@ -1870,7 +1972,8 @@ impl Engine {
     pub fn take_track_audio(&mut self) -> Vec<Vec<f32>> {
         let n = 2 * (self.pdc.handed - self.pdc.taken) as usize;
         self.pdc.taken = self.pdc.handed;
-        self.capture.as_mut().map(|c| c.iter_mut().map(|t| t.drain(..n.min(t.len())).collect()).collect()).unwrap_or_default()
+        let real = self.real_tracks;
+        self.capture.as_mut().map(|c| c.iter_mut().take(real).map(|t| t.drain(..n.min(t.len())).collect()).collect()).unwrap_or_default()
     }
 
     /// Renders ticks `from` to `to` only: playback starts at `from` (`seek_tick`) and the song ends at `to`.
@@ -2045,6 +2148,7 @@ impl Engine {
             key,
             slide: VoiceSlide::new(step, velocity, pan),
             via: None,
+            unit: 0,
         });
         self.sounding.push((channel, key, u64::MAX));
     }
@@ -2215,29 +2319,67 @@ impl Engine {
     /// started a second time over itself.
     fn follow_clips(&mut self, tick: u64) {
         let mut under = self.clips_under_way(tick);
-        let mut take = |channel: usize, cut: Option<u64>| match under.iter().position(|t| t.channel == channel && t.cut == cut) {
-            Some(i) => {
-                under.swap_remove(i);
-                true
-            }
-            None => false,
-        };
+        // A clip that plays on takes this engine's lanes; one that moved to another chain starts again there, as its
+        // voice's way out does not change while it sounds.
+        let mut take = |channel: usize, cut: Option<u64>, unit: u32| under.iter().position(|t| t.channel == channel && t.cut == cut && t.unit == unit).map(|i| under.swap_remove(i));
         let fade = ((f64::from(self.rate) * RELEASE_SECONDS) as u32).max(1);
         for v in &mut self.voices {
-            if v.cut.is_some() && v.live.is_none() && v.release.is_none() && !take(v.channel, v.cut) {
-                v.release = Some((fade, fade));
+            if v.cut.is_none() || v.live.is_some() || v.release.is_some() {
+                continue;
+            }
+            match take(v.channel, v.cut, v.unit) {
+                Some(t) => {
+                    let new = t.shape.filter(|s| s.lanes != 0);
+                    match (&mut v.shape, new) {
+                        (Some(s), _) => s.lanes = new.map_or(0, |n| n.lanes),
+                        (none, Some(n)) => *none = Some(ClipShape { since: n.since.saturating_sub(v.age), declick: 0, ..n }),
+                        _ => {}
+                    }
+                }
+                None => {
+                    v.release = Some((fade, fade));
+                    if let Some(s) = &mut v.shape {
+                        s.lanes = 0;
+                    }
+                }
             }
         }
         // An instrument's clip voice ends at its cut (`inst_offs`): one that no longer plays is choked now.
-        let events = &mut self.inst_events;
+        let (events, shapes) = (&mut self.inst_events, &mut self.inst_shapes);
         self.inst_offs.retain(|&(end, ch, key, voice)| {
             let Some(v) = voice else { return true };
-            take(ch, Some(end)) || {
-                events.push(notes::Event { voice: Some(v), ..notes::Event::choke(ch, 0, key) });
-                false
+            let unit = shapes.iter().find(|s| s.channel == ch && s.voice == v).map_or(0, |s| s.unit);
+            match take(ch, Some(end), unit) {
+                Some(t) => {
+                    let new = t.shape.filter(|s| s.lanes != 0);
+                    match (shapes.iter_mut().find(|s| s.channel == ch && s.voice == v), new) {
+                        (Some(s), _) => s.shape.lanes = new.map_or(0, |n| n.lanes),
+                        (None, Some(n)) => shapes.push(InstClip { channel: ch, voice: v, shape: ClipShape { declick: 0, ..n }, age: 0, sent: None, pan: None, bus: 0, unit: 0 }),
+                        _ => {}
+                    }
+                    true
+                }
+                None => {
+                    if let Some(s) = shapes.iter_mut().find(|s| s.channel == ch && s.voice == v) {
+                        s.shape.lanes = 0;
+                    }
+                    events.push(notes::Event { voice: Some(v), ..notes::Event::choke(ch, 0, key) });
+                    false
+                }
             }
         });
-        self.late.retain(|t| t.cut.is_none() || take(t.channel, t.cut));
+        self.late.retain_mut(|t| {
+            if t.cut.is_none() {
+                return true;
+            }
+            match take(t.channel, t.cut, t.unit) {
+                Some(n) => {
+                    t.shape = t.shape.map(|s| ClipShape { lanes: n.shape.map_or(0, |x| x.lanes), ..s }).or(n.shape);
+                    true
+                }
+                None => false,
+            }
+        });
         self.late.extend(under);
     }
 
@@ -2256,7 +2398,7 @@ impl Engine {
                 let since = at - frame(t.tick);
                 let from = t.from + since as f64 * t.rate * ch.base_rate;
                 let total = t.cut.map_or(u64::MAX, |c| frame(c) - frame(t.tick));
-                let plain = ClipShape { since: 0, total, fade_in: 0, fade_out: 0, tension_in: 0.0, tension_out: 0.0, gain: 1.0, declick: 0 };
+                let plain = ClipShape { since: 0, total, fade_in: 0, fade_out: 0, tension_in: 0.0, tension_out: 0.0, gain: 1.0, declick: 0, lanes: 0 };
                 let declick = (LATE_START_SECONDS * f64::from(self.rate)).round() as u64;
                 let shape = Some(ClipShape { since, declick, ..t.shape.unwrap_or(plain) });
                 (from < frames).then(|| Trigger { tick, from, start: (from / frames) as f32, shape, ..*t })
@@ -2460,8 +2602,18 @@ impl Engine {
         // The main volume glides from where it was.
         self.main_glide = old.main_glide;
         self.exporting = old.exporting;
-        if self.rate == old.rate && self.tracks.len() == old.tracks.len() {
-            for (new, o) in self.tracks.iter_mut().zip(&mut old.tracks) {
+        // The tracks that go on: the project's while the mixer is laid out as before, and each chain that is still here,
+        // wherever it now stands among them.
+        let same_mixer = self.real_tracks == old.real_tracks;
+        let going_on: Vec<(usize, usize)> = (0..self.tracks.len())
+            .filter_map(|t| match self.chains.iter().find(|c| c.track == t) {
+                Some(c) => old.chains.iter().find(|o| o.handle == c.handle).map(|o| (t, o.track)),
+                None => same_mixer.then_some((t, t)),
+            })
+            .collect();
+        if self.rate == old.rate {
+            for (t, was) in going_on {
+                let (new, o) = (&mut self.tracks[t], &mut old.tracks[was]);
                 new.gains = o.gains;
                 // The pads keep what they hold while the mixer is laid out as before.
                 new.pad = std::mem::take(&mut o.pad);
@@ -3149,6 +3301,7 @@ impl Engine {
                     self.next_voice = v.wrapping_add(1);
                     v
                 });
+                let bus = self.bus_for(t.channel, t.unit);
                 self.inst_events.push(notes::Event {
                     ch: t.channel,
                     off: 0,
@@ -3163,9 +3316,10 @@ impl Engine {
                     layer: t.via.map(|w| w.layer),
                     porta: t.porta,
                     voice,
+                    bus,
                 });
                 if let (Some(shape), Some(voice)) = (t.shape, voice) {
-                    self.inst_shapes.push(InstClip { channel: t.channel, voice, shape, age: 0, sent: None });
+                    self.inst_shapes.push(InstClip { channel: t.channel, voice, shape, age: 0, sent: None, pan: None, bus, unit: t.unit });
                 }
                 // An audio clip ends at its cut (spec: plugins/lemon-sampler.md Â§7); notes end with a note off.
                 match t.cut {
@@ -3200,7 +3354,25 @@ impl Engine {
             key: t.key,
             slide: VoiceSlide::new(t.rate, t.velocity, t.pan),
             via: t.via,
+            unit: t.unit,
         });
+    }
+
+    /// The instrument output a clip with chain `unit` plays on, on channel `c`: the one its unit already has, else a free
+    /// one. Without a chain, an instrument that has no buses, or more cuts sounding at once than it has buses: the main
+    /// output, and the clip's own plugins are not heard while that lasts.
+    fn bus_for(&self, c: usize, unit: u32) -> u8 {
+        let ch = &self.channels[c];
+        if unit == 0 || !ch.chains.iter().any(|x| x.0 == unit) {
+            return 0;
+        }
+        // An instrument that could not be asked yet: the bus is tried (a bus it does not have plays on its main output).
+        let buses = ch.buses.unwrap_or(MAX_BUSES).min(MAX_BUSES) as u8;
+        let mine = || self.inst_shapes.iter().filter(|s| s.channel == c && s.bus != 0);
+        if let Some(s) = mine().find(|s| s.unit == unit) {
+            return s.bus;
+        }
+        (1..=buses).find(|&b| !mine().any(|s| s.bus == b)).unwrap_or(0)
     }
 
     /// A note on a layer channel (spec: audio/note-rules.md "Layer channels"). It makes no voice of its own: its cut
@@ -3322,6 +3494,17 @@ impl Engine {
             active |= o.active;
             for (x, s) in self.bus[self.channels[c].insert].iter_mut().zip(&o.buf) {
                 *x += *s;
+            }
+            // Its voice buses join their clips' chains.
+            let mut used = o.bus_used;
+            while used != 0 {
+                let k = used.trailing_zeros() as usize;
+                used &= used - 1;
+                let unit = self.inst_shapes.iter().rev().find(|s| s.channel == c && usize::from(s.bus) == k).map_or(0, |s| s.unit);
+                let track = self.channels[c].voice_track(unit);
+                for (x, s) in self.bus[track].iter_mut().zip(&o.buses[k]) {
+                    *x += *s;
+                }
             }
         }
         // The missed notes and controller messages of the instruments that ran have been sent.
@@ -3572,6 +3755,9 @@ impl Engine {
 /// Resampling window half-width in source samples.
 const SINC_W: f64 = 13.5;
 
+/// Voice buses an instrument can have: what the plugin host hands out (16 ports, the main one first).
+const MAX_BUSES: usize = 15;
+
 /// Adds one voice into its channel's insert bus for block frames `offset..end`.
 /// Returns false when the voice has finished.
 ///
@@ -3594,7 +3780,7 @@ fn keyed_copy(ch: &mut ChannelState, library: &mut SampleLibrary, key: u16) -> O
 }
 
 fn render_voice(v: &mut Voice, channels: &[ChannelState], bus: &mut [Vec<f32>], span: usize, offset: usize, end: usize, w: f64) -> bool {
-    render_voice_into(v, channels, &mut bus[channels[v.channel].insert], span, offset, end, w)
+    render_voice_into(v, channels, &mut bus[channels[v.channel].voice_track(v.unit)], span, offset, end, w)
 }
 
 /// `render_voice` into `out`, its track's input (or a buffer of its own, added into it later).
@@ -3632,7 +3818,8 @@ fn render_voice_into(v: &mut Voice, channels: &[ChannelState], out: &mut [f32], 
             return false;
         }
         let t_s = v.age as f64 * ch.frame_s;
-        let shape = v.shape.map_or(1.0, |s| s.at(v.age));
+        let shape = v.shape.map_or(1.0, |s| s.gain_on(ch, v.age));
+        let (lane_l, lane_r) = v.shape.and_then(|s| s.pan_on(ch, v.age)).map_or((1.0, 1.0), clip_fx::pan_gains);
         v.age += 1;
         let env_gain = match &ch.vol_env {
             None => 1.0,
@@ -3698,8 +3885,8 @@ fn render_voice_into(v: &mut Voice, channels: &[ChannelState], out: &mut [f32], 
                 (gl, gr) = v.dest;
             }
         }
-        out[f * 2] += l * gl * fade * env_gain * shape;
-        out[f * 2 + 1] += r * gr * fade * env_gain * shape;
+        out[f * 2] += l * gl * fade * env_gain * shape * lane_l;
+        out[f * 2 + 1] += r * gr * fade * env_gain * shape * lane_r;
         pos += step;
     }
     v.pos = pos;
@@ -4009,15 +4196,26 @@ fn instrument_job(cx: &InstCx, lane: InstLane, sc: &mut multicore::MixScratch) {
         let step = crate::instrument::VOICE_GAIN_FRAMES;
         for s in shapes() {
             if s.sent.is_none() {
-                let g = s.shape.at(s.age);
+                let g = s.shape.gain_on(ch, s.age);
                 inst.voice_gain(0, s.voice, g);
                 s.sent = Some(g);
             }
+            if s.pan.is_none() {
+                if let Some(p) = s.shape.pan_on(ch, s.age) {
+                    inst.voice_pan(0, s.voice, p);
+                    s.pan = Some(p);
+                }
+            }
             for off in (0..n as u32).step_by(step as usize) {
-                let g = s.shape.at(s.age + u64::from(off + step));
+                let g = s.shape.gain_on(ch, s.age + u64::from(off + step));
                 if s.sent != Some(g) {
                     inst.voice_gain(off, s.voice, g);
                     s.sent = Some(g);
+                }
+                let p = s.shape.pan_on(ch, s.age + u64::from(off + step));
+                if p.is_some() && s.pan != p {
+                    inst.voice_pan(off, s.voice, p.unwrap_or(0.0));
+                    s.pan = p;
                 }
             }
         }
@@ -4032,7 +4230,7 @@ fn instrument_job(cx: &InstCx, lane: InstLane, sc: &mut multicore::MixScratch) {
         for f in 0..n {
             let ended = |s: &InstClip| s.shape.since + s.age + f as u64 >= s.shape.total;
             let playing = shapes().any(|s| !ended(&*s));
-            let g: f32 = shapes().filter(|s| !(playing && ended(&**s))).map(|s| s.shape.at(s.age + f as u64)).product();
+            let g: f32 = shapes().filter(|s| !(playing && ended(&**s))).map(|s| s.shape.gain_on(ch, s.age + f as u64)).product();
             l[f] *= g;
             r[f] *= g;
         }
@@ -4043,6 +4241,28 @@ fn instrument_job(cx: &InstCx, lane: InstLane, sc: &mut multicore::MixScratch) {
     let cl = ch.clip_level;
     let (gl, gr) = if own_levels { (cl, cl) } else { ch.gain_via(f64::from(cl), 0.0, layer) };
     out.buf.extend(l.iter().zip(r.iter()).flat_map(|(&a, &b)| [a * gl, b * gr]));
+    // The voice buses in use, at the same levels: `Engine::instruments_out` hands them to their chains.
+    out.bus_used = 0;
+    if !ch.chains.is_empty() && inst.voice_buses() > 0 {
+        if sc.bus_l.len() < n {
+            sc.bus_l.resize(n, 0.0);
+            sc.bus_r.resize(n, 0.0);
+        }
+        for s in shapes() {
+            let k = usize::from(s.bus);
+            if k == 0 || out.bus_used >> k & 1 == 1 {
+                continue;
+            }
+            if inst.take_bus(k, &mut sc.bus_l[..n], &mut sc.bus_r[..n]) {
+                if out.buses.len() <= k {
+                    out.buses.resize_with(k + 1, Vec::new);
+                }
+                out.buses[k].clear();
+                out.buses[k].extend(sc.bus_l[..n].iter().zip(&sc.bus_r[..n]).flat_map(|(&a, &b)| [a * gl, b * gr]));
+                out.bus_used |= 1 << k;
+            }
+        }
+    }
     // Delay compensation: the channel waits for the latest path into its track.
     if let Some(pad) = pad.filter(|p| p.len() > 0) {
         pad.run(&mut out.buf);
@@ -4216,12 +4436,12 @@ fn send_note(inst: &mut dyn Instrument, off: u32, note: notes::Note, fines: &mut
         notes::Note::Choke(key, None) => inst.choke(off, fines.sent(key)),
         notes::Note::Choke(key, Some(voice)) => inst.voice_choke(off, fines.sent(key), voice),
         notes::Note::Off(key) => inst.note_off(off, fines.sent(key)),
-        notes::Note::On { key, vel, start, fine, levels, voice } => {
+        notes::Note::On { key, vel, start, fine, levels, voice, bus } => {
             // An instrument that ignores a tuning plays the note's pitch to the nearest semitone on a moved key.
             let sent = if fines.moves { (i32::from(key) + (fines.shift + fine).round() as i32).clamp(0, 127) as u8 } else { key };
             // The note's own pan and mod X / Y go with it (spec: audio/voice-levels.md "The note's own levels").
             match voice {
-                Some(v) => inst.voice_start(off, sent, vel, start, levels, v),
+                Some(v) => inst.voice_start_on(off, sent, vel, start, levels, v, bus),
                 None => inst.note_start(off, sent, vel, start, levels),
             }
             let k = key & 127;
@@ -4307,6 +4527,10 @@ struct Sched {
     slide: bool,
     /// The note's own portamento switch.
     porta: bool,
+    /// An audio clip: its place in the arrangement, and what its voice takes from its units (`clip_fx::voice_of`).
+    source: Option<usize>,
+    unit: u32,
+    lanes: u32,
 }
 
 impl Sched {
@@ -4326,6 +4550,9 @@ impl Sched {
             clip: None,
             slide: n.slide(),
             porta: n.porta(),
+            source: None,
+            unit: 0,
+            lanes: 0,
         }
     }
 }
@@ -4596,7 +4823,7 @@ fn schedule(project: &Project, mode: PlayMode, report: &mut EngineReport) -> (Ve
             }
             // spec: audio/audio-clips.md "Automatic crossfades"
             let fades = os_model::crossfade::playing(project, clips, project.tempo.unwrap_or(140.0));
-            for (c, &fx) in clips.iter().zip(&fades) {
+            for (at, (c, &fx)) in clips.iter().zip(&fades).enumerate() {
                 let start = u64::from(c.position);
                 let len = u64::from(c.length);
                 if !c.muted {
@@ -4613,7 +4840,7 @@ fn schedule(project: &Project, mode: PlayMode, report: &mut EngineReport) -> (Ve
                         // An audio clip plays its channel's sample from the window start (milliseconds), cut at the clip end.
                         Some(ChannelKind::AudioClip | ChannelKind::Sampler) => {
                             let from_s = c.window.map_or(0.0, |w| w.0.max(0.0) / 1000.0);
-                            out.push(Sched { tick: start, channel: usize::from(ch), key: 60, fine: 120, velocity: 100, pan: 64, mod_x: 128, mod_y: 128, cut: Some(start + len), len, from_s, clip: ClipFx::of(c, fx), slide: false, porta: false });
+                            out.push(Sched { tick: start, channel: usize::from(ch), key: 60, fine: 120, velocity: 100, pan: 64, mod_x: 128, mod_y: 128, cut: Some(start + len), len, from_s, clip: ClipFx::of(c, fx), slide: false, porta: false, source: Some(at), unit: 0, lanes: 0 });
                         }
                         Some(ChannelKind::Automation) => {}
                         _ => report.automation_clips_ignored += 1,
@@ -4646,7 +4873,7 @@ mod tests {
             pitch_cents: 0,
             mixer_track: 0,
             sample_path: None, // plays the built-in tone
-            layer_children: vec![],
+            layer_children: vec![], whole_fx: 0,
             envelopes: Default::default(), rack: Default::default(), misc: Default::default(), sound: Default::default(),
         }
     }

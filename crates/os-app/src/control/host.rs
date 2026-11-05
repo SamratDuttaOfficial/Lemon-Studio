@@ -23,8 +23,7 @@ impl App {
         let p = &self.state.project;
         let rows: HashMap<u32, usize> = p.channels.iter().enumerate().map(|(r, c)| (c.id.0, r)).collect();
         let slots: HashMap<u32, (u16, u8)> = p
-            .mixer
-            .iter()
+            .slot_tracks()
             .flat_map(|m| m.slots.iter().enumerate().filter_map(move |(k, s)| s.as_ref().map(|s| (s.id.0, (m.index, k as u8)))))
             .collect();
 
@@ -72,7 +71,7 @@ impl App {
         // Instances without an owner (just hosted) take the id of what is under their key.
         let p = &self.state.project;
         let row_id = |r: usize| p.channels.get(r).map(|c| c.id);
-        let slot_id = |t: u16, k: u8| p.mixer.iter().find(|m| m.index == t).and_then(|m| m.slots.get(usize::from(k))?.as_ref()).map(|s| s.id);
+        let slot_id = |t: u16, k: u8| p.slot_track(t).and_then(|m| m.slots.get(usize::from(k))?.as_ref()).map(|s| s.id);
         for (&key, h) in self.plugins.hosted.iter_mut() {
             if h.owner.is_none() {
                 h.owner = match fx_of(key) {

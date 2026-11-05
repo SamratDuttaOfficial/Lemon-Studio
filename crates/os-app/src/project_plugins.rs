@@ -121,7 +121,7 @@ pub fn store_hosted(proj: &mut Project, plugins: &Plugins) {
                 ch.plugin = Some(WRAPPER.into());
             }
             Some((t, k)) => {
-                let Some(slot) = proj.mixer.iter_mut().find(|m| m.index == t).and_then(|m| m.slots[usize::from(k)].as_mut()) else { continue };
+                let Some(slot) = proj.slot_track_mut(t).and_then(|m| m.slots[usize::from(k)].as_mut()) else { continue };
                 let base = (slot.name == WRAPPER).then_some(slot.state.as_slice());
                 slot.state = wrapper::encode(base, &r);
                 slot.name = WRAPPER.into();
@@ -134,7 +134,7 @@ pub fn store_hosted(proj: &mut Project, plugins: &Plugins) {
 /// (`plugins::FL_RECREATIONS`): the slot stays that effect, with the state `App::store_builtin_states` gave it.
 fn plays_fl_slot(proj: &Project, key: usize, d: &Descriptor) -> bool {
     let Some((t, k)) = fx_of(key) else { return false };
-    let slot = proj.mixer.iter().find(|m| m.index == t).and_then(|m| m.slots[usize::from(k)].as_ref());
+    let slot = proj.slot_track(t).and_then(|m| m.slots[usize::from(k)].as_ref());
     is_builtin(d) && slot.and_then(|s| crate::plugins::recreation_of(&s.name)) == Some(d.name.as_str())
 }
 
@@ -149,7 +149,7 @@ fn untouched_stand_in(proj: &Project, plugins: &Plugins, key: usize, d: &Descrip
     }
     let named = match fx_of(key) {
         None => proj.channels.get(key).and_then(wrapped_channel),
-        Some((t, k)) => proj.mixer.iter().find(|m| m.index == t).and_then(|m| m.slots[usize::from(k)].as_ref()).and_then(wrapped_slot),
+        Some((t, k)) => proj.slot_track(t).and_then(|m| m.slots[usize::from(k)].as_ref()).and_then(wrapped_slot),
     };
     named.is_some_and(|r| switched_format(d, &r).is_some())
 }
@@ -158,7 +158,7 @@ fn untouched_stand_in(proj: &Project, plugins: &Plugins, key: usize, d: &Descrip
 fn id_of_key(project: &Project, key: usize) -> Option<String> {
     match fx_of(key) {
         None => project.channels.get(key).filter(|c| c.kind == ChannelKind::Plugin).and_then(|c| c.plugin.clone()),
-        Some((t, k)) => project.mixer.iter().find(|m| m.index == t)?.slots[usize::from(k)].as_ref().map(|s| s.name.clone()),
+        Some((t, k)) => project.slot_track(t)?.slots[usize::from(k)].as_ref().map(|s| s.name.clone()),
     }
 }
 
@@ -171,7 +171,7 @@ fn store_native(proj: &mut Project, key: usize, state: Vec<u8>) {
             }
         }
         Some((t, k)) => {
-            if let Some(slot) = proj.mixer.iter_mut().find(|m| m.index == t).and_then(|m| m.slots[usize::from(k)].as_mut()) {
+            if let Some(slot) = proj.slot_track_mut(t).and_then(|m| m.slots[usize::from(k)].as_mut()) {
                 slot.state = state;
             }
         }
@@ -186,6 +186,9 @@ pub fn adopt_saved(model: &mut Project, saved: &Project) {
     }
     for (m, s) in model.mixer.iter_mut().zip(&saved.mixer) {
         m.slots.clone_from(&s.slots);
+    }
+    for (u, s) in model.fx_units.iter_mut().zip(&saved.fx_units) {
+        u.track.slots.clone_from(&s.track.slots);
     }
 }
 
@@ -207,7 +210,7 @@ pub fn wrapped_slot(s: &SlotPlugin) -> Option<PluginRef> {
 /// slot (played by Lemon Vocoder) feeds its sidechain bus the input its carrier selector names, or else its modulator
 /// selector's (spec: plugins/lemon-vocoder.md §1).
 pub fn slot_ports(project: &Project, track: usize, slot: usize) -> (usize, usize) {
-    let Some(s) = project.mixer.iter().find(|m| usize::from(m.index) == track).and_then(|m| m.slots.get(slot)?.as_ref()) else {
+    let Some(s) = u16::try_from(track).ok().and_then(|t| project.slot_track(t)).and_then(|m| m.slots.get(slot)?.as_ref()) else {
         return (0, 0);
     };
     if s.name.eq_ignore_ascii_case(crate::plugins::VOCODEX_FILE_NAME) {
@@ -228,7 +231,7 @@ pub fn slot_ports(project: &Project, track: usize, slot: usize) -> (usize, usize
 /// input buses").
 pub fn set_slot_sidechain(proj: &mut Project, plugins: &Plugins, track: u16, slot: u8, port: usize) -> bool {
     let key = crate::plugins::fx_key(track, slot);
-    let Some(s) = proj.mixer.iter_mut().find(|m| m.index == track).and_then(|m| m.slots.get_mut(usize::from(slot))?.as_mut()) else {
+    let Some(s) = proj.slot_track_mut(track).and_then(|m| m.slots.get_mut(usize::from(slot))?.as_mut()) else {
         return false;
     };
     if s.name != WRAPPER {
@@ -360,8 +363,7 @@ impl crate::app::App {
         let slots: Vec<(u16, u8, PluginRef)> = self
             .state
             .project
-            .mixer
-            .iter()
+            .slot_tracks()
             .flat_map(|m| m.slots.iter().enumerate().filter_map(move |(k, s)| Some((m.index, k as u8, wrapped_slot(s.as_ref()?)?))))
             .filter(|&(t, k, _)| !self.plugins.hosted.contains_key(&fx_key(t, k)) && !self.wrap_failed.contains(&fx_key(t, k)))
             .collect();

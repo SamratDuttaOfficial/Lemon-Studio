@@ -766,13 +766,20 @@ fn clip_len(events: &[Event], version: Option<usize>) -> usize {
 
 /// Reads the typed project from a parsed file.
 pub fn load(file: &FlpFile) -> Result<Project, ProjectError> {
+    let mut p = load_events(file)?;
+    crate::clip_fx::read(file, &mut p);
+    Ok(p)
+}
+
+/// The project a file's events hold.
+fn load_events(file: &FlpFile) -> Result<Project, ProjectError> {
     let events = events_of(file)?;
     // A file of an older generation is read as its conversion to the current layout (spec: flp/layouts.md); [`apply`]
     // needs the converted file itself ([`upgrade`]).
     if is_legacy(events) {
         let mut current = file.clone();
         upgrade(&mut current)?;
-        return load(&current);
+        return load_events(&current);
     }
     let header = file.header().ok_or(ProjectError::NoHeader)?;
     let mut l = scan(events)?;
@@ -938,6 +945,7 @@ fn load_channel(events: &[Event], loc: &ChannelLoc, enc: TextEnc) -> Channel {
         pitch_cents: i32_at(8).unwrap_or(0),
         mixer_track: loc.target.map_or(0, |i| int(&events[i]) as u16),
         sample_path: find(id::SAMPLE_PATH).and_then(Event::data).map(|d| decode_text(d, enc)),
+        whole_fx: 0,
         layer_children: block
             .iter()
             .filter(|e| e.id == id::CH_LAYER_CHILD)
@@ -1511,6 +1519,7 @@ fn decode_clip(r: &[u8]) -> Clip {
         muted: r[19] & CLIP_MUTED != 0,
         window,
         raw,
+        fx: 0,
     }
 }
 
@@ -2476,13 +2485,33 @@ fn write_sampler(
 /// removing objects isn't supported yet. A file of an older generation is first converted to the current layout
 /// ([`upgrade`]), which is the layout it is saved in.
 pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> {
+    // The events hold nothing of the clip and whole-audio units: they are written as if there were none, so a project
+    // using them saves the very events it would without (`clip_fx`).
+    let uses_units = !project.fx_units.is_empty()
+        || project.channels.iter().any(|c| c.whole_fx != 0)
+        || project.arrangements.iter().any(|a| a.clips.iter().any(|c| c.fx != 0));
+    if uses_units {
+        let mut plain = project.clone();
+        plain.fx_units.clear();
+        plain.channels.iter_mut().for_each(|c| c.whole_fx = 0);
+        plain.arrangements.iter_mut().flat_map(|a| a.clips.iter_mut()).for_each(|c| c.fx = 0);
+        apply_events(&plain, file)?;
+    } else {
+        apply_events(project, file)?;
+    }
+    crate::clip_fx::write(project, file);
+    Ok(())
+}
+
+/// [`apply`] for the file's events.
+fn apply_events(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> {
     upgrade(file)?;
     restructure(project, file)?;
     // The file's effect slots as they are before inserts are added or removed: a renumbered track takes its own.
     let (file_slots, file_tracks) = file_slot_runs(file)?;
     grow_mixer(project, file)?;
     shrink_mixer(project, file)?;
-    let current = load(file)?;
+    let current = load_events(file)?;
     let events = events_of_mut(file)?;
     let l = scan(events)?;
     let enc = text_enc(events, l.version);
@@ -4157,7 +4186,7 @@ pub fn default_arrangement() -> Arrangement {
 /// What `apply` cannot store in `file` yet: the mixer and playlist of a project made by [`create`] (their file
 /// has none). Empty when nothing would be lost.
 pub fn unsaved_parts(project: &Project, file: &FlpFile) -> Vec<&'static str> {
-    let Ok(current) = load(file) else { return Vec::new() };
+    let Ok(current) = load_events(file) else { return Vec::new() };
     let mut parts = Vec::new();
     if current.mixer.is_empty() && !mixer_is_default(&project.mixer) {
         parts.push("mixer settings");
@@ -4215,7 +4244,7 @@ mod tests {
             pitch_cents: 0,
             mixer_track: track,
             sample_path: None,
-            layer_children: vec![],
+            layer_children: vec![], whole_fx: 0,
             envelopes: Default::default(), rack: Default::default(), misc: Default::default(), sound: Default::default(),
         }
     }

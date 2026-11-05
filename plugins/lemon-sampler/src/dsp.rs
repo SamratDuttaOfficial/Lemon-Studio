@@ -291,6 +291,8 @@ struct Voice {
     /// Where it reads a sample kept on disk, and frames left of its fade back in after its frames came late.
     feed: Feed,
     gap: u32,
+    /// The output it plays on: 0 the main output, `k` the plugin's extra output `k` (a cut with plugins of its own).
+    bus: u8,
 }
 
 /// The gain the host gives a voice (`Engine::volume`): where it stands, where it glides to, the step per frame and the
@@ -480,6 +482,8 @@ impl Rt {
 }
 
 pub struct Engine {
+    /// The extra outputs voices can play on (`note_on_bus`).
+    pub buses: u8,
     pub sample: Option<Arc<Sample>>,
     /// **(Lemon Studio)** The played sample kept on disk (Keep on disk), played in place of `sample` (`set_disk`).
     disk: Option<Arc<Played>>,
@@ -523,6 +527,7 @@ impl Engine {
             quality: Quality::Table,
             rate,
             voices: Vec::with_capacity(voices),
+            buses: 0,
             global_phase: [0.0; 5],
             streams: Vec::new(),
             ended: Vec::with_capacity(voices * 2),
@@ -667,7 +672,22 @@ impl Engine {
         self.start(key, velocity, id, true, b);
     }
 
-    fn start(&mut self, key: u8, velocity: f32, id: Option<i32>, host: bool, b: &Block) {
+    /// `note_on_id` on output `bus`; a bus the plugin does not have plays on the main output.
+    pub fn note_on_bus(&mut self, key: u8, velocity: f32, id: Option<i32>, bus: u8, b: &Block) {
+        if self.start(key, velocity, id, true, b) {
+            if let Some(v) = self.voices.last_mut() {
+                v.bus = if bus <= self.buses { bus } else { 0 };
+            }
+        }
+    }
+
+    /// Some voice plays on output `bus`.
+    pub fn bus_in_use(&self, bus: u8) -> bool {
+        self.voices.iter().any(|v| v.bus == bus)
+    }
+
+    /// Whether a voice started: it is the last one.
+    fn start(&mut self, key: u8, velocity: f32, id: Option<i32>, host: bool, b: &Block) -> bool {
         let zkey = if b.add_key { i32::from(key) - (b.root - 60) } else { i32::from(key) };
         let (frames, rate) = match self.shape() {
             Some((n, rate)) if zkey >= b.zone.0 && zkey <= b.zone.1 && n > 0 => (n, rate),
@@ -675,7 +695,7 @@ impl Engine {
                 if host {
                     self.ended.push((key, id));
                 }
-                return;
+                return false;
             }
         };
         // A new note leaves the channel's other voices alone, the same key's too (spec: audio/sampler.md "A voice");
@@ -727,7 +747,9 @@ impl Engine {
             vol: None,
             feed,
             gap: 0,
+            bus: 0,
         });
+        true
     }
 
     pub fn note_off(&mut self, key: u8, b: &Block) {
@@ -831,10 +853,22 @@ impl Engine {
 
     /// Adds the voices into `out_l` / `out_r`.
     pub fn render(&mut self, out_l: &mut [f32], out_r: &mut [f32], b: &Block) {
+        self.render_voices(None, out_l, out_r, b);
+    }
+
+    /// Adds the voices of output `bus` into `out_l` / `out_r`. A block's span is rendered once per bus, the main output
+    /// (0) first: only that moves the LFOs' shared phases on.
+    pub fn render_bus(&mut self, bus: u8, out_l: &mut [f32], out_r: &mut [f32], b: &Block) {
+        self.render_voices(Some(bus), out_l, out_r, b);
+    }
+
+    fn render_voices(&mut self, bus: Option<u8>, out_l: &mut [f32], out_r: &mut [f32], b: &Block) {
         let len = out_l.len();
         let rate = f64::from(self.rate);
-        for (i, t) in b.targets.iter().enumerate() {
-            self.global_phase[i] = (self.global_phase[i] + t.lfo.hz * len as f64 / rate).fract();
+        if bus.is_none_or(|k| k == 0) {
+            for (i, t) in b.targets.iter().enumerate() {
+                self.global_phase[i] = (self.global_phase[i] + t.lfo.hz * len as f64 / rate).fract();
+            }
         }
         let s = match (&self.disk, &self.sample) {
             (Some(d), _) => Src::Disk(d.clone()),
@@ -858,6 +892,10 @@ impl Engine {
         let mut i = 0;
         while i < self.voices.len() {
             let v = &mut self.voices[i];
+            if bus.is_some_and(|k| k != v.bus) {
+                i += 1;
+                continue;
+            }
             let rt = match s {
                 Src::Ram(_) => v.rt.and_then(|k| self.streams.get_mut(usize::from(k))),
                 Src::Disk(_) => None,
@@ -1489,6 +1527,88 @@ mod tests {
 
     // spec §5.6 + audio/time-stretch.md "Lemon Studio" (OS): a voice whose pitch moves while it plays starts its
     // stretcher then, without a click, and keeps its length.
+    /// A half-scale sine engine for the bus tests, room for `buses` outputs.
+    fn bus_engine(buses: u8) -> (Engine, Block) {
+        let mut e = Engine::new(48000.0);
+        let x: Vec<f32> = (0..48000).map(|i| (2.0 * std::f64::consts::PI * 1000.0 * f64::from(i) / 48000.0).sin() as f32 * 0.5).collect();
+        e.sample = Some(Arc::new(Sample { rate: 48000, left: x.clone(), right: x }));
+        e.buses = buses;
+        (e, Block::default())
+    }
+
+    fn rms_of(x: &[f32]) -> f32 {
+        (x.iter().map(|v| v * v).sum::<f32>() / x.len() as f32).sqrt()
+    }
+
+    // A cut with plugins of its own: its voice plays on its bus alone, the main output's voices on the main output, and
+    // together they are what one output would hold.
+    #[test]
+    fn a_voice_plays_on_its_bus_alone() {
+        let (mut e, b) = bus_engine(3);
+        e.note_on_bus(60, 100.0 / 128.0, Some(1), 0, &b);
+        e.note_on_bus(60, 100.0 / 128.0, Some(2), 2, &b);
+        assert!(e.bus_in_use(0) && e.bus_in_use(2) && !e.bus_in_use(1));
+        let n = 4800;
+        let (mut l0, mut r0, mut l1, mut r1, mut l2, mut r2) = (vec![0.0; n], vec![0.0; n], vec![0.0; n], vec![0.0; n], vec![0.0; n], vec![0.0; n]);
+        e.render_bus(0, &mut l0, &mut r0, &b);
+        e.render_bus(1, &mut l1, &mut r1, &b);
+        e.render_bus(2, &mut l2, &mut r2, &b);
+        assert!(rms_of(&l0) > 0.2 && rms_of(&r0) > 0.2);
+        assert!(rms_of(&l2) > 0.2 && rms_of(&r2) > 0.2);
+        assert_eq!(rms_of(&l1), 0.0, "nothing on a bus no voice plays on");
+        // The same voices on one output sum to the same thing.
+        let (mut one, b1) = bus_engine(3);
+        one.note_on_bus(60, 100.0 / 128.0, Some(1), 0, &b1);
+        one.note_on_bus(60, 100.0 / 128.0, Some(2), 0, &b1);
+        let (mut l, mut r) = (vec![0.0; n], vec![0.0; n]);
+        one.render(&mut l, &mut r, &b1);
+        for f in 0..n {
+            assert!((l[f] - (l0[f] + l2[f])).abs() < 1e-5, "frame {f}");
+            assert!((r[f] - (r0[f] + r2[f])).abs() < 1e-5, "frame {f}");
+        }
+    }
+
+    // A later render call continues each voice where it was, whatever else was rendered between.
+    #[test]
+    fn a_bus_voice_keeps_its_place_across_spans() {
+        let (mut e, b) = bus_engine(1);
+        e.note_on_bus(60, 100.0 / 128.0, Some(1), 1, &b);
+        let (mut whole_l, mut whole_r) = (vec![0.0; 1000], vec![0.0; 1000]);
+        let (mut ref_e, rb) = bus_engine(1);
+        ref_e.note_on_bus(60, 100.0 / 128.0, Some(1), 1, &rb);
+        ref_e.render_bus(1, &mut whole_l, &mut whole_r, &rb);
+        let (mut l, mut r) = (vec![0.0; 1000], vec![0.0; 1000]);
+        let (mut scratch_l, mut scratch_r) = (vec![0.0; 1000], vec![0.0; 1000]);
+        for (a, z) in [(0, 300), (300, 301), (301, 1000)] {
+            e.render_bus(0, &mut scratch_l[a..z], &mut scratch_r[a..z], &b);
+            e.render_bus(1, &mut l[a..z], &mut r[a..z], &b);
+        }
+        assert_eq!(rms_of(&scratch_l), 0.0, "it never reached the main output");
+        assert_eq!(l, whole_l);
+        assert_eq!(r, whole_r);
+    }
+
+    // A bus the plugin does not have plays on the main output: nothing is lost (the stereo plugin other hosts load).
+    #[test]
+    fn a_bus_the_plugin_does_not_have_plays_on_the_main_output() {
+        let (mut e, b) = bus_engine(0);
+        e.note_on_bus(60, 100.0 / 128.0, Some(1), 5, &b);
+        assert!(e.bus_in_use(0) && !e.bus_in_use(5));
+        let (mut l, mut r) = (vec![0.0; 2400], vec![0.0; 2400]);
+        e.render_bus(0, &mut l, &mut r, &b);
+        assert!(rms_of(&l) > 0.2);
+    }
+
+    // A note outside the zone starts no voice: the voice before it keeps its bus.
+    #[test]
+    fn a_note_that_starts_nothing_leaves_other_voices_on_their_bus() {
+        let (mut e, b) = bus_engine(2);
+        e.note_on_bus(60, 100.0 / 128.0, Some(1), 1, &b);
+        let shut = Block { zone: (200, 200), ..Block::default() };
+        e.note_on_bus(60, 100.0 / 128.0, Some(2), 2, &shut);
+        assert!(e.bus_in_use(1) && !e.bus_in_use(2));
+    }
+
     #[test]
     fn a_realtime_voice_starts_stretching_when_its_pitch_moves() {
         let mut e = Engine::new(48000.0);

@@ -87,6 +87,18 @@ impl<P: Plugin> Instrument for Guarded<P> {
     fn voice_start(&mut self, offset: u32, key: u8, velocity: f32, start: f32, levels: os_engine::NoteLevels, voice: u32) {
         self.run((), |p| p.voice_start(offset, key, velocity, start, levels, voice))
     }
+    fn voice_start_on(&mut self, offset: u32, key: u8, velocity: f32, start: f32, levels: os_engine::NoteLevels, voice: u32, bus: u8) {
+        self.run((), |p| p.voice_start_on(offset, key, velocity, start, levels, voice, bus));
+    }
+    fn voice_buses(&self) -> usize {
+        self.look(0, |p| p.voice_buses())
+    }
+    fn take_bus(&mut self, bus: usize, left: &mut [f32], right: &mut [f32]) -> bool {
+        self.run(false, |p| p.take_bus(bus, left, right))
+    }
+    fn voice_pan(&mut self, offset: u32, voice: u32, pan: f32) {
+        self.run((), |p| p.voice_pan(offset, voice, pan));
+    }
     fn voice_gains(&self) -> bool {
         self.look(false, |p| p.voice_gains())
     }
@@ -245,6 +257,9 @@ impl<P: Plugin> Plugin for Guarded<P> {
     }
     fn use_voice_gains(&mut self) -> bool {
         self.run(false, |p| p.use_voice_gains())
+    }
+    fn use_voice_buses(&mut self) -> bool {
+        self.run(false, |p| p.use_voice_buses())
     }
     fn set_offline(&mut self, offline: bool) {
         self.run((), |p| p.set_offline(offline))

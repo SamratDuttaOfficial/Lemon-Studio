@@ -9,6 +9,7 @@
 //! Units are the project's own: positions and lengths in ticks (see [`Project::ppq`]),
 //! levels as normalized `f64`s. File encodings live in `os-flp`, not here.
 
+pub mod clip_fx;
 pub mod clip_lfo;
 pub mod crossfade;
 pub mod curve;
@@ -118,6 +119,9 @@ pub struct Project {
     /// The project's initial values, in file order (event 216; spec: ui/settings-choices.md "Advanced: Initialize
     /// controls automatically"): controls that take a value when the song starts.
     pub init_controls: Vec<InitControl>,
+    /// The plugins and automation of audio clips and of whole samples ([`clip_fx`]). A unit stays here when nothing points
+    /// at it any more, so an undo can bring its clip back; saving leaves those out.
+    pub fx_units: Vec<clip_fx::FxUnit>,
     /// Internal controller links, in file order (event 227 with 0x8000 and up in its first field; spec:
     /// flp/events/automation.md "Controller links"): a controller plugin's output driving a target.
     pub controller_links: Vec<ControllerLink>,
@@ -681,6 +685,8 @@ pub struct Channel {
     pub sample_path: Option<String>,
     /// Child channel references of a [`ChannelKind::Layer`].
     pub layer_children: Vec<u16>,
+    /// The unit ([`clip_fx`]) holding the plugins and automation of the channel's whole sample; 0 = none.
+    pub whole_fx: u32,
     /// The five envelope records (event 218), indexed by [`Envelope::VOLUME`] and friends.
     pub envelopes: [Envelope; 5],
     /// Channel rack state saved with the channel.
@@ -1635,6 +1641,8 @@ pub struct Clip {
     pub window: Option<(f64, f64)>,
     /// The stored record (fields not modeled are written back from here; a new clip gets FL's defaults).
     pub raw: [u8; CLIP_RECORD_LEN],
+    /// The unit ([`clip_fx`]) holding this cut's own plugins and automation; 0 = none.
+    pub fx: u32,
 }
 
 impl Clip {
@@ -1664,7 +1672,7 @@ impl Clip {
     };
 
     pub fn new(position: u32, length: u32, track: u16, source: ClipSource) -> Clip {
-        Clip { id: Id::NONE, position, length, track, source, muted: false, window: None, raw: Clip::TEMPLATE }
+        Clip { id: Id::NONE, position, length, track, source, muted: false, window: None, raw: Clip::TEMPLATE, fx: 0 }
     }
 
     pub fn end(&self) -> u32 {

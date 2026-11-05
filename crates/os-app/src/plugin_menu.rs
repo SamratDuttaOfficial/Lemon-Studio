@@ -24,6 +24,8 @@ pub enum PlugCmd {
     Replace { index: usize, row: usize },
     /// Effect `index` (into `Plugins::effects`) into the selected mixer track: slot `slot`, else its first empty slot.
     Effect { index: usize, slot: Option<u8> },
+    /// Effect `index` into a slot of a cut's or whole audio's chain.
+    ClipEffect { scope: crate::clip_fx::Scope, slot: u8, index: usize },
     /// Find new plugins (a background scan).
     Find,
     /// Settings > Plugins.
@@ -42,11 +44,14 @@ pub enum Target {
     Replace(usize),
     /// Effects into the selected track: slot `k`, else its first empty slot.
     Fx(Option<u8>),
+    /// Effects into a slot of a cut's or whole audio's chain.
+    ClipFx(crate::clip_fx::Scope, u8),
 }
 
 fn pick(target: Target, effect: bool, index: usize) -> Cmd {
     Cmd::Plugin(match (target, effect) {
         (Target::Fx(slot), _) => PlugCmd::Effect { index, slot },
+        (Target::ClipFx(scope, slot), _) => PlugCmd::ClipEffect { scope, slot, index },
         (_, true) => PlugCmd::Effect { index, slot: None },
         (Target::Gen(after), false) => PlugCmd::Generator { index, after },
         (Target::Replace(row), false) => PlugCmd::Replace { index, row },
@@ -130,7 +135,7 @@ pub fn items(s: &State, target: Target, nested: bool) -> Vec<PItem> {
             v.extend(section(s, true, target, nested));
         }
         Target::Gen(_) | Target::Replace(_) => v.extend(section(s, false, target, nested)),
-        Target::Fx(_) => v.extend(section(s, true, target, nested)),
+        Target::Fx(_) | Target::ClipFx(..) => v.extend(section(s, true, target, nested)),
     }
     v.extend(footer(s));
     v
@@ -171,6 +176,7 @@ pub fn run(app: &mut App, c: PlugCmd) -> Option<String> {
         PlugCmd::Generator { index, after } => add_generator(app, index, after),
         PlugCmd::Replace { index, row } => replace_generator(app, index, row),
         PlugCmd::Effect { index, slot } => add_effect(app, index, slot),
+        PlugCmd::ClipEffect { scope, slot, index } => crate::clip_fx::run(app, crate::clip_fx::C::Effect { scope, slot, index }),
         PlugCmd::Find => {
             app.start_scan(Mode::Changed);
             None

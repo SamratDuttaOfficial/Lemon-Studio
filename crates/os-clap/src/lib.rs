@@ -527,6 +527,8 @@ enum Kind {
     Tune,
     /// A named voice's gain (note expression); `velocity` holds the gain.
     Gain,
+    /// A named voice's pan (note expression); `velocity` holds it, -1..1.
+    Pan,
 }
 
 /// One entry of a chunk's event order: an index into `notes`, `mods` or `exprs`.
@@ -552,11 +554,13 @@ struct Ev {
     /// The engine's name for the voice (`Instrument::voice_start`): its note gets a note id, which its gains and its
     /// choke go to.
     voice: Option<u32>,
+    /// The output bus the voice plays on: the note's MIDI channel (`Instrument::voice_start_on`).
+    bus: u8,
 }
 
 impl Ev {
     fn new(time: u32, kind: Kind, key: u8, velocity: f32) -> Ev {
-        Ev { time, kind, key, velocity, start: 0.0, levels: os_engine::NoteLevels::default(), voice: None }
+        Ev { time, kind, key, velocity, start: 0.0, levels: os_engine::NoteLevels::default(), voice: None, bus: 0 }
     }
 }
 
@@ -654,6 +658,12 @@ pub struct Plugin {
     mod_resend: Vec<(i32, u8, u32, f64)>,
     /// Voices get their gains as volume note expressions (`use_voice_gains`).
     voice_gains: bool,
+    /// The extra output ports are buses voices play on (`use_voice_buses`).
+    voice_buses: bool,
+    /// The buses voices have started on (bit `k`: bus `k`), and what each has put out in this `process` call: only
+    /// those are copied out of the scratch.
+    bus_used: u32,
+    bus_out: Vec<(Vec<f32>, Vec<f32>)>,
     /// The voices the engine named (`Instrument::voice_start`): its name, the note id they were sent with, the key.
     named: Vec<(u32, i32, u8)>,
     next_note_id: i32,
@@ -898,6 +908,9 @@ impl Plugin {
                 level_voices: Vec::new(),
                 mod_resend: Vec::new(),
                 voice_gains: false,
+                voice_buses: false,
+                bus_used: 0,
+                bus_out: Vec::new(),
                 named: Vec::new(),
                 next_note_id: 0,
                 steady: 0,
@@ -1471,6 +1484,25 @@ impl Plugin {
                     value: f64::from(e.velocity).clamp(0.0, 4.0),
                 });
                 seq.push(Seq::Expr(self.exprs.len() - 1));
+            } else if e.time < n && e.kind == Kind::Pan {
+                // A named voice's pan: CLAP pan expression with its note id; a voice that has ended is not sent one.
+                let Some(&(_, id, key)) = self.named.iter().find(|v| Some(v.0) == e.voice) else { continue };
+                self.exprs.push(clap_event_note_expression {
+                    header: clap_event_header {
+                        size: std::mem::size_of::<clap_event_note_expression>() as u32,
+                        time: e.time,
+                        space_id: CLAP_CORE_EVENT_SPACE_ID,
+                        type_: CLAP_EVENT_NOTE_EXPRESSION,
+                        flags: 0,
+                    },
+                    expression_id: CLAP_NOTE_EXPRESSION_PAN,
+                    note_id: id,
+                    port_index: 0,
+                    channel: 0,
+                    key: i16::from(key),
+                    value: f64::from((e.velocity + 1.0) * 0.5).clamp(0.0, 1.0),
+                });
+                seq.push(Seq::Expr(self.exprs.len() - 1));
             } else if e.time < n {
                 // A note with a sample start or its own levels gets an id, so its modulation reaches only that voice;
                 // so does a voice the engine named, whose gains and choke go to it alone. Its choke takes that id.
@@ -1494,7 +1526,7 @@ impl Plugin {
                     Kind::On => self.ledger.start(e.key, id),
                     Kind::Off => self.ledger.release(e.key),
                     Kind::Choke if id >= 0 => self.ledger.choke_voice(id),
-                    Kind::Choke | Kind::Tune | Kind::Gain => self.ledger.choke(e.key),
+                    Kind::Choke | Kind::Tune | Kind::Gain | Kind::Pan => self.ledger.choke(e.key),
                 }
                 self.notes.push(clap_event_note {
                     header: clap_event_header {
@@ -1504,13 +1536,13 @@ impl Plugin {
                         type_: match e.kind {
                             Kind::On => CLAP_EVENT_NOTE_ON,
                             Kind::Off => CLAP_EVENT_NOTE_OFF,
-                            Kind::Choke | Kind::Tune | Kind::Gain => CLAP_EVENT_NOTE_CHOKE,
+                            Kind::Choke | Kind::Tune | Kind::Gain | Kind::Pan => CLAP_EVENT_NOTE_CHOKE,
                         },
                         flags: 0,
                     },
                     note_id: id,
                     port_index: 0,
-                    channel: 0,
+                    channel: i16::from(e.bus),
                     key: i16::from(e.key),
                     velocity: f64::from(e.velocity),
                 });
@@ -1697,6 +1729,22 @@ impl Plugin {
         if self.outs == 1 {
             right.copy_from_slice(left);
         }
+        // What the voices' buses put out. The scratch is the next chunk's, so it is kept.
+        if self.bus_used != 0 {
+            let mut at = aux_out_at;
+            for (k, &ch) in self.aux_outs.iter().enumerate() {
+                if ch == 2 && self.bus_used >> (k + 1) & 1 == 1 {
+                    if let Some((l, r)) = self.bus_out.get_mut(k + 1) {
+                        // SAFETY: the port's two channels are `spare` buffers of `frames` frames (above).
+                        unsafe {
+                            l.extend_from_slice(std::slice::from_raw_parts(base.add(at * max), frames));
+                            r.extend_from_slice(std::slice::from_raw_parts(base.add((at + 1) * max), frames));
+                        }
+                    }
+                }
+                at += ch;
+            }
+        }
         // CONTINUE / TAIL: the plugin says it is still going; CONTINUE_IF_NOT_QUIET: while its output is not silent.
         let loud = left.iter().chain(right.iter()).any(|v| v.abs() > QUIET);
         self.sounding = status == CLAP_PROCESS_CONTINUE || status == CLAP_PROCESS_TAIL || (status == CLAP_PROCESS_CONTINUE_IF_NOT_QUIET && loud);
@@ -1767,6 +1815,12 @@ impl os_host::Plugin for Plugin {
 
     fn use_voice_gains(&mut self) -> bool {
         Plugin::use_voice_gains(self)
+    }
+
+    fn use_voice_buses(&mut self) -> bool {
+        self.voice_buses = self.aux_outs.iter().all(|&ch| ch == 2) && !self.aux_outs.is_empty();
+        self.bus_out = vec![(Vec::new(), Vec::new()); self.aux_outs.len() + 1];
+        self.voice_buses
     }
 
     fn set_offline(&mut self, offline: bool) {
@@ -1884,6 +1938,7 @@ impl os_engine::Instrument for Plugin {
         self.level_voices.clear();
         self.mod_resend.clear();
         self.named.clear();
+        self.bus_used = 0;
         if self.rate == 0 {
             return;
         }
@@ -1927,6 +1982,35 @@ impl os_engine::Instrument for Plugin {
 
     fn voice_start(&mut self, offset: u32, key: u8, velocity: f32, start: f32, levels: os_engine::NoteLevels, voice: u32) {
         self.start_note(Ev { start: start.clamp(0.0, 1.0), levels, voice: Some(voice), ..Ev::new(offset, Kind::On, key, velocity) });
+    }
+
+    fn voice_start_on(&mut self, offset: u32, key: u8, velocity: f32, start: f32, levels: os_engine::NoteLevels, voice: u32, bus: u8) {
+        // A bus the plugin does not have, or an instance that keeps its ports to itself: the main output.
+        let bus = if self.voice_buses && usize::from(bus) <= self.aux_outs.len() { bus } else { 0 };
+        if bus > 0 {
+            self.bus_used |= 1 << bus;
+        }
+        self.start_note(Ev { start: start.clamp(0.0, 1.0), levels, voice: Some(voice), bus, ..Ev::new(offset, Kind::On, key, velocity) });
+    }
+
+    fn voice_buses(&self) -> usize {
+        if self.voice_buses { self.aux_outs.len() } else { 0 }
+    }
+
+    fn take_bus(&mut self, bus: usize, left: &mut [f32], right: &mut [f32]) -> bool {
+        left.fill(0.0);
+        right.fill(0.0);
+        let Some((l, r)) = self.bus_out.get(bus).filter(|_| bus > 0 && self.bus_used >> bus & 1 == 1) else { return false };
+        let n = l.len().min(left.len());
+        left[..n].copy_from_slice(&l[..n]);
+        right[..n].copy_from_slice(&r[..n]);
+        n > 0
+    }
+
+    fn voice_pan(&mut self, offset: u32, voice: u32, pan: f32) {
+        if self.voice_gains {
+            self.queue.push(Ev { voice: Some(voice), ..Ev::new(offset, Kind::Pan, 0, pan) });
+        }
     }
 
     fn voice_gains(&self) -> bool {
@@ -1994,6 +2078,12 @@ impl os_engine::Instrument for Plugin {
     fn process(&mut self, rate: u32, left: &mut [f32], right: &mut [f32]) {
         left.fill(0.0);
         right.fill(0.0);
+        if self.bus_used != 0 {
+            for (l, r) in &mut self.bus_out {
+                l.clear();
+                r.clear();
+            }
+        }
         if self.rate != rate {
             // Activation is a main-thread call: ask the UI to do it and stay silent until then.
             if debug() && self.wanted_rate.load(Ordering::Acquire) != rate {
@@ -2547,7 +2637,7 @@ mod tests {
         let auto_ch = Channel {
             id: os_model::Id::NONE,
             index: 0, kind: ChannelKind::Automation, name: None, plugin: None, color: None, enabled: true, volume: 1.0,
-            pan: -1.0, pitch_cents: 0, mixer_track: 0, sample_path: None, layer_children: vec![], envelopes: Default::default(),
+            pan: -1.0, pitch_cents: 0, mixer_track: 0, sample_path: None, layer_children: vec![], whole_fx: 0, envelopes: Default::default(),
             rack: Default::default(), plugin_state: None, misc: Default::default(), sound: Default::default(),
         };
         // Main level from 0 (-18 dB) to 1 (+18 dB) over 4 beats (120 BPM: 2 s).
@@ -2672,7 +2762,7 @@ mod tests {
             id: os_model::Id::NONE,
             index: 0, kind: os_model::ChannelKind::Plugin, name: None, plugin: Some("Lemon Sampler".into()), plugin_state: None, color: None,
             enabled: true, volume: 0.78125, pan: 0.0, pitch_cents: 0, mixer_track: 0, sample_path: None,
-            layer_children: vec![], envelopes: Default::default(), rack: Default::default(), misc: Default::default(), sound: Default::default(),
+            layer_children: vec![], whole_fx: 0, envelopes: Default::default(), rack: Default::default(), misc: Default::default(), sound: Default::default(),
         };
         let note = os_model::Note { length: 24, ..os_model::Note::step(0, 0) };
         let project = os_model::Project {
@@ -2706,7 +2796,7 @@ mod tests {
             id: os_model::Id::NONE,
             index: 0, kind: os_model::ChannelKind::Plugin, name: None, plugin: Some("Lemon Sampler".into()), plugin_state: None, color: None,
             enabled: true, volume: 0.78125, pan: 0.0, pitch_cents: 0, mixer_track: 0, sample_path: None,
-            layer_children: vec![], envelopes: Default::default(), rack: Default::default(), misc: Default::default(), sound: Default::default(),
+            layer_children: vec![], whole_fx: 0, envelopes: Default::default(), rack: Default::default(), misc: Default::default(), sound: Default::default(),
         };
         let note = os_model::Note { length: 24, ..os_model::Note::step(0, 0) };
         let project = os_model::Project {
@@ -2753,7 +2843,7 @@ mod tests {
             id: os_model::Id::NONE,
             index: 0, kind: os_model::ChannelKind::Plugin, name: None, plugin: Some("Lemon Sampler".into()), plugin_state: None, color: None,
             enabled: true, volume: 0.78125, pan: 0.0, pitch_cents: 0, mixer_track: 0, sample_path: None,
-            layer_children: vec![], envelopes: Default::default(), rack: Default::default(), misc: Default::default(), sound: Default::default(),
+            layer_children: vec![], whole_fx: 0, envelopes: Default::default(), rack: Default::default(), misc: Default::default(), sound: Default::default(),
         };
         let project = os_model::Project { ppq: 96, tempo: Some(130.0), channels: vec![ch], ..Default::default() };
         let mut lib = os_engine::SampleLibrary::default();
@@ -2806,7 +2896,7 @@ mod tests {
             id: os_model::Id::NONE,
             index: 0, kind: os_model::ChannelKind::Plugin, name: None, plugin: Some("Lemon Sampler".into()), plugin_state: None, color: None,
             enabled: true, volume: 0.78125, pan: 0.0, pitch_cents: 0, mixer_track: 0, sample_path: None,
-            layer_children: vec![], envelopes: Default::default(), rack: Default::default(), misc: Default::default(), sound: Default::default(),
+            layer_children: vec![], whole_fx: 0, envelopes: Default::default(), rack: Default::default(), misc: Default::default(), sound: Default::default(),
         };
         let project = os_model::Project { ppq: 96, tempo: Some(130.0), channels: vec![ch], ..Default::default() };
         let mut lib = os_engine::SampleLibrary::default();
@@ -2949,7 +3039,7 @@ mod tests {
             id: os_model::Id::NONE,
             index: 0, kind: os_model::ChannelKind::Plugin, name: None, plugin: Some("Lemon Sampler".into()), plugin_state: None, color: None,
             enabled: true, volume: 0.78125, pan: 0.0, pitch_cents: 0, mixer_track: 0, sample_path: None,
-            layer_children: vec![], envelopes: Default::default(), rack: Default::default(), misc, sound: Default::default(),
+            layer_children: vec![], whole_fx: 0, envelopes: Default::default(), rack: Default::default(), misc, sound: Default::default(),
         };
         let project = os_model::Project { ppq: 96, tempo: Some(130.0), channels: vec![ch], ..Default::default() };
         let mut slib = os_engine::SampleLibrary::default();
@@ -3087,7 +3177,7 @@ mod tests {
                 id: os_model::Id::NONE,
                 index: 0, kind: os_model::ChannelKind::AudioClip, name: None, plugin: None, plugin_state: None, color: None,
                 enabled: true, volume: 0.78125, pan: 0.0, pitch_cents: 0, mixer_track: 0, sample_path: Some(wav.to_string_lossy().into_owned()),
-                layer_children: vec![], envelopes: Default::default(), rack: Default::default(), misc: Default::default(), sound: Default::default(),
+                layer_children: vec![], whole_fx: 0, envelopes: Default::default(), rack: Default::default(), misc: Default::default(), sound: Default::default(),
             };
             let arrangement = os_model::Arrangement { clips, tracks: (1..=4).map(os_model::PlaylistTrack::new).collect(), ..Default::default() };
             let project = os_model::Project { ppq: 96, tempo: Some(130.0), channels: vec![ch], arrangements: vec![arrangement], auto_crossfades: Some(true), ..Default::default() };

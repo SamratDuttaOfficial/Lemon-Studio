@@ -15,6 +15,7 @@
 // spec: flp/container.md
 
 mod check;
+pub mod clip_fx;
 mod container;
 mod error;
 mod event;

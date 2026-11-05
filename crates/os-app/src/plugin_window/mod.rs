@@ -184,6 +184,8 @@ pub struct ChannelInfo {
     /// The channel's Misc tab values (`None`: no channel behind the window, e.g. mixer effects: no Misc tab, and the
     /// strip's ON / PAN / VOL do nothing).
     pub misc: Option<crate::misc_page::MiscVals>,
+    /// A sample's channel: what its Cut part and Whole audio tabs show (`None`: the window has neither).
+    pub clip: Option<Box<crate::clip_page::PageVals>>,
 }
 
 /// What the user did in the frame, for the app to apply to the channel.
@@ -215,6 +217,8 @@ pub enum FrameEvent {
     Misc(crate::misc_page::M, f32),
     /// A Misc tab list (chord list, number box values) or knob menu: the app opens it at this screen point.
     MiscMenu(crate::misc_page::M, i32, i32),
+    /// Something done on the Cut part or Whole audio tab.
+    Clip(crate::clip_page::Event),
     /// A strip knob was right-clicked: the app opens its menu (Reset first) at this screen point.
     KnobMenu(Knob, i32, i32),
     /// A Misc tab keyboard key: key, velocity, pressed.
@@ -285,6 +289,9 @@ struct State {
     preset: Option<String>,
     /// Misc tab page state (tracking page, keyboard scroll, drag, hover).
     misc_ui: crate::misc_page::MiscUi,
+    /// The Cut part or Whole audio tab is showing instead of the plugin, and that page's state.
+    clip_tab: Option<crate::clip_page::Tab>,
+    clip_ui: crate::clip_page::PageUi,
     /// Plugin editor size (logical px).
     editor: (f32, f32),
     /// The editor's smallest size when the frame's edges may resize it (a resizable Lemon plugin, as Tesla).
@@ -329,6 +336,8 @@ impl State {
             box_hint: None,
             preset: None,
             misc_ui: Default::default(),
+            clip_tab: None,
+            clip_ui: Default::default(),
             editor,
             resize_min: None,
             sizing: None,
@@ -398,11 +407,50 @@ impl State {
     /// The size of what the editor area shows: the Misc page's own while that tab is open (the frame fits it, as a
     /// tab change in FL does), the plugin's editor otherwise.
     fn shown(&self) -> (f32, f32) {
-        if self.misc && self.info.misc.is_some() { (crate::misc_page::PAGE_W, crate::misc_page::PAGE_H) } else { self.editor }
+        if self.misc && self.info.misc.is_some() {
+            (crate::misc_page::PAGE_W, crate::misc_page::PAGE_H)
+        } else if self.clip_shown().is_some() {
+            (crate::clip_page::PAGE_W, crate::clip_page::PAGE_H)
+        } else {
+            self.editor
+        }
+    }
+    /// What the app says the channel holds now; whether the frame now shows something else. Nothing moves under a drag.
+    /// What only the Cut part and Whole audio tabs show (it changes all the time while the song plays) is kept without a
+    /// repaint while neither shows, and edits on them the app has not had yet keep what they show.
+    fn take_info(&mut self, mut info: ChannelInfo) -> bool {
+        if self.drag.is_some() || self.misc_ui.drag.is_some() {
+            return false;
+        }
+        let new_clip = info.clip.take();
+        let old_clip = self.info.clip.take();
+        let rest_same = self.info == info;
+        let clip_same = old_clip == new_clip;
+        let held = self.clip_ui.dragging() || self.events.iter().any(|e| matches!(e, FrameEvent::Clip(_)));
+        let tabs_change = old_clip.is_some() != new_clip.is_some();
+        self.info = info;
+        self.info.clip = if held && old_clip.is_some() && new_clip.is_some() { old_clip } else { new_clip };
+        !rest_same || tabs_change || (!clip_same && !held && self.clip_tab.is_some())
+    }
+
+    /// Shows the Cut part or Whole audio tab (the strip with its tabs comes with it).
+    fn open_clip_tab(&mut self, tab: crate::clip_page::Tab) {
+        self.strip = true;
+        self.misc = false;
+        self.clip_tab = Some(tab);
+        self.clip_ui.hint.clear();
+    }
+    /// The Cut part or Whole audio tab showing, with what it shows.
+    fn clip_shown(&self) -> Option<(crate::clip_page::Tab, &crate::clip_page::PageVals)> {
+        Some((self.clip_tab?, self.info.clip.as_deref()?))
+    }
+    /// A page of the frame's own covers the plugin's editor.
+    fn over_editor(&self) -> bool {
+        self.misc || self.clip_shown().is_some()
     }
     /// The frame's edges and its maximize button resize the editor: a resizable plugin, its editor showing.
     fn resizable(&self) -> bool {
-        self.resize_min.is_some() && !self.misc
+        self.resize_min.is_some() && !self.over_editor()
     }
     /// Top of the editor (below the strip, or the title bar, and the editor's 1 px outline).
     fn area_y(&self) -> f32 {
@@ -426,6 +474,8 @@ enum Part {
     PresetNext,
     /// Page tab `i`; `i == pages.len()` is the Misc tab.
     Tab(usize),
+    /// The Cut part and Whole audio tabs, after the Misc tab.
+    ClipTab(crate::clip_page::Tab),
     On,
     Knob(u8),
     /// The RANGE and TRACK value boxes.
@@ -512,6 +562,10 @@ fn parts(st: &State) -> Vec<(Rect, Part)> {
         let dx = w - STRIP_RIGHT;
         for i in 0..=st.pages.len() {
             v.push((tab_rect(i), Part::Tab(i)));
+        }
+        if st.info.clip.is_some() {
+            v.push((tab_rect(st.pages.len() + 1), Part::ClipTab(crate::clip_page::Tab::Cut)));
+            v.push((tab_rect(st.pages.len() + 2), Part::ClipTab(crate::clip_page::Tab::Whole)));
         }
         v.extend(strip_off(st, w).into_iter().map(|(r, name)| (r, Part::Off(name))));
         if st.channel() {
@@ -607,6 +661,8 @@ fn paint(c: &mut Canvas, st: &State) {
             Some(v) => crate::misc_page::paint(c, &os_theme::current(), a.x, a.y, v, &st.misc_ui),
             None => c.text_center(Font::new(16), a, c_grey(), "No channel settings here"),
         }
+    } else if let Some((tab, v)) = st.clip_shown() {
+        crate::clip_page::paint(c, &os_theme::current(), a.x, a.y, v, &st.clip_ui, tab);
     }
 }
 
@@ -637,7 +693,7 @@ fn title_bar(c: &mut Canvas, st: &State, w: f32) {
     c.text_clip(f, tx, ty, troom, c_grey(), &target);
     let tw = c.text_width(f, &target).min(troom);
     let off = st.off_hint.map(crate::app::off_text).or_else(|| st.box_hint.map(|k| st.box_text(k)));
-    let hint = if let Some(o) = &off { o } else if st.misc { &st.misc_ui.hint } else { &st.hint };
+    let hint = if let Some(o) = &off { o } else if st.misc { &st.misc_ui.hint } else if st.clip_shown().is_some() { &st.clip_ui.hint } else { &st.hint };
     if !hint.is_empty() {
         let hx = tx + tw + 14.0;
         let hf = Font::new(12);
@@ -673,7 +729,7 @@ fn strip(c: &mut Canvas, st: &State, w: f32) {
     let n = st.pages.len();
     for i in 0..=n {
         let cell = tab_rect(i);
-        let active = if i == n { st.misc } else { !st.misc && st.page == i };
+        let active = if i == n { st.misc } else { !st.over_editor() && st.page == i };
         if active && os_ui::kit::lemon::on(&os_theme::current()) {
             c.fill_rrect(cell.inset(2.0), 6.0, c_body());
         } else if active {
@@ -682,6 +738,24 @@ fn strip(c: &mut Canvas, st: &State, w: f32) {
         let col = if active { os_theme::current().a(0x49f1b1) } else { c_icon() };
         let t = if i == n { &tb::TOOL } else { page_tabler(st.pages[i]) };
         icon_at(c, t, cell.cx(), cell.cy(), 26.0, col);
+    }
+    // A sample's channel: the piece and the whole audio, each named under its icon.
+    if st.info.clip.is_some() {
+        use crate::clip_page::Tab;
+        for (i, tab, t, label) in [(n + 1, Tab::Cut, &tb::CUT, "CUT"), (n + 2, Tab::Whole, &tb::WAVE_SINE, "WHOLE")] {
+            let cell = tab_rect(i);
+            let active = !st.misc && st.clip_tab == Some(tab);
+            if active && os_ui::kit::lemon::on(&os_theme::current()) {
+                c.fill_rrect(cell.inset(2.0), 6.0, c_body());
+            } else if active {
+                c.fill_rect(cell, c_body());
+            }
+            let col = if active { os_theme::current().a(0x49f1b1) } else { c_icon() };
+            icon_at(c, t, cell.cx(), cell.cy() - 6.0, 21.0, col);
+            let f = Font::condensed(9, 4).bold();
+            let w = c.text_width(f, label);
+            c.text(f, (cell.cx() - w / 2.0).round(), cell.bottom() - 15.0, col, label);
+        }
     }
     // ON LED.
     let (lx, ly) = (349.0 + dx, 43.0 + dy);
@@ -868,6 +942,9 @@ impl State {
                 if let Some(r) = self.misc_button(x, y, Btn::Left, screen) {
                     return r;
                 }
+                if let Some(r) = self.clip_button(x, y, crate::clip_page::Button::Left, screen) {
+                    return r;
+                }
             }
             _ => {}
         }
@@ -881,15 +958,24 @@ impl State {
                 self.strip = !self.strip;
                 if !self.strip {
                     self.misc = false;
+                    self.clip_tab = None;
                 }
                 Reply::Relayout
             }
             Some(Part::Tab(t)) if t == self.pages.len() => {
                 self.misc = true;
+                self.clip_tab = None;
+                Reply::Relayout
+            }
+            Some(Part::ClipTab(tab)) => {
+                self.misc = false;
+                self.clip_tab = Some(tab);
+                self.clip_ui.hint.clear();
                 Reply::Relayout
             }
             Some(Part::Tab(t)) => {
                 self.misc = false;
+                self.clip_tab = None;
                 self.page = t;
                 self.events.push(FrameEvent::Page(t));
                 Reply::Relayout
@@ -948,6 +1034,11 @@ impl State {
         if let Some(r) = self.misc_button(x, y, Btn::Right, screen) {
             return r;
         }
+        if part_at(self, x, y).is_none() {
+            if let Some(r) = self.clip_button(x, y, crate::clip_page::Button::Right, screen) {
+                return r;
+            }
+        }
         // No channel behind the window: the strip's knobs do nothing.
         if let (Some(Part::Knob(i)), Some(_)) = (part_at(self, x, y), self.info.misc) {
             let (sx, sy) = screen(x, y);
@@ -994,6 +1085,15 @@ impl State {
             return Reply::None;
         }
         let mut hover = false;
+        let (px, py) = (x - BORDER, y - self.area_y());
+        if let Some((tab, vals)) = self.clip_tab.zip(self.info.clip.as_deref()) {
+            let dragging = self.clip_ui.dragging();
+            let changed = crate::clip_page::motion(&mut self.clip_ui, vals, tab, px, py);
+            if dragging {
+                return if changed { Reply::Repaint } else { Reply::None };
+            }
+            hover = changed;
+        }
         if self.misc {
             if self.misc_ui.bar_drag.is_some() {
                 let moved = crate::misc_page::bar_drag_to(&mut self.misc_ui, x - BORDER);
@@ -1088,6 +1188,12 @@ impl State {
             self.events.push(FrameEvent::Note(k, 0, false));
             os_clap::wake();
         }
+        // A lane or a mix bar being dragged is one edit, now.
+        if let Some(tab) = self.clip_tab {
+            let mut out = Vec::new();
+            crate::clip_page::release(&mut self.clip_ui, tab, &mut out);
+            self.clip_events(out);
+        }
     }
 
     /// The wheel turned `notches` (up positive) over (x, y).
@@ -1096,6 +1202,11 @@ impl State {
         if part.is_none() {
             if let Some(r) = self.misc_wheel(x, y, notches) {
                 return r;
+            }
+            let ay = self.area_y();
+            if let Some((tab, vals)) = self.clip_tab.zip(self.info.clip.as_deref()) {
+                let moved = crate::clip_page::wheel(&mut self.clip_ui, vals, tab, y - ay, notches);
+                return if moved { Reply::Repaint } else { Reply::None };
             }
         }
         if matches!(part, Some(Part::Presets | Part::PresetPrev | Part::PresetNext)) && notches != 0.0 {
@@ -1118,6 +1229,34 @@ impl State {
             return Reply::Repaint;
         }
         Reply::None
+    }
+
+    /// Edits on the Cut part or Whole audio tab: the page shows them at once, and they go to the app.
+    fn clip_events(&mut self, out: Vec<crate::clip_page::Event>) {
+        if out.is_empty() {
+            return;
+        }
+        if let Some(v) = self.info.clip.as_deref_mut() {
+            out.iter().for_each(|e| v.apply(e));
+        }
+        self.events.extend(out.into_iter().map(FrameEvent::Clip));
+        os_clap::wake();
+    }
+
+    /// A button press over the Cut part or Whole audio tab; `None` when that does not show.
+    fn clip_button(&mut self, x: f32, y: f32, b: crate::clip_page::Button, screen: ToScreen) -> Option<Reply> {
+        use crate::clip_page::{self as cp, Press};
+        let (tab, vals) = self.clip_tab.zip(self.info.clip.as_deref())?;
+        let (ax, ay) = (BORDER, self.area_y());
+        let mut out = Vec::new();
+        let to_screen = |px: f32, py: f32| screen(px + ax, py + ay);
+        let press = cp::press(&mut self.clip_ui, vals, tab, x - ax, y - ay, b, &to_screen, &mut out);
+        self.clip_events(out);
+        Some(match press {
+            Press::Nothing => Reply::None,
+            Press::Repaint => Reply::Repaint,
+            Press::Capture => Reply::Capture,
+        })
     }
 
     /// A button press over the Misc page; `None` when the page does not take it.
@@ -1248,7 +1387,7 @@ mod tests {
     use super::*;
 
     fn state(strip: bool, target: &str) -> State {
-        let info = ChannelInfo { name: "Keys".into(), target: target.into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 0, max_track: 125, misc: Some(Default::default()) };
+        let info = ChannelInfo { name: "Keys".into(), target: target.into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 0, max_track: 125, misc: Some(Default::default()), clip: None };
         State { strip, ..State::new(info, (480.0, 270.0), false) }
     }
 
@@ -1262,6 +1401,116 @@ mod tests {
         assert_eq!(moved_to((2340, -40), second, second, (200, 100)), (2340, -40), "the same monitor: unchanged");
         assert_eq!(moved_to((2340, -40), second, primary, (200, 100)), (420, 160));
         assert_eq!(moved_to((4400, 1200), second, primary, (200, 100)), (1720, 940), "kept on the smaller monitor");
+    }
+
+    fn clip_state() -> State {
+        use crate::clip_page::{LaneVals, PageVals, Side};
+        use os_model::clip_fx::Lane;
+        let side = || Side {
+            available: true,
+            lanes: vec![
+                LaneVals { lane: Lane::Volume, name: "Volume".into(), own: Vec::new(), inherited: Vec::new() },
+                LaneVals { lane: Lane::Pan, name: "Pan".into(), own: Vec::new(), inherited: Vec::new() },
+            ],
+            ..Side::default()
+        };
+        let mut st = state(true, "Bus 1");
+        st.info.clip = Some(Box::new(PageVals { cut: side(), whole: side(), playhead: None }));
+        st
+    }
+
+    /// The strip's CUT and WHOLE tabs: after the Misc wrench, each covers the plugin's editor with its page; the page fits
+    /// the frame to itself, and a page tab brings the plugin back.
+    #[test]
+    fn the_cut_and_whole_tabs_cover_the_editor() {
+        use crate::clip_page::{Tab, PAGE_H, PAGE_W};
+        let screen = |x: f32, y: f32| (x as i32, y as i32);
+        // A window on a channel without a sample has neither.
+        let plain = state(true, "Bus 1");
+        assert_eq!(part_at(&plain, tab_rect(2).cx(), tab_rect(2).cy()), None);
+        let mut st = clip_state();
+        let (cut, whole) = (tab_rect(st.pages.len() + 1), tab_rect(st.pages.len() + 2));
+        assert_eq!(part_at(&st, cut.cx(), cut.cy()), Some(Part::ClipTab(Tab::Cut)));
+        assert_eq!(part_at(&st, whole.cx(), whole.cy()), Some(Part::ClipTab(Tab::Whole)));
+        assert_eq!(st.left_down(cut.cx(), cut.cy(), false, &screen), Reply::Relayout);
+        assert_eq!((st.clip_tab, st.over_editor()), (Some(Tab::Cut), true));
+        assert_eq!(st.shown(), (PAGE_W, PAGE_H));
+        assert_eq!(st.left_down(whole.cx(), whole.cy(), false, &screen), Reply::Relayout);
+        assert_eq!(st.clip_tab, Some(Tab::Whole));
+        // The Misc tab takes over from them, and they from it.
+        let misc = tab_rect(st.pages.len());
+        st.left_down(misc.cx(), misc.cy(), false, &screen);
+        assert!(st.misc && st.clip_tab.is_none());
+        st.left_down(cut.cx(), cut.cy(), false, &screen);
+        assert!(!st.misc && st.clip_tab == Some(Tab::Cut));
+        // A page tab brings the editor back, at its own size.
+        let page = tab_rect(0);
+        st.left_down(page.cx(), page.cy(), false, &screen);
+        assert!(st.clip_tab.is_none() && !st.over_editor());
+        assert_eq!(st.shown(), (480.0, 270.0));
+        // Hiding the strip goes back to the editor: the tabs are gone with it.
+        st.open_clip_tab(Tab::Whole);
+        assert!(st.strip);
+        st.left_down(GEAR_RECT.cx(), GEAR_RECT.cy(), false, &screen);
+        assert!(!st.strip && st.clip_tab.is_none());
+        // A double-click that asks for a tab brings the strip back with it.
+        st.open_clip_tab(Tab::Cut);
+        assert!(st.strip && st.clip_tab == Some(Tab::Cut));
+    }
+
+    /// A press on the page goes to the page, in its own coordinates; what it edits shows at once and reaches the app once.
+    #[test]
+    fn a_lane_drawn_on_the_page_reaches_the_app_as_one_edit() {
+        use crate::clip_page::{plot_rect, Event, Tab};
+        use os_model::clip_fx::Lane;
+        let screen = |x: f32, y: f32| (x as i32, y as i32);
+        let mut st = clip_state();
+        st.open_clip_tab(Tab::Cut);
+        let plot = plot_rect();
+        let (x, y) = (plot.cx() + BORDER, plot.cy() + st.area_y());
+        assert_eq!(part_at(&st, x, y), None, "the frame leaves it to the page");
+        assert_eq!(st.left_down(x, y, false, &screen), Reply::Capture);
+        assert_eq!(st.motion(x + 20.0, y - 30.0, false), Reply::Repaint);
+        assert!(st.events.is_empty(), "nothing goes out during the drag");
+        // What the app sends during a drag does not move the page.
+        let during = st.info.clone();
+        assert!(!st.take_info(ChannelInfo { clip: during.clip.clone().map(|mut c| { c.playhead = Some(1.0); c }), ..during }));
+        st.left_up(x + 20.0, y - 30.0);
+        let [FrameEvent::Clip(Event::SetLane { tab: Tab::Cut, lane: Lane::Volume, points })] = &st.events[..] else { panic!("{:?}", st.events) };
+        assert_eq!(points.len(), 1);
+        let shown = st.info.clip.as_ref().unwrap().cut.lanes[0].own.clone();
+        assert_eq!(&shown, points, "shown at once");
+        // The tick that hands the edit over still has the old values from the app: the page keeps showing the new.
+        let mut stale = st.info.clone();
+        stale.clip.as_mut().unwrap().cut.lanes[0].own.clear();
+        st.take_info(stale);
+        assert_eq!(st.info.clip.as_ref().unwrap().cut.lanes[0].own, shown);
+    }
+
+    /// While the song plays the app's values for the tabs change all the time: a frame showing the plugin's editor is not
+    /// repainted for them, one showing a tab is; anything the strip shows always is.
+    #[test]
+    fn only_a_shown_tab_repaints_for_its_values() {
+        use crate::clip_page::Tab;
+        let mut st = clip_state();
+        let moved = |st: &State| {
+            let mut i = st.info.clone();
+            i.clip.as_mut().unwrap().playhead = Some(st.info.clip.as_ref().unwrap().playhead.unwrap_or(0.0) + 1.0);
+            i
+        };
+        assert!(!st.take_info(st.info.clone()), "nothing new");
+        let i = moved(&st);
+        assert!(!st.take_info(i.clone()), "not shown");
+        assert_eq!(st.info, i, "but kept");
+        let mut i = moved(&st);
+        i.volume = 0.1;
+        assert!(st.take_info(i), "the strip shows it");
+        st.open_clip_tab(Tab::Cut);
+        let i = moved(&st);
+        assert!(st.take_info(i), "shown now");
+        let mut none = st.info.clone();
+        none.clip = None;
+        assert!(st.take_info(none), "the tabs go");
     }
 
     /// A resizable plugin's frame (Tesla): its right and bottom edges and their corner drag the editor's size, never
@@ -1331,6 +1580,7 @@ mod tests {
         let st = state(true, "Master");
         assert_eq!(st.size(), (494.0, 74.0 + 270.0 + 7.0));
         assert_eq!(state(false, "Master").size().1, 28.0 + 270.0 + 7.0);
+        assert_eq!(part_at(&st, 7.0 + 45.0 * 2.5, 50.0), None, "no tabs for a piece on a channel without a sample");
         let at = |x, y| part_at(&st, x, y);
         assert_eq!(at(15.0, 15.0), Some(Part::Menu));
         assert_eq!(at(34.0, 15.0), Some(Part::Gear));

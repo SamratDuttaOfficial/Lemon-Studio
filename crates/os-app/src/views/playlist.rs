@@ -917,6 +917,23 @@ fn clip_paint(ui: &mut Ui, s: &State, g: &PGeom, i: usize, c: &Clip) {
     if r.w > 16.0 {
         ui.c.text_clip(Font::new(12), inner.x + 14.0, inner.y - 1.0, inner.w - 16.0, ic, &pl::source_name(s, c.source));
     }
+    // Plugins act on this clip: on the cut itself (bright), or on the whole audio it is a cut of (`os_model::clip_fx`).
+    if r.w > 44.0 && kind == PickKind::Audio {
+        let has = |h: u32| s.project.fx_unit(h).is_some_and(|u| u.has_plugins());
+        let whole = match c.source {
+            ClipSource::Channel(ch) => s.project.channel(ch).is_some_and(|x| has(x.whole_fx)),
+            ClipSource::Pattern(_) => false,
+        };
+        let own = has(c.fx);
+        if own || whole {
+            let f = Font::condensed(10, 4).bold();
+            let w = ui.c.text_width(f, "FX");
+            let b = Rect::new(inner.right() - w - 8.0, inner.y + 1.0, w + 6.0, title_h - 2.0);
+            let tag = dim(cc(t, TITLE_TEXT)).with_alpha(if own { 255 } else { 110 });
+            ui.c.stroke_rrect(b, 2.0, 1.0, tag);
+            ui.c.text_center(f, b, tag, "FX");
+        }
+    }
     // Content.
     let content = if c.muted { dim(text).with_alpha(90) } else { dim(cc(t, NOTE)) };
     if !(c.muted && kind == PickKind::Pattern) {
@@ -931,6 +948,7 @@ fn clip_paint(ui: &mut Ui, s: &State, g: &PGeom, i: usize, c: &Clip) {
                 waveform(ui, s, g, c, ch, body_at, col, waves.as_ref().map(|w| (w, &dim as &dyn Fn(Color) -> Color)));
                 if !c.muted {
                     fades(ui, s, g, i, c, body_at, dim(wave));
+                    clip_lanes(ui, s, g, c, body_at);
                 }
             }
             (PickKind::Automation, ClipSource::Channel(ch)) => {
@@ -941,6 +959,44 @@ fn clip_paint(ui: &mut Ui, s: &State, g: &PGeom, i: usize, c: &Clip) {
         }
     }
     ui.c.pop_clip();
+}
+
+/// The volume and pan lines that move an audio clip (`os_model::clip_fx`): the cut's own in full, the whole audio's it
+/// follows faint, each read at the part of the sample the clip plays.
+fn clip_lanes(ui: &mut Ui, s: &State, g: &PGeom, c: &Clip, edges: Body) {
+    use os_model::clip_fx::Lane;
+    let t = ui.t;
+    let lanes = [(Lane::Volume, t.a(0x49f1b1)), (Lane::Pan, t.a(0xffb454))];
+    if lanes.iter().all(|l| s.project.clip_lane(c, l.0).is_none()) {
+        return;
+    }
+    let Some(paint) = ui.c.paint_bounds() else { return };
+    let body = edges.r;
+    let (lo, hi) = (f64::from(paint.x) - 8.0, f64::from(paint.right()) + 8.0);
+    let k0 = ((lo - edges.x) / 2.0).floor().max(0.0);
+    let x1 = (edges.x + edges.w).min(edges.x + 2.0 * ((hi - edges.x) / 2.0).ceil());
+    if edges.x + 2.0 * k0 > x1 {
+        return;
+    }
+    let (w0, _) = pl::window(s, c);
+    let ms_per_tick = pl::to_src(s, c.source, 1.0);
+    let clip_x = g.x64(f64::from(c.position));
+    let seconds = |x: f64| (w0 + (x - clip_x) / f64::from(g.ppt) * ms_per_tick) / 1000.0;
+    for (lane, col) in lanes {
+        let Some(r) = s.project.clip_lane(c, lane) else { continue };
+        let mut pts = Vec::new();
+        let mut k = k0;
+        while edges.x + 2.0 * k <= x1 {
+            let x = edges.x + 2.0 * k;
+            pts.push((pl::snap(x), pl::value_y(body, os_model::clip_fx::lane_value(r.points, seconds(x)).unwrap_or_else(|| lane.neutral()))));
+            k += 1.0;
+        }
+        if r.own {
+            ui.c.polyline(&pts, 1.5, col);
+        } else {
+            ui.c.polyline(&pts, 1.0, col.with_alpha(120));
+        }
+    }
 }
 
 /// A clip's body as drawn (`r`, its edges possibly pulled in by `PGeom::clip_draw_rect`) and its true left edge and

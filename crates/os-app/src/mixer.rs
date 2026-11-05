@@ -197,11 +197,11 @@ pub fn inserts(s: &State) -> u16 {
 }
 
 pub fn track(s: &State, n: u16) -> Option<&MixerTrack> {
-    s.project.mixer.iter().find(|m| m.index == n)
+    s.project.slot_track(n)
 }
 
 pub(crate) fn track_mut(s: &mut State, n: u16) -> Option<&mut MixerTrack> {
-    s.project.mixer.iter_mut().find(|m| m.index == n)
+    s.project.slot_track_mut(n)
 }
 
 /// "Master", "Bus 3", or the track's own name.
@@ -251,7 +251,7 @@ fn remap_slot_ui(s: &mut State, f: impl Fn(u16, u8) -> Option<(u16, u8)>) {
 }
 
 /// Forgets slot `k` of track `t`'s name and colour (a new or removed plugin).
-fn forget_slot_ui(s: &mut State, t: u16, k: u8) {
+pub(crate) fn forget_slot_ui(s: &mut State, t: u16, k: u8) {
     remap_slot_ui(s, |a, b| ((a, b) != (t, k)).then_some((a, b)));
 }
 
@@ -283,7 +283,7 @@ fn remove_question(n: usize) -> String {
 }
 
 /// Empties slot `k` of track `t` and drops its instance (the slot menu's Delete).
-fn clear_slot(s: &mut State, t: u16, k: u8) {
+pub(crate) fn clear_slot(s: &mut State, t: u16, k: u8) {
     if let Some(m) = track_mut(s, t) {
         m.slots[usize::from(k)] = None;
         m.slot_on[usize::from(k)] = true;
@@ -2090,12 +2090,14 @@ impl App {
 #[cfg(plugin_windows)]
 pub fn fx_info(p: &os_model::Project, ui: &MixerUi, key: usize) -> Option<crate::plugin_window::ChannelInfo> {
     let (t, k) = crate::plugins::fx_of(key)?;
-    let m = p.mixer.iter().find(|m| m.index == t)?;
+    let m = p.slot_track(t)?;
     let name = ui.slot_names.get(&(t, k)).cloned().or_else(|| m.slots.get(usize::from(k))?.as_ref().map(crate::project_plugins::slot_title))?;
+    let chain = os_model::clip_fx::handle_of(t).map(|h| crate::clip_fx::chain_name(p, h).to_string());
     Some(crate::plugin_window::ChannelInfo {
         misc: None,
+        clip: None,
         name,
-        target: m.name.clone().filter(|n| !n.is_empty()).unwrap_or_else(|| if t == 0 { "Master".into() } else { format!("Bus {t}") }),
+        target: chain.or_else(|| m.name.clone().filter(|n| !n.is_empty())).unwrap_or_else(|| if t == 0 { "Master".into() } else { format!("Bus {t}") }),
         enabled: m.slot_on[usize::from(k)],
         volume: 0.8,
         pan: 0.0,

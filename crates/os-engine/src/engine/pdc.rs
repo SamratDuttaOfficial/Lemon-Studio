@@ -339,6 +339,10 @@ impl Engine {
             if ch.instrument.0.is_some() {
                 let d = self.pdc.chan_delay.get(c).copied().unwrap_or(0);
                 ins[ch.insert].chan = ins[ch.insert].chan.max(d);
+                // A cut's chain gets the instrument's voice bus, as late as its output.
+                for &(_, t) in &ch.chains {
+                    ins[t].chan = ins[t].chan.max(d);
+                }
             }
         }
         let l = lateness(&ins, &self.order, self.rate);
@@ -647,7 +651,7 @@ mod tests {
             pitch_cents: 0,
             mixer_track: insert,
             sample_path: None,
-            layer_children: vec![],
+            layer_children: vec![], whole_fx: 0,
             envelopes: Default::default(),
             rack: Default::default(),
             misc: Default::default(),

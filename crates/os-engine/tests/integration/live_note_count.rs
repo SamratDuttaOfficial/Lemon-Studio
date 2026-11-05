@@ -42,7 +42,7 @@ fn channel() -> os_model::Channel {
         pitch_cents: 0,
         mixer_track: 0,
         sample_path: None,
-        layer_children: vec![],
+        layer_children: vec![], whole_fx: 0,
         envelopes: Default::default(), rack: Default::default(), misc: Default::default(), sound: Default::default(),
     }
 }

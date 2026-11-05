@@ -646,6 +646,12 @@ impl SampleLibrary {
         PathBuf::from(project_path)
     }
 
+    /// A sample known by `project_path` without a file (tests).
+    #[cfg(test)]
+    pub(crate) fn insert(&mut self, project_path: &str, s: Arc<Sample>) {
+        self.cache.insert(project_path.into(), Some(s));
+    }
+
     pub fn get(&mut self, project_path: &str) -> Option<Arc<Sample>> {
         if let Some(s) = self.cache.get(project_path) {
             return s.clone();

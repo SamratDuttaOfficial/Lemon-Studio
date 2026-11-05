@@ -67,6 +67,28 @@ pub trait Instrument: Send {
         let _ = voice;
         self.choke(offset, key);
     }
+    /// `voice_start` on output bus `bus` (1 and up: what `take_bus` hands out; 0: the main output). A cut with plugins of
+    /// its own plays its voice on a bus of its own (`os_model::clip_fx`). Default: the bus is ignored.
+    #[allow(clippy::too_many_arguments)]
+    fn voice_start_on(&mut self, offset: u32, key: u8, velocity: f32, start: f32, levels: NoteLevels, voice: u32, bus: u8) {
+        let _ = bus;
+        self.voice_start(offset, key, velocity, start, levels, voice);
+    }
+    /// The output buses besides the main output an instrument can play a voice on. Default: none.
+    fn voice_buses(&self) -> usize {
+        0
+    }
+    /// Copies what bus `bus` (1 and up) put out in the last `process` call into `left` and `right`, as long as those;
+    /// false when nothing played there. Default: false.
+    fn take_bus(&mut self, bus: usize, left: &mut [f32], right: &mut [f32]) -> bool {
+        let _ = (bus, left, right);
+        false
+    }
+    /// The pan of voice `voice` (-1..1: a lane of its audio clip), `offset` frames into the next `process` call. An
+    /// instrument with `voice_gains` takes it. Default: ignored.
+    fn voice_pan(&mut self, offset: u32, voice: u32, pan: f32) {
+        let _ = (offset, voice, pan);
+    }
     /// Tunes the sounding voices of `key` to `semitones` from the key's own pitch (portamento glides; spec:
     /// audio/channel-voices.md). Default: ignored (no glide).
     fn tune(&mut self, offset: u32, key: u8, semitones: f32) {

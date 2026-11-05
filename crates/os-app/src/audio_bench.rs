@@ -47,6 +47,18 @@ impl Instrument for TimedInst {
     fn voice_start(&mut self, offset: u32, key: u8, velocity: f32, start: f32, levels: os_engine::NoteLevels, voice: u32) {
         self.0.lock().unwrap().voice_start(offset, key, velocity, start, levels, voice)
     }
+    fn voice_start_on(&mut self, offset: u32, key: u8, velocity: f32, start: f32, levels: os_engine::NoteLevels, voice: u32, bus: u8) {
+        self.0.lock().unwrap().voice_start_on(offset, key, velocity, start, levels, voice, bus)
+    }
+    fn voice_buses(&self) -> usize {
+        self.0.lock().unwrap().voice_buses()
+    }
+    fn take_bus(&mut self, bus: usize, left: &mut [f32], right: &mut [f32]) -> bool {
+        self.0.lock().unwrap().take_bus(bus, left, right)
+    }
+    fn voice_pan(&mut self, offset: u32, voice: u32, pan: f32) {
+        self.0.lock().unwrap().voice_pan(offset, voice, pan)
+    }
     fn voice_gains(&self) -> bool {
         self.0.lock().unwrap().voice_gains()
     }
