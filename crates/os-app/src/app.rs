@@ -25,8 +25,10 @@ use crate::transport::{State as TransportState, Transport};
 use crate::views;
 
 /// Child windows. Playlist, Mixer and Piano roll float by default and can be moved, resized,
-/// minimized (title bar only) and maximized (filling the workspace); the Channel rack and the
-/// channel plugin window float. All share one stacking order (`State::z`).
+/// minimized (title bar only) and maximized (filling the workspace); the channel plugin window
+/// floats. All share one stacking order (`State::z`). The Playlist (the Arranger) and the Channel
+/// rack (the Instrument rack) are the two tabs of one window: they share its place and size, and
+/// `State::z` holds the one showing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Win {
     Playlist,
@@ -58,7 +60,7 @@ impl Win {
     /// Index into `State::wins` for the windows with a stored rect, move and resize.
     pub fn slot(self) -> Option<usize> {
         match self {
-            Win::Playlist => Some(0),
+            Win::Playlist | Win::ChannelRack => Some(0),
             Win::Mixer => Some(1),
             Win::PianoRoll => Some(2),
             _ => None,
@@ -68,11 +70,21 @@ impl Win {
     /// Smallest outer size (the layouts stay intact down to this).
     pub fn min_size(self) -> (f32, f32) {
         match self {
-            Win::Playlist => (520.0, 220.0),
+            Win::Playlist | Win::ChannelRack => (580.0, 220.0 + views::TAB_H),
             Win::Mixer => (560.0, 400.0),
             Win::PianoRoll => (540.0, 320.0),
             _ => (0.0, 0.0),
         }
+    }
+
+    /// One of the two tabs of the Arranger's window.
+    pub fn is_tab(self) -> bool {
+        matches!(self, Win::Playlist | Win::ChannelRack)
+    }
+
+    /// The other tab of the Arranger's window.
+    pub fn other_tab(self) -> Win {
+        if self == Win::ChannelRack { Win::Playlist } else { Win::ChannelRack }
     }
 }
 
@@ -204,6 +216,8 @@ pub enum Action {
     /// A ▸ entry of a menu bar dropdown (menu, flat item index): opens its submenu (`views::menus::submenu`).
     MenuSub(usize, usize),
     ToggleWin(Win),
+    /// A tab of the Arranger's window: the Arranger or the Instrument rack.
+    PanelTab(Win),
     PatternPrev,
     PatternNext,
     PatternAdd,
@@ -213,8 +227,7 @@ pub enum Action {
     ChannelSelect(usize),
     ChannelEnable(usize),
     Step(usize, u32),
-    /// Channel rack: activity / select slot, mixer track box (drag), add channel, resize edges
-    /// (`views::rack::EDGE_*` bits).
+    /// Channel rack: activity / select slot, mixer track box (drag), add channel.
     RackSelect(usize),
     RackMixer(usize),
     RackAdd,
@@ -229,7 +242,6 @@ pub enum Action {
     /// Show a window maximized and in front (the playlist / piano roll buttons' right click, spec:
     /// ui/toolbar-buttons.md §2).
     ShowMax(Win),
-    RackResize(u8),
     /// Step / piano-roll view toggle, and a row's mini piano roll (spec: ui/channel-rack.md §6).
     RackRollView,
     RackRoll(usize),
@@ -586,7 +598,6 @@ fn hover_is_visible(a: &Action) -> bool {
             | Action::PlMarkers
             | Action::PlHeader(_)
             | Action::Scrollbar(_)
-            | Action::RackResize(_)
             | Action::RackGraphArea
             | Action::WinDrag(_)
             | Action::WinResize(..)
@@ -746,6 +757,11 @@ impl Ui<'_> {
         self.pressed.as_ref() == Some(action)
     }
 
+    /// What the mouse is over.
+    pub fn hovered(&self) -> Option<&Action> {
+        self.hover.as_ref()
+    }
+
     /// Whether the mouse is over `rect` and last frame's topmost hit there was registered by this window
     /// (for decorations without their own action, e.g. a knob drawn under its hit region).
     pub fn hovering(&self, rect: Rect) -> bool {
@@ -845,8 +861,6 @@ pub enum Drag {
     Bar(crate::toolbar::BarDrag),
     /// Resize a Playlist / Mixer / Piano roll window (`r0` = its rect when the drag began).
     WinResize { win: Win, edges: u8, m0: (f32, f32), r0: Rect },
-    /// Resize the channel rack from its right / bottom edges.
-    RackResize { edges: u8, m0: (f32, f32), s0: (f32, f32) },
     /// Change a channel's mixer track (spec: ui/channel-rack.md §5).
     RackMixer { ch: usize, y0: f32, v0: u16 },
     Fader { track: u16, y0: f32, v0: f64 },
@@ -989,8 +1003,8 @@ pub struct State {
     /// spec: ui/close-windows.md §2).
     pub no_focus: bool,
     pub show_browser: bool,
-    pub rack_pos: (f32, f32),
-    pub rack_size: (f32, f32),
+    /// The tab of the Arranger's window last shown: what it opens on (`App::flip_tab`).
+    pub panel_tab: Win,
     /// Horizontal step scroll of the rack, pixels.
     pub rack_scroll_x: f32,
     /// Channel rack selection, filters, view options, graph editor, loops (spec: ui/channel-rack.md §7-22).
@@ -1174,10 +1188,13 @@ impl State {
         }
     }
 
-    /// Show `w` and bring it to the front.
+    /// Show `w` and bring it to the front. A tab of the Arranger's window takes the place of the other tab.
     pub fn raise(&mut self, w: Win) {
-        self.z.retain(|&o| o != w);
+        self.z.retain(|&o| o != w && !(w.is_tab() && o.is_tab()));
         self.z.push(w);
+        if w.is_tab() {
+            self.panel_tab = w;
+        }
         self.no_focus = false;
     }
 
@@ -1218,7 +1235,7 @@ pub struct App {
     /// Action under the cursor while the left button is held (pressed look of buttons).
     pub pressed: Option<Action>,
     /// A button pressed and not released yet (`acts_on_release`).
-    armed: Option<Action>,
+    pub(crate) armed: Option<Action>,
     /// Where that press was: its window comes to the front at the release, as the button acts (`mouse_down`).
     raise_at: Option<(f32, f32)>,
     /// A toolbar button right-pressed and not released yet: (its hit, what the release over it runs).
@@ -1383,11 +1400,10 @@ impl App {
                 retimed: false,
                 file: None,
                 path: None,
-                z: vec![Win::Playlist, Win::ChannelRack],
+                z: vec![Win::Playlist],
                 no_focus: false,
                 show_browser: true,
-                rack_pos: crate::arrange::RACK_POS,
-                rack_size: views::rack::DEFAULT_SIZE,
+                panel_tab: Win::Playlist,
                 rack_scroll_x: 0.0,
                 rack: Default::default(),
                 rack_roll_view: false,
@@ -2864,7 +2880,9 @@ impl App {
     /// main window, which the detached window covers).
     #[cfg(plugin_windows)]
     pub fn sync_lift(&mut self, canvas: &Canvas) {
-        let lifted = self.popup_lift.filter(|_| self.state.playlist.popup.is_some()).and_then(|r| self.plugins.window_of(r));
+        // The value box its menu opens goes over that window with it.
+        let up = self.state.playlist.popup.is_some() || crate::typein::is_open(&self.state);
+        let lifted = self.popup_lift.filter(|_| up).and_then(|r| self.plugins.window_of(r));
         let bounds = self.overlays.iter().copied().reduce(|a, b| a.union(&b));
         match (lifted, bounds) {
             (Some((frame, true)), Some(b)) => {
@@ -3079,7 +3097,6 @@ impl App {
     fn win_solid(&self, w: Win) -> Option<Rect> {
         let s = &self.state;
         let r = match w {
-            Win::ChannelRack => Some(views::rack::rect(s)),
             Win::Plugin => s.project.channels.get(s.plugin_channel).map(|_| views::channel_win::rect(s)),
             Win::Perf => Some(views::perf::rect(s)),
             Win::Tapper => Some(views::tapper::rect(s)),
@@ -3979,6 +3996,7 @@ impl App {
 
     /// Periodic housekeeping; returns whether a repaint is needed.
     pub fn tick(&mut self) -> bool {
+        self.typein_settle();
         // Things the interface added get their ids before anything looks them up (`control::ids`).
         let s = &mut self.state;
         s.control.settle_tick(&mut s.project, s.piano.dirty);
@@ -4113,6 +4131,7 @@ impl App {
 
     /// Paint the whole frame (None) or only the given rects, in one pass (see `Canvas::begin_region`).
     pub fn paint_region(&mut self, canvas: &mut Canvas, damage: Option<&[Rect]>) {
+        self.typein_settle();
         // The CPU panel's View FPS counts painted frames.
         self.state.cpu.frame();
         // A playlist scroll's moves (`take_damage`) go first; the damage they left is painted with the rest.
@@ -5428,15 +5447,6 @@ impl App {
                     let new = self.win_bounds(win);
                     self.damage_rect(old.union(&new));
                 }
-                Drag::RackResize { edges, m0, s0 } => {
-                    let old = views::rack::bounds(&self.state);
-                    let s = &mut self.state;
-                    let w = if edges & views::rack::EDGE_RIGHT != 0 { s0.0 + x - m0.0 } else { s0.0 };
-                    let h = if edges & views::rack::EDGE_BOTTOM != 0 { s0.1 + y - m0.1 } else { s0.1 };
-                    s.rack_size = views::rack::snap_size(s, w, h);
-                    let new = views::rack::bounds(&self.state);
-                    self.damage_rect(old.union(&new));
-                }
                 Drag::RackMixer { ch, y0, v0 } => {
                     // One insert per 10 px, up = higher (spec: ui/channel-rack.md §12).
                     let v = (i32::from(v0) + ((y0 - y) / crate::rack::MIXER_DRAG).round() as i32).clamp(0, i32::from(crate::mixer::max_insert(&self.state.project))) as u16;
@@ -5475,7 +5485,7 @@ impl App {
                 Drag::RackDots { x0, p0 } => {
                     let w = p0 as f32 / 100.0 * crate::rack::NAME_W + (x - x0);
                     let pct = (w / crate::rack::NAME_W * 100.0).round().clamp(crate::rack::NAME_PCT_MIN as f32, crate::rack::NAME_PCT_MAX as f32) as u32;
-                    crate::rack::relayout(&mut self.state, |s| s.rack.name_pct = pct);
+                    self.state.rack.name_pct = pct;
                     self.hint = Cow::Owned(format!("Channel button width: {pct}%"));
                     self.invalidate();
                 }
@@ -5705,6 +5715,10 @@ impl App {
             if hint != self.hint {
                 self.damage_band(HINT_RECT);
             }
+            // A tab's shortcut shows in a bubble over the page under it.
+            if matches!(self.hover, Some(Action::PanelTab(_))) || matches!(hover, Some(Action::PanelTab(_))) {
+                self.invalidate();
+            }
         }
         self.hover = hover;
         self.hover_rect = rect;
@@ -5792,6 +5806,7 @@ impl App {
                     | Action::PatSong(_)
                     | Action::MenuItem(..)
                     | Action::ToggleWin(_)
+                    | Action::PanelTab(_)
                     | Action::PatternAdd
                     | Action::ChannelSelect(_)
                     | Action::ChannelEnable(_)
@@ -5861,8 +5876,16 @@ impl App {
             }
             return;
         }
-        // So is the Remote control settings box; a press on one of its value boxes starts a vertical drag of it.
-        if crate::remote::is_open(&self.state) {
+        // So is the Remote control settings box; a press on one of its value boxes starts a vertical drag of it. A value
+        // box's menu and the value box it opens are over it, and take the clicks first.
+        if crate::remote::is_open(&self.state) && !crate::typein::is_open(&self.state) {
+            if self.state.playlist.popup.is_some() {
+                match action {
+                    Some(a @ (Action::PlPopup(_) | Action::PlPopupSub(_))) => self.act(a),
+                    _ => self.state.playlist.popup = None,
+                }
+                return;
+            }
             if let Some(Action::Remote(r)) = action {
                 if r.is_value() {
                     self.drag = Some(Drag::LinkBox { part: r, y0: self.mouse.1, steps: 0 });
@@ -5902,7 +5925,7 @@ impl App {
             return;
         }
         // The Advanced fill dialog is modal (spec: ui/channel-rack.md §22).
-        if self.state.rack.fill.is_some() && !matches!(action, Some(Action::RackFill(_))) {
+        if self.state.rack.fill.is_some() && !matches!(action, Some(Action::RackFill(_) | Action::PlPopup(_) | Action::PlPopupSub(_))) {
             return;
         }
         if self.state.playlist.edit.is_some() {
@@ -5938,6 +5961,13 @@ impl App {
                 return;
             }
         }
+        // A channel's name button: a click acts on the release (below), a drag takes the channel to the Arranger.
+        if let Some(Action::ChannelSelect(i)) = action
+            && !self.shift
+            && !self.ctrl
+        {
+            self.drag = Some(Drag::Browser { item: views::browser::Item::Channel(i), label: crate::rack::channel_name(&self.state, i), m0: (x, y), started: false });
+        }
         // A button that acts on its release brings its window to the front then too: raised at the press, the window
         // showed in front of what the button was about to change for as long as the button was held (the channel
         // name button over an open plugin window hid it only after the rack had come over it).
@@ -5955,6 +5985,54 @@ impl App {
             }
         }
         self.rack_pending();
+    }
+
+    /// The value box opened. From the menu of a detached plugin window, the keyboard comes to the main window, which
+    /// reads what is typed in it (it shows over that window as the menu did: `sync_lift`).
+    pub(crate) fn typein_opened(&mut self) {
+        #[cfg(all(plugin_windows, windows))]
+        if self.popup_lift.is_some() {
+            crate::plugin_window::activate_main(self.plugins.owner);
+        }
+    }
+
+    /// A number accepted in the value box for a box that takes the app to set (`typein::set`).
+    fn typein_settle(&mut self) {
+        use crate::typein::Target;
+        let Some((t, v)) = self.state.playlist.typed.take() else { return };
+        match t {
+            Target::Setting(label) => {
+                let now = crate::typein::get(&self.state, t).unwrap_or(v);
+                if let Some(m) = self.settings_number(label, (v.round() - now) as i32) {
+                    self.state.message = Some(m);
+                }
+            }
+            Target::Midi(m) => self.midi_page_set(m, v),
+            Target::Link(r) => self.link_box_set(r, v),
+            Target::Misc(row, m) => {
+                let (lo, hi) = crate::misc_page::range_of(m);
+                crate::misc::set(self, row, m, (v.round() as f32).clamp(lo, hi));
+            }
+            Target::Ppi => self.ppi_set(v.round().clamp(f64::from(crate::ppi::MIN), f64::from(crate::ppi::MAX)) as u16),
+            _ => {}
+        }
+        self.invalidate();
+    }
+
+    /// F5 or F6: tab `w` of the Arranger's window in front; pressed again, the other tab, so either key flips between
+    /// the two.
+    pub(crate) fn tab_key(&mut self, w: Win) {
+        let s = &mut self.state;
+        s.raise(if s.shown(w) && s.in_front(w) { w.other_tab() } else { w });
+        self.invalidate();
+    }
+
+    /// Ctrl+Tab: the other tab of the Arranger's window; one closed or covered comes to the front on the tab it was on.
+    pub(crate) fn flip_tab(&mut self) {
+        let s = &mut self.state;
+        let tab = s.panel_tab;
+        s.raise(if s.shown(tab) && s.in_front(tab) { tab.other_tab() } else { tab });
+        self.invalidate();
     }
 
     /// Clicking any part of a child window brings it to the front (spec: ui/channel-rack.md §5).
@@ -6013,18 +6091,7 @@ impl App {
         if matches!((&self.drag, &self.hover), (Some(Drag::BrowserSplit { .. }), _) | (None, Some(Action::BrowserSplitter))) {
             return Cursor::EwResize;
         }
-        let edges = match (&self.drag, &self.hover) {
-            (Some(Drag::RackResize { edges, .. }), _) => *edges,
-            (None, Some(Action::RackResize(e))) => *e,
-            _ => 0,
-        };
-        match edges {
-            0 if self.resize_cursor => Cursor::EwResize,
-            0 => Cursor::Default,
-            views::rack::EDGE_RIGHT => Cursor::EwResize,
-            views::rack::EDGE_BOTTOM => Cursor::NsResize,
-            _ => Cursor::NwseResize,
-        }
+        if self.resize_cursor { Cursor::EwResize } else { Cursor::Default }
     }
 
     /// True while a drag moves a value rather than the cursor (knobs, the tempo, scroll-bar right-drags): the shell
@@ -6217,12 +6284,20 @@ impl App {
     /// a scroll bar scrolls.
     pub fn mouse_down_right(&mut self) {
         self.close_song_info();
-        if crate::typein::is_open(&self.state) || crate::remote::is_open(&self.state) || self.modal_open() {
+        if crate::typein::is_open(&self.state) || self.modal_open() {
             return;
         }
         self.smooth.stop();
         let (x, y) = self.mouse;
         let action = self.top_hit(x, y).map(|h| h.action.clone());
+        // The Remote control settings box is modal: its value boxes' menu is all it offers.
+        if crate::remote::is_open(&self.state) {
+            self.state.playlist.popup = match action {
+                Some(Action::Remote(r)) if r.is_value() => Some(crate::typein::input_menu(crate::typein::Target::Link(r), x, y)),
+                _ => None,
+            };
+            return self.invalidate();
+        }
         if self.state.menu_open.is_some() {
             self.state.menu_open = None;
             // With its submenu.
@@ -6245,8 +6320,22 @@ impl App {
                 }
                 return self.invalidate();
             }
-            // Settings > MIDI's Port and offset boxes: right-click resets (spec: ui/midi-settings.md §1).
-            Some(Action::Settings(views::settings::SAct::Midi(m))) if m.is_value() => return self.midi_page_reset(*m),
+            // Settings > MIDI's Port and offset boxes: a number typed, or the default (spec: ui/midi-settings.md §1).
+            Some(Action::Settings(views::settings::SAct::Midi(m))) if m.is_value() => {
+                let mut menu = crate::typein::input_menu(crate::typein::Target::Midi(*m), x, y);
+                menu.items.push(crate::playlist::PItem::new("Reset", crate::playlist::Cmd::MidiReset(*m)));
+                self.state.playlist.popup = Some(menu);
+                return self.invalidate();
+            }
+            // The settings window's other number boxes and the PPI ruler.
+            Some(Action::Settings(views::settings::SAct::Number(label))) => {
+                self.state.playlist.popup = Some(crate::typein::input_menu(crate::typein::Target::Setting(label), x, y));
+                return self.invalidate();
+            }
+            Some(Action::Settings(views::settings::SAct::Ppi)) => {
+                self.state.playlist.popup = Some(crate::typein::input_menu(crate::typein::Target::Ppi, x, y));
+                return self.invalidate();
+            }
             Some(Action::PatternNext) => {
                 self.state.pat_ui.menu_at = Some((x, y));
                 self.state.menu_open = Some(views::menus::PATTERNS);
@@ -6349,6 +6438,7 @@ impl App {
             let typein = match *a {
                 Action::Knob(k) => Some(crate::typein::Target::Knob(k)),
                 Action::Fader(t) => Some(crate::typein::Target::Fader(t)),
+                Action::Tempo => Some(crate::typein::Target::Tempo),
                 _ => None,
             };
             let auto = self.automation_target(a);
@@ -7150,6 +7240,12 @@ impl App {
                 crate::rack::set_loop_box(&mut self.state, i, v);
                 return None;
             }
+            Some(Action::RackFill(crate::rack::FillHit::Number(amount))) => {
+                let step = if amount { crate::rack::FillHit::Amount(d) } else { crate::rack::FillHit::Len(d) };
+                crate::rack::fill_hit(&mut self.state, step);
+                self.invalidate();
+                return None;
+            }
             // Shift+wheel over a channel's name button moves the channel (spec: ui/channel-rack.md §13).
             Some(Action::ChannelSelect(i)) if shift && dy + dx != 0.0 => {
                 let notches = (dy + dx).round() as i32;
@@ -7227,9 +7323,11 @@ impl App {
             return;
         }
         use winit::keyboard::{Key, NamedKey};
-        // The Remote control settings box takes Esc (drops it) and Enter (accepts).
-        if crate::remote::is_open(&self.state) {
+        // The Remote control settings box takes Esc (drops it) and Enter (accepts); the value box over it takes its own
+        // keys (`playlist::key`).
+        if crate::remote::is_open(&self.state) && !crate::typein::is_open(&self.state) {
             match key {
+                Key::Named(NamedKey::Escape) if self.state.playlist.popup.is_some() => self.state.playlist.popup = None,
                 Key::Named(NamedKey::Escape) => self.state.link_box = None,
                 Key::Named(NamedKey::Enter) => self.link_accept(),
                 _ => {}
@@ -7345,8 +7443,9 @@ impl App {
             // spec: ui/tempo-tapper.md §1
             Key::Named(NamedKey::F5) if ctrl => self.act(Action::ToggleWin(Win::Tapper)),
             Key::Named(NamedKey::F7) if alt && !ctrl => self.act(Action::ToggleWin(Win::Touch)),
-            Key::Named(NamedKey::F5) => self.act(Action::ToggleWin(Win::Playlist)),
-            Key::Named(NamedKey::F6) => self.act(Action::ToggleWin(Win::ChannelRack)),
+            Key::Named(NamedKey::F5) => self.tab_key(Win::Playlist),
+            Key::Named(NamedKey::F6) => self.tab_key(Win::ChannelRack),
+            Key::Named(NamedKey::Tab) if ctrl => self.flip_tab(),
             Key::Named(NamedKey::F7) => self.act(Action::ToggleWin(Win::PianoRoll)),
             // The browser and the pickers: General ▸ Input ▸ Manage shortcuts (spec: ui/settings-choices.md).
             Key::Named(NamedKey::F8) => self.f8_key(ctrl, alt),
@@ -8119,6 +8218,7 @@ impl App {
             Action::ToggleWin(Win::Perf) => self.toggle_perf(),
             Action::ToggleWin(Win::Tapper) => self.toggle_tapper(),
             Action::ToggleWin(Win::Touch) => self.toggle_touch(),
+            Action::PanelTab(w) => s.raise(w),
             Action::ToggleWin(w) => {
                 if s.shown(w) && s.in_front(w) {
                     s.hide(w);
@@ -8236,9 +8336,6 @@ impl App {
                 s.lane_menu = false;
             }
             Action::Settings(_) => {}
-            Action::RackResize(edges) => {
-                self.drag = Some(Drag::RackResize { edges, m0: self.mouse, s0: s.rack_size });
-            }
             Action::ChannelEnable(_)
             | Action::Step(..)
             | Action::RackOptions
@@ -8281,7 +8378,6 @@ impl App {
                     Win::Arp => s.arp.pos,
                     Win::PianoDlg => s.piano_dlg.pos[s.piano_dlg.tool.index()],
                     Win::Events => s.events.pos,
-                    Win::ChannelRack => s.rack_pos,
                     w => {
                         // Start from the rect as shown (kept on screen), then move it.
                         let r = s.float_rect(w);
@@ -8548,7 +8644,8 @@ impl App {
                 }
             }
             Action::RackOptions => {
-                let p = rk::options_menu(&self.state, self.state.rack_pos.0, self.state.rack_pos.1 + 28.0);
+                let r = views::rack::rect(&self.state);
+                let p = rk::options_menu(&self.state, r.x, r.y + 28.0);
                 self.state.playlist.popup = Some(p);
             }
             Action::RackFilter => {
@@ -8560,7 +8657,7 @@ impl App {
             Action::RackLen => self.drag = Some(Drag::RackLen { y0: mouse.1, v0: rk::len_value(&self.state) }),
             Action::RackLoop => {
                 let s = &mut self.state;
-                rk::relayout(s, |s| s.rack.loop_mode = !s.rack.loop_mode);
+                s.rack.loop_mode = !s.rack.loop_mode;
                 s.piano.dirty = true;
             }
             Action::RackGraph => self.state.rack.graph_open = !self.state.rack.graph_open,
@@ -8590,6 +8687,9 @@ impl App {
             Action::Knob(k @ (KnobId::ChanVol(_) | KnobId::ChanPan(_) | KnobId::Swing)) => rk::knob_menu(s, k, self.automation_target(a), x, y),
             Action::RackFilter => rk::filter_edit_menu(s, x, y),
             Action::RackLen => rk::length_menu(s, x, y),
+            // Under Advanced looping the box holds a word, not a number.
+            Action::RackLoopBox(i) if !rk::advanced(s) => crate::typein::input_menu(crate::typein::Target::RackLoop(i), x, y),
+            Action::RackFill(rk::FillHit::Number(amount)) => crate::typein::input_menu(crate::typein::Target::Fill(amount), x, y),
             Action::RackLoop => rk::loop_menu(s, x, y),
             Action::RackSelect(i) => {
                 let sel = &mut self.state.rack.sel;
@@ -8757,6 +8857,10 @@ impl App {
             }
             // spec: ui/cancel-recording.md
             MenuCmd::CancelRecording => self.state.message = Some(self.cancel_recording()),
+            MenuCmd::InputPattern => {
+                let at = self.mouse;
+                crate::typein::open(&mut self.state, crate::typein::Target::Pattern, at);
+            }
             MenuCmd::StopSound => {
                 self.transport.stop();
                 self.state.message = Some("Sound stopped".into());
@@ -9025,7 +9129,7 @@ pub(crate) fn lift_windows(s: &mut State, dy: f32) {
     for w in &mut s.wins {
         lift(&mut w.rect.y);
     }
-    for pos in [&mut s.rack_pos, &mut s.plugin_pos, &mut s.perf.pos, &mut s.tapper.pos, &mut s.touch.pos, &mut s.strum.pos, &mut s.arp.pos, &mut s.events.pos] {
+    for pos in [&mut s.plugin_pos, &mut s.perf.pos, &mut s.tapper.pos, &mut s.touch.pos, &mut s.strum.pos, &mut s.arp.pos, &mut s.events.pos] {
         lift(&mut pos.1);
     }
     for pos in &mut s.piano_dlg.pos {
@@ -9041,7 +9145,7 @@ fn toolbar_right(hit: &Action) -> Option<Action> {
         Action::Util(Util::Save) => Action::MenuItem(0, FILE_SAVE_VERSION),
         Action::Util(Util::Help) => Action::MenuItem(HELP_MENU, HELP_ABOUT),
         Action::Util(Util::AudioEditor) => Action::Util(Util::NewAudioEditor),
-        Action::ToggleWin(w @ (Win::Playlist | Win::PianoRoll)) => Action::ShowMax(w),
+        Action::ToggleWin(w @ (Win::Playlist | Win::ChannelRack | Win::PianoRoll)) => Action::ShowMax(w),
         Action::ToggleWin(Win::Browser) | Action::ProjectPicker => Action::PickerOpen,
         _ => return None,
     })
@@ -11458,11 +11562,12 @@ mod tests {
         let mut b = Canvas::new(1920, 1080, 1.0).unwrap();
         let mut app = App::new(None);
         app.state.z = vec![Win::Mixer, Win::ChannelRack];
+        app.state.wins[0] = WinState { rect: Rect::new(320.0, 200.0, 800.0, 400.0), maxed: false, mini: false };
         frame(&mut app, &mut a, None);
 
         // Move the rack and fade a fader, repainting only the damaged regions.
         let old = views::rack::bounds(&app.state);
-        app.state.rack_pos = (700.0, 400.0);
+        app.state.wins[0].rect = Rect::new(700.0, 400.0, 800.0, 400.0);
         let new = views::rack::bounds(&app.state);
         if let Some(t) = app.state.project.mixer.iter_mut().find(|t| t.index == 3) {
             t.volume = Some(0.35);
@@ -11500,9 +11605,12 @@ mod tests {
             ws.maxed = false;
             ws.rect = r;
         }
-        for (z, song) in [(vec![Win::Playlist, Win::Mixer, Win::ChannelRack], true), (vec![Win::Mixer, Win::PianoRoll, Win::ChannelRack], false)] {
+        for (z, song) in [(vec![Win::Playlist, Win::Mixer], true), (vec![Win::Mixer, Win::PianoRoll, Win::ChannelRack], false)] {
             app.state.z = z;
-            app.state.rack_pos = (1240.0, 100.0);
+            // The rack beside the piano roll.
+            if !song {
+                app.state.wins[0].rect = Rect::new(1240.0, 100.0, 660.0, 470.0);
+            }
             frame(&mut app, &mut a, None);
             let grid = if song { app.pl_grid } else { app.piano_grid }.expect("grid shown");
             // Starting playback repaints everything; then each tick only damages.
@@ -11555,8 +11663,7 @@ mod tests {
             ws.maxed = false;
             ws.rect = r;
         }
-        app.state.z = vec![Win::PianoRoll, Win::Playlist, Win::ChannelRack];
-        app.state.rack_pos = (1240.0, 100.0);
+        app.state.z = vec![Win::PianoRoll, Win::Playlist];
         frame(&mut app, &mut a, None);
         let _ = app.take_damage();
         let pl = app.state.win_area(Win::Playlist);
@@ -11920,26 +12027,27 @@ mod tests {
         app.state.playlist.popup = None;
         full(&mut app, &mut a);
 
-        // Windows over the playlist: a piano roll and the channel rack.
+        // Windows over the playlist: a piano roll and the Tempo tapper.
         let ws = &mut app.state.wins[Win::PianoRoll.slot().unwrap()];
         ws.maxed = false;
         ws.rect = Rect::new(g.x - 60.0, g.bottom() - 220.0, 700.0, 400.0);
-        app.state.z = vec![Win::Playlist, Win::PianoRoll, Win::ChannelRack];
-        app.state.rack_pos = (g.right() - 380.0, g.y + 120.0);
+        app.state.z = vec![Win::Playlist, Win::PianoRoll, Win::Tapper];
+        app.state.tapper.pos = (g.right() - 380.0, g.y + 120.0);
         full(&mut app, &mut a);
         assert_eq!(app.top_hit(over_grid.0, over_grid.1).map(|h| h.action.clone()), Some(Action::PlaylistArea), "the mouse is over the grid");
         // They did not change: the insides of their frames keep their pixels (their edges and what they uncover paint).
-        let insides = [views::rack::rect(&app.state).inset(3.0), app.state.win_rect(Win::PianoRoll).inset(3.0)];
+        let insides = [views::tapper::rect(&app.state).inset(3.0), app.state.win_rect(Win::PianoRoll).inset(3.0)];
         for (what, dx, dy) in [("covered: down", 0.0, -1.0), ("covered: right", -2.0, 0.0), ("covered: up", 0.0, 2.0), ("covered: left", 1.0, 0.0)] {
             app.wheel(dx, dy, false, false);
             let region = check(&mut app, &mut a, &mut b, what, Some(true), false);
             for inside in insides {
                 let painted: f32 = region.iter().map(|r| r.intersect(&inside)).map(|r| r.w * r.h).sum();
-                assert!(painted < inside.w * inside.h / 10.0, "{what} at {scale}: painted {painted} px² inside {inside:?}: {region:?}");
+                // The frames' edges paint: on the small tapper they are a fifth of it.
+                assert!(painted < inside.w * inside.h / 5.0, "{what} at {scale}: painted {painted} px² inside {inside:?}: {region:?}");
             }
         }
         // (The press raises the playlist; put the windows back over it.)
-        let covered = vec![Win::Playlist, Win::PianoRoll, Win::ChannelRack];
+        let covered = vec![Win::Playlist, Win::PianoRoll, Win::Tapper];
         app.mouse_down_middle();
         app.state.z = covered.clone();
         full(&mut app, &mut a);
@@ -11951,10 +12059,10 @@ mod tests {
         // A window over the playlist moving after a step, before the paint: its old pixels moved with the step.
         assert!(app.playlist_covers().len() > 1, "windows over the playlist");
         app.wheel(0.0, -1.0, false, false);
-        let old = app.win_bounds(Win::ChannelRack);
-        app.state.rack_pos.1 += 90.0;
+        let old = app.win_bounds(Win::Tapper);
+        app.state.tapper.pos.1 += 90.0;
         app.damage_rect(old);
-        app.damage_rect(app.win_bounds(Win::ChannelRack));
+        app.damage_rect(app.win_bounds(Win::Tapper));
         check(&mut app, &mut a, &mut b, "covered: a window moved after a step", Some(true), false);
 
         // Random steps: one to three wheel steps a frame, the mouse wandering over the grid (hover changes), playback.
@@ -14632,6 +14740,7 @@ mod tests {
     fn shift_wheel_moves_a_channel() {
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let mut app = App::new(None);
+        app.state.raise(Win::ChannelRack);
         frame(&mut app, &mut c, None);
         let order = |app: &App| (0..app.state.project.channels.len()).map(|r| crate::rack::channel_name(&app.state, r)).collect::<Vec<_>>();
         let b = order(&app);
@@ -14666,17 +14775,12 @@ mod tests {
         let mut b = Canvas::new(1920, 1080, 1.0).unwrap();
         let mut app = App::new(None);
         frame(&mut app, &mut a, None);
-        // Clicking the playlist next to the rack puts the rack behind it; F6 brings it back.
-        let rack = views::rack::rect(&app.state);
-        click(&mut app, &mut a, Rect::new(rack.right() + 50.0, rack.y + 100.0, 2.0, 2.0));
-        assert_eq!(app.state.z.last(), Some(&Win::Playlist));
-        let over = (rack.right() - 60.0, rack.y + 100.0); // inside both windows
-        assert_eq!(app.top_hit(over.0, over.1).and_then(|h| h.win), Some(Win::Playlist), "the playlist covers the rack there");
+        // The toolbar's button shows the rack, which takes the Arranger's place, and hides it from the front.
         app.act(Action::ToggleWin(Win::ChannelRack));
         frame(&mut app, &mut a, None);
-        assert_eq!(app.state.z.last(), Some(&Win::ChannelRack));
+        assert_eq!(app.state.z, vec![Win::ChannelRack]);
         app.act(Action::ToggleWin(Win::ChannelRack));
-        assert!(!app.state.shown(Win::ChannelRack), "F6 on the front rack hides it");
+        assert!(!app.state.shown(Win::ChannelRack), "on the front rack it hides it");
         app.act(Action::ToggleWin(Win::ChannelRack));
         frame(&mut app, &mut a, None);
 
@@ -14705,14 +14809,12 @@ mod tests {
         assert_eq!(app.state.project.channels[0].mixer_track, t0 + 2, "10 px per insert (§12)");
         step(&mut app, &mut a, &|ap| ap.mouse_up());
 
-        // Resize from the corner: wider shows more steps, taller more room.
-        let r = views::rack::rect(&app.state);
-        step(&mut app, &mut a, &|ap| { ap.mouse_move(r.right() - 2.0, r.bottom() - 2.0); });
-        assert_eq!(app.cursor(), Cursor::NwseResize);
-        step(&mut app, &mut a, &|ap| ap.mouse_down());
-        step(&mut app, &mut a, &|ap| { ap.mouse_move(r.right() + 318.0, r.bottom() + 58.0); });
-        step(&mut app, &mut a, &|ap| ap.mouse_up());
-        assert_eq!(app.state.rack_size, (views::rack::DEFAULT_SIZE.0 + 320.0, 306.0));
+        // The steps fill the page: a maximized window shows many, a resized one as many as fit.
+        assert!(views::rack::visible_steps(&app.state) > 60);
+        app.state.wins[0] = WinState { rect: Rect::new(300.0, 100.0, 859.0, 500.0), maxed: false, mini: false };
+        let d = crate::rack::NAME_W - crate::rack::FL_NAME_W;
+        app.state.wins[0].rect.w = 819.0 + d + 14.0; // the floating frame's sides
+        frame(&mut app, &mut a, None);
         assert_eq!(views::rack::visible_steps(&app.state), 36);
         frame(&mut app, &mut b, None);
         assert_same(&a, &b, "after mixer drag and resize");
@@ -14723,21 +14825,11 @@ mod tests {
         click(&mut app, &mut a, hr);
         assert_eq!(crate::rack::pattern_steps(&app.state), 32);
 
-        // Sizes snap to whole steps / rows (FL's widths plus the wider name button), down to four beats of the
-        // project's signature but never under 16 steps (the title bar's buttons would collide), and one row.
-        let d = crate::rack::NAME_W - crate::rack::FL_NAME_W;
-        assert_eq!(views::rack::snap_size(&app.state, 822.0 + d, 300.0), (819.0 + d, 306.0));
-        assert_eq!(views::rack::snap_size(&app.state, 10.0, 10.0), (499.0 + d, 126.0));
-        let keep = app.state.rack_size;
-        app.state.rack_size = (499.0 + d, 126.0);
-        assert_eq!(views::rack::visible_steps(&app.state), 16);
-        app.state.rack_size = keep;
-        let bar = app.state.project.bar;
-        app.state.project.bar = Some((2, 8));
-        assert_eq!(views::rack::snap_size(&app.state, 10.0, 10.0), (499.0 + d + 16.0 * views::rack::STEP_W, 126.0));
-        app.state.project.bar = Some((6, 2));
-        assert_eq!(views::rack::snap_size(&app.state, 10.0, 10.0), (499.0 + d, 126.0));
-        app.state.project.bar = bar;
+        // The smallest window still has the default 16 steps, so the title bar's buttons do not collide.
+        let keep = app.state.wins[0].rect;
+        app.state.wins[0].rect.w = Win::Playlist.min_size().0;
+        assert!(views::rack::visible_steps(&app.state) >= 16);
+        app.state.wins[0].rect = keep;
 
         // Piano-roll view toggle: rows become mini rolls; clicking one opens the Piano roll.
         assert!(!app.hits.iter().any(|h| matches!(h.action, Action::RackRoll(_))));
@@ -14767,10 +14859,8 @@ mod tests {
         }
         assert_eq!(app.state.project.channels.len(), n + 6);
         assert_eq!(app.state.project.channels.last().unwrap().mixer_track, 11, "after the highest insert in use (5)");
-        // Auto resize (minimum height, §7) grows the rack with its rows; with it off the rows overflow into a scroll bar.
-        assert!(app.bar(Scroll::RackY).is_none_or(|b| b.max == 0.0), "auto resize fits the rows");
-        app.state.rack.auto_resize = crate::rack::AutoResize::Off;
-        app.state.rack_size.1 = 200.0;
+        // A window too low for the rows: they overflow into a scroll bar.
+        app.state.wins[0].rect.h = 260.0;
         frame(&mut app, &mut a, None);
         assert!(app.bar(Scroll::RackY).is_some_and(|b| b.max > 0.0));
     }
@@ -17087,10 +17177,9 @@ mod tests {
         let Ok(mut a) = Canvas::new(1920, 1080, 1.0) else { return };
         let mut b = Canvas::new(1920, 1080, 1.0).unwrap();
         let mut app = App::new(None);
-        app.state.z = vec![Win::PianoRoll, Win::ChannelRack];
+        app.state.z = vec![Win::PianoRoll];
         app.state.wins[2].maxed = true;
         app.state.selected_channel = 4;
-        app.state.rack_pos = (900.0, 300.0);
         frame(&mut app, &mut a, None);
         let _ = app.take_damage();
         fn step(app: &mut App, c: &mut Canvas, f: impl FnOnce(&mut App)) {
@@ -18485,6 +18574,7 @@ mod tests {
         assert_eq!(app.state.z, vec![Win::PianoRoll]);
         // A click on the empty workspace leaves no window focused: Ctrl+F12 closes them all.
         app.state.z = vec![Win::ChannelRack];
+        app.state.wins[0] = WinState { rect: Rect::new(320.0, 150.0, 800.0, 400.0), maxed: false, mini: false };
         frame(&mut app, &mut c, None);
         let work = app.state.work_rect();
         app.mouse_move(work.right() - 20.0, work.bottom() - 20.0);
@@ -19608,7 +19698,6 @@ mod tests {
         let mut app = App::new(None);
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         app.state.rack_roll_view = true;
-        app.state.rack_size.0 = views::rack::DEFAULT_SIZE.0 + 320.0;
         let ch = app.state.project.channels[1].index;
         let ps = crate::rack::per_step(&app.state);
         let n = app.state.pattern.max(1);
@@ -21568,7 +21657,6 @@ mod tests {
         app.state.project.patterns[0].markers = vec![sig];
         app.state.project.patterns[0].length = None;
         crate::rack::run(&mut app, crate::rack::RCmd::SetFilter(crate::rack::Filter::All));
-        app.state.rack_size.0 = views::rack::DEFAULT_SIZE.0 + 320.0;
         app.state.raise(Win::ChannelRack);
         save(&mut app, &mut c, "15_rack_38");
         app.state.rack_roll_view = true;

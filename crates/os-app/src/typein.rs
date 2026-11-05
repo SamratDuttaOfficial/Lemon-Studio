@@ -28,6 +28,46 @@ pub enum Target {
     RackTrack(usize),
     /// The mute LED of the channel on rack row `.0`: "On" (playing) or "Off" (muted) (Lemon Studio's design, as above).
     RackLed(usize),
+    /// The toolbar's tempo, in BPM.
+    Tempo,
+    /// The pattern selector: the number of the pattern to select.
+    Pattern,
+    /// The rack's pattern length box, in steps; 0 or "Auto" for Auto.
+    RackLen,
+    /// The loop box of rack row `.0`, in steps.
+    RackLoop(usize),
+    /// A number of the Advanced fill dialog: its sequence length, or (`true`) its step count or interval.
+    Fill(bool),
+    /// A number box of the settings window, by its label (`views::settings::number_range`).
+    Setting(&'static str),
+    /// Settings ▸ MIDI's Port and offset boxes.
+    Midi(crate::views::midi_page::MAct),
+    /// The Remote control settings box's value boxes.
+    Link(crate::remote::RAct),
+    /// A number box of a channel's Misc page: rack row, value.
+    Misc(usize, crate::misc_page::M),
+    /// General ▸ Display's PPI ruler.
+    Ppi,
+}
+
+impl Target {
+    /// One of the plain number boxes, whose menu says "Input a number...".
+    pub fn is_number(self) -> bool {
+        unit(self) == Unit::Number || matches!(self, Target::RackTrack(_))
+    }
+}
+
+/// The menu entry of a number box that opens the value box.
+pub const INPUT_LABEL: &str = "Input a number...";
+
+/// That entry for `t`.
+pub fn input_item(t: Target) -> crate::playlist::PItem {
+    crate::playlist::PItem::new(INPUT_LABEL, crate::playlist::Cmd::TypeIn(t))
+}
+
+/// The right-click menu of a number box with nothing else to offer.
+pub fn input_menu(t: Target, x: f32, y: f32) -> crate::playlist::Popup {
+    crate::playlist::Popup { x, y, items: vec![input_item(t)], sub: None, scroll: [0; 2] }
 }
 
 /// The units a latency setting is typed in: Set in ms / samples / beats.
@@ -98,6 +138,8 @@ enum Unit {
     Track,
     /// A rack row's mute LED: "On" / "Off" (no value mode).
     Switch,
+    /// A plain number box: the value as it reads in the box (no value mode).
+    Number,
 }
 
 /// The gain laws of the dB controls (spec: audio/gain-laws.md).
@@ -122,6 +164,7 @@ fn unit(t: Target) -> Unit {
         Target::Latency(..) => Unit::Latency,
         Target::RackTrack(_) => Unit::Track,
         Target::RackLed(_) => Unit::Switch,
+        Target::Tempo | Target::Pattern | Target::RackLen | Target::RackLoop(_) | Target::Fill(_) | Target::Setting(_) | Target::Midi(_) | Target::Link(_) | Target::Misc(..) | Target::Ppi => Unit::Number,
     }
 }
 
@@ -132,7 +175,7 @@ pub fn mode_button(t: Target) -> Option<(&'static str, &'static str)> {
         Unit::Pan | Unit::Sep => Some(("C", "Centered")),
         Unit::Db(_) => Some(("dB", "dB")),
         Unit::Percent => Some(("%", "%")),
-        Unit::Hz | Unit::Plain | Unit::Latency | Unit::Track | Unit::Switch => None,
+        Unit::Hz | Unit::Plain | Unit::Latency | Unit::Track | Unit::Switch | Unit::Number => None,
     }
 }
 
@@ -143,7 +186,7 @@ pub fn width(t: Target) -> f32 {
 /// The mode a box opens in: the remembered one, or the only one it has.
 fn opening_norm(t: Target, remembered: bool) -> bool {
     match unit(t) {
-        Unit::Hz | Unit::Latency | Unit::Track | Unit::Switch => false,
+        Unit::Hz | Unit::Latency | Unit::Track | Unit::Switch | Unit::Number => false,
         Unit::Plain => true,
         _ => remembered,
     }
@@ -163,6 +206,21 @@ pub fn caption(s: &State, t: Target) -> String {
         Target::Latency(m, input, u) => format!("{} - {} latency ({})", crate::mixer::name(s, m), if input { "Input" } else { "Track" }, u.name()),
         Target::RackTrack(_) => "Target mixer track".into(),
         Target::RackLed(_) => "Channel on / off".into(),
+        Target::Tempo => return "Tempo (BPM)".into(),
+        Target::Pattern => return "Pattern number".into(),
+        Target::RackLen => return "Pattern length in steps (0: Auto)".into(),
+        Target::RackLoop(_) => return "Loop length in steps".into(),
+        Target::Fill(false) => return "Sequence length".into(),
+        Target::Fill(true) => return if s.rack.fill.as_ref().is_some_and(|f| f.kind == crate::rack::FillType::Euclid) { "Step count".into() } else { "Interval".into() },
+        Target::Setting(label) => return label.to_string(),
+        Target::Midi(crate::views::midi_page::MAct::Offset(_)) => return "Offset in ms".into(),
+        Target::Midi(_) => return "Port number (---: none)".into(),
+        Target::Link(crate::remote::RAct::Port) => return "MIDI input port number (---: any device)".into(),
+        Target::Link(crate::remote::RAct::Channel) => return "MIDI channel number".into(),
+        Target::Link(crate::remote::RAct::Ctrl) => return "Continuous Controller number".into(),
+        Target::Link(_) => return "Smoothing time in ms".into(),
+        Target::Misc(..) => return "Value".into(),
+        Target::Ppi => return "Pixels per inch".into(),
     };
     format!("Value for {name}")
 }
@@ -206,6 +264,22 @@ pub(crate) fn get(s: &State, t: Target) -> Option<f64> {
         Target::Latency(m, input, _) => crate::mixer::track(s, m).map(|t| f64::from(if input { t.latency_in } else { t.latency_out })),
         Target::RackTrack(r) => s.project.channels.get(r).map(|c| f64::from(c.mixer_track)),
         Target::RackLed(r) => s.project.channels.get(r).map(|c| if c.enabled { 1.0 } else { 0.0 }),
+        Target::Tempo => Some(s.tempo),
+        Target::Pattern => Some(f64::from(s.pattern.max(1))),
+        Target::RackLen => Some(f64::from(crate::rack::len_value(s))),
+        Target::RackLoop(r) => Some(f64::from(crate::rack::loop_box_value(s, r))),
+        Target::Fill(amount) => s.rack.fill.as_ref().map(|f| f64::from(if amount { f.amount } else { f.len })),
+        Target::Setting(label) => match crate::prefs::find_number(label) {
+            Some(n) => Some(f64::from(crate::prefs::number(n))),
+            None => {
+                let (beats, steps) = s.project.bar();
+                Some(f64::from(if label == crate::views::settings::BEATS_PER_BAR { beats } else { steps }))
+            }
+        },
+        Target::Midi(m) => crate::midi_play::box_value(s, m),
+        Target::Link(r) => crate::remote::box_value(s, r),
+        Target::Misc(row, m) => s.project.channels.get(row).map(|c| f64::from(crate::misc::get(&c.misc, m))),
+        Target::Ppi => Some(f64::from(crate::ppi::ppi(s.display_scale))),
     }
 }
 
@@ -248,6 +322,24 @@ fn set(s: &mut State, t: Target, v: f64) {
                 crate::rack::toggle_mute(s, r);
             }
         }
+        // One undo step, as a drag on the box.
+        Target::Tempo => crate::control::edit(s, crate::control::command::TEMPO, crate::control::command::Region::Settings, |s| {
+            s.tempo = ((v * 1000.0).round() / 1000.0).clamp(10.0, 522.0);
+            s.piano.dirty = true;
+        }),
+        Target::Pattern => crate::patterns::select(s, v.round().clamp(1.0, f64::from(crate::patterns::MAX)) as u16),
+        Target::RackLen => {
+            let steps = v.round().max(0.0) as u32;
+            crate::rack::set_len(s, (steps > 0).then_some(steps));
+        }
+        Target::RackLoop(r) => s.message = Some(crate::rack::set_loop_box(s, r, v.round() as i32)),
+        Target::Fill(amount) => {
+            let Some(now) = get(s, t) else { return };
+            let d = (v.round() - now) as i32;
+            crate::rack::fill_hit(s, if amount { crate::rack::FillHit::Amount(d) } else { crate::rack::FillHit::Len(d) });
+        }
+        // These need the app (`App::typein_settle`).
+        Target::Setting(_) | Target::Midi(_) | Target::Link(_) | Target::Misc(..) | Target::Ppi => s.playlist.typed = Some((t, v)),
     }
 }
 
@@ -293,6 +385,12 @@ pub fn text(s: &State, t: Target, norm: bool) -> String {
     if norm {
         return short(n, 4);
     }
+    // What the box itself shows where it is a word.
+    match t {
+        Target::RackLen if n == 0.0 => return "Auto".into(),
+        Target::Midi(crate::views::midi_page::MAct::OutPort | crate::views::midi_page::MAct::InPort) | Target::Link(crate::remote::RAct::Port | crate::remote::RAct::Ctrl) if n < 0.0 => return "---".into(),
+        _ => {}
+    }
     let bipolar = (n - 0.5) * 2.0;
     match unit(t) {
         Unit::Pan => crate::knobs::pan_text(bipolar as f32),
@@ -306,6 +404,7 @@ pub fn text(s: &State, t: Target, norm: bool) -> String {
         Unit::Track => crate::views::rack::insert_name(n as u16),
         Unit::Switch => if n >= 0.5 { "On" } else { "Off" }.into(),
         Unit::Plain | Unit::Latency => short(n, 4),
+        Unit::Number => short(n, 3),
     }
 }
 
@@ -393,6 +492,20 @@ pub fn parse(t: Target, norm: bool, text: &str) -> Option<f64> {
                 "on" | "unmute" | "unmuted" => Some(1.0),
                 "off" | "mute" | "muted" => Some(0.0),
                 _ => number(&w).map(|(v, pct)| if (if pct { v / 100.0 } else { v }) >= 0.5 { 1.0 } else { 0.0 }),
+            }
+        }
+        // The number as the box shows it, with the word its box shows instead of one, or the tempo's unit after it.
+        Unit::Number => {
+            let word = text.to_ascii_lowercase();
+            match (t, word.as_str()) {
+                (Target::RackLen, "auto") => return Some(0.0),
+                (Target::Midi(crate::views::midi_page::MAct::OutPort | crate::views::midi_page::MAct::InPort) | Target::Link(crate::remote::RAct::Port | crate::remote::RAct::Ctrl), "---" | "-" | "none" | "any") => return Some(-1.0),
+                _ => {}
+            }
+            let body = if t == Target::Tempo { strip_suffix_ci(text, "bpm") } else { text };
+            match number(body)? {
+                (_, true) => None,
+                (v, false) => Some(v),
             }
         }
         Unit::Plain | Unit::Latency => None,
@@ -505,5 +618,31 @@ mod tests {
         assert_eq!(short(466.16376151809, 11), "466.16376151809");
         assert_eq!(short(0.5, 4), "0.5");
         assert_eq!(short(1.0, 4), "1");
+    }
+
+    /// The plain number boxes read a number, and the word their box shows for its special value.
+    #[test]
+    fn number_boxes_read_numbers_and_their_words() {
+        use crate::remote::RAct;
+        use crate::views::midi_page::MAct;
+        assert_eq!(parse(Target::Tempo, false, "128"), Some(128.0));
+        assert_eq!(parse(Target::Tempo, false, "128.5 BPM"), Some(128.5));
+        assert_eq!(parse(Target::Tempo, false, "fast"), None);
+        assert_eq!(parse(Target::Tempo, false, "50%"), None, "a percent is not a tempo");
+        assert_eq!(parse(Target::Pattern, false, "7"), Some(7.0));
+        assert_eq!(parse(Target::RackLen, false, "32"), Some(32.0));
+        assert_eq!(parse(Target::RackLen, false, "auto"), Some(0.0));
+        assert_eq!(parse(Target::Link(RAct::Port), false, "---"), Some(-1.0));
+        assert_eq!(parse(Target::Midi(MAct::OutPort), false, "none"), Some(-1.0));
+        assert_eq!(parse(Target::Link(RAct::Port), false, "12"), Some(12.0));
+        assert_eq!(parse(Target::Pattern, false, "---"), None, "a word only where its box shows it");
+        assert_eq!(parse(Target::Pattern, false, ""), None);
+        assert_eq!(parse(Target::Setting("x"), false, "16"), Some(16.0));
+        for t in [Target::Tempo, Target::Pattern, Target::RackLen, Target::RackLoop(0), Target::Fill(true), Target::Ppi, Target::RackTrack(0)] {
+            assert!(t.is_number(), "{t:?}");
+            assert_eq!(mode_button(t), None, "{t:?} has no value mode");
+        }
+        assert!(!Target::Knob(KnobId::ChanVol(0)).is_number());
+        assert!(!Target::RackLed(0).is_number());
     }
 }

@@ -28,6 +28,7 @@ pub mod export_form;
 pub mod save_form;
 pub mod arpeggiate;
 pub mod strum;
+pub mod tabs;
 pub mod piano_dlg;
 pub mod tapper;
 pub mod touch;
@@ -207,7 +208,7 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
         let a = paint_area(s, win);
         ui.c.push_clip(a);
         match win {
-            Win::Playlist => ui.part(Seg::Win(win), a, |ui| playlist::paint(ui, s, r, f)),
+            Win::Playlist | Win::ChannelRack => ui.part(Seg::Win(win), a, |ui| tabs::paint(ui, s, win, r, f)),
             Win::Mixer => ui.part(Seg::Win(win), a, |ui| {
                 // Timed while the cables swing: a mixer too slow to redraw them hangs them still. Not in tests: they
                 // paint while the rest of the suite runs, and on a busy machine the clock would hang the cables (and
@@ -219,7 +220,6 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
                 }
             }),
             Win::PianoRoll => ui.part(Seg::Win(win), a, |ui| piano::paint(ui, s, r, f)),
-            Win::ChannelRack => ui.part(Seg::Win(win), a, |ui| rack::paint(ui, s, f)),
             Win::Plugin => ui.part(Seg::Win(win), a, |ui| channel_win::paint(ui, s, f)),
             Win::Perf => ui.part(Seg::Win(win), a, |ui| perf::paint(ui, s, f)),
             Win::Tapper => ui.part(Seg::Win(win), a, |ui| tapper::paint(ui, s, f)),
@@ -243,6 +243,7 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
     if s.toolbar.hint_bar {
         toolbar::paint_hint_bar(ui, s, f);
     }
+    tabs::paint_tip(ui, s);
     let overlays = ui.hit_count();
     // The toolbar editor's palette goes over the windows, which docked plugin windows leave free like any overlay (spec:
     // ui/toolbar-menu.md §8).
@@ -255,7 +256,7 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
     }
     // A menu opened from the settings window (Audio page combos) goes over it; a dropdown's submenu over the dropdown;
     // the time signature dialog's value lists over the dialog.
-    let over_dialog = crate::timesig::form_open(s);
+    let over_dialog = crate::timesig::form_open(s) || crate::remote::is_open(s) || s.rack.fill.is_some();
     if !s.settings.open && !over_dialog {
         playlist::paint_overlays(ui, s);
     }
@@ -288,11 +289,10 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
     overlays
 }
 
-/// Where window `w` paints: its rect (and the channel rack's graph editor hanging below it). The resize zones past
-/// its edges are hits only. A repaint that misses this skips the window; a playlist scroll paints around it.
+/// Where window `w` paints: its rect. The resize zones past its edges are hits only. A repaint that misses this skips
+/// the window; a playlist scroll paints around it.
 pub fn paint_area(s: &State, w: Win) -> Rect {
     match w {
-        Win::ChannelRack => rack::paint_area(s),
         Win::Plugin => channel_win::rect(s),
         Win::Perf => perf::bounds(s),
         Win::Tapper => tapper::bounds(s),
@@ -410,19 +410,35 @@ pub fn float_frame(ui: &mut Ui, s: &State, win: Win, r: Rect) -> Option<Rect> {
     Some(inner)
 }
 
-/// The (layout rect, client rect) that `framed` returns for `win` at `r`, without painting.
+/// Height of the tab strip at the top of the Arranger's window: a title bar's, so it is all a collapsed window shows.
+pub const TAB_H: f32 = crate::app::TITLE_H;
+
+/// `r` below the tab strip for a tab of the Arranger's window; `r` for any other window.
+fn below_tabs(win: Win, r: Rect) -> Rect {
+    if win.is_tab() { Rect::new(r.x, r.y + TAB_H, r.w, (r.h - TAB_H).max(0.0)) } else { r }
+}
+
+/// The (layout rect, client rect) that `framed` returns for `win` at `r`, without painting. For a tab of the Arranger's
+/// window the layout rect is its page, under the tab strip.
 pub fn frame_rects(s: &State, win: Win, r: Rect) -> (Rect, Rect) {
     let floats = win.slot().is_some_and(|i| !s.wins[i].maxed && !s.wins[i].mini) && r.h >= 2.0 * crate::app::TITLE_H;
     let r = if floats { Rect::new(r.x + 7.0, r.y + 5.0, r.w - 14.0, r.h - 12.0) } else { r };
-    (r, Rect::new(r.x, r.y + 23.0, r.w, r.h - 23.0))
+    let r = below_tabs(win, r);
+    (r, Rect::new(r.x, r.y + 23.0, r.w, (r.h - 23.0).max(0.0)))
 }
 
 /// Window frame for `win`: the floating frame when it floats, else the docked title bar.
 /// Returns (layout rect, client rect).
 pub fn framed(ui: &mut Ui, s: &State, win: Win, r: Rect, title: &str, title_x: f32, buttons: bool) -> (Rect, Rect) {
     match float_frame(ui, s, win, r) {
-        Some(inner) => (inner, window_frame_ex(ui, win, inner, title, title_x, buttons, true)),
-        None => (r, window_frame(ui, win, r, title, title_x, buttons)),
+        Some(inner) => {
+            let inner = below_tabs(win, inner);
+            (inner, window_frame_ex(ui, win, inner, title, title_x, buttons, true))
+        }
+        None => {
+            let r = below_tabs(win, r);
+            (r, window_frame(ui, win, r, title, title_x, buttons))
+        }
     }
 }
 

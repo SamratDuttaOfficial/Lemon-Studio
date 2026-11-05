@@ -6,7 +6,7 @@
 //! folder index, and the menu bar's ways in.
 // spec: ui/browser.md, ui/browser-commands.md
 
-use os_model::{ChannelKind, ClipSource};
+use os_model::ClipSource;
 
 use crate::app::{Action, App, Drag, Win};
 use crate::playlist::{Cmd, Mark, PItem, Popup};
@@ -396,12 +396,21 @@ impl App {
         }
         if !started {
             self.drag = Some(Drag::Browser { item, label: label.clone(), m0, started: true });
+            // It was a drag: the press on a channel's name button no longer clicks it.
+            self.armed = None;
         }
         if let Some((_, ox, oy)) = self.state.browser_drag {
             self.damage_rect(view::ghost_rect(ox, oy));
         }
         self.state.browser_drag = Some((label, x, y));
         self.damage_rect(view::ghost_rect(x, y));
+        // Carried over a tab of the Arranger's window, the tab opens, so the item can be dropped on its page.
+        if let Some(Action::PanelTab(w)) = self.top_hit(x, y).map(|h| h.action.clone())
+            && !self.state.shown(w)
+        {
+            self.state.raise(w);
+            self.invalidate();
+        }
     }
 
     /// Release: drop the dragged item on whatever is under the mouse (spec §3).
@@ -446,18 +455,10 @@ impl App {
                 }
             }
             Item::Channel(c) => {
-                let Some(ch) = s.project.channels.get(c) else { return };
-                let (kind, index) = (ch.kind, ch.index);
                 if let Some((track, tick)) = spot {
-                    if matches!(kind, ChannelKind::AudioClip | ChannelKind::Automation) {
-                        pl::snapshot(s);
-                        s.playlist.source = Some(ClipSource::Channel(index));
-                        s.playlist.picker = if kind == ChannelKind::AudioClip { PickKind::Audio } else { PickKind::Automation };
-                        let i = pl::place(s, track, tick);
-                        s.playlist.sel = vec![i];
-                    } else {
-                        s.message = Some("Only audio and automation channels go on the arranger; drop a pattern instead".into());
-                    }
+                    pl::snapshot(s);
+                    s.playlist.sel.clear();
+                    s.message = pl::place_channel(s, c, track, tick);
                 } else if matches!(win, Some(Win::PianoRoll | Win::ChannelRack)) {
                     s.selected_channel = c;
                     s.rack.select_only(c);

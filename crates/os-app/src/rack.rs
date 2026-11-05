@@ -49,15 +49,6 @@ pub enum Filter {
     Unsorted,
 }
 
-/// Options > Auto resize (§17).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum AutoResize {
-    Off,
-    #[default]
-    Min,
-    Max,
-}
-
 /// Graph editor tabs (§14).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Tab {
@@ -228,7 +219,8 @@ pub struct RackUi {
     pub show_mixer: bool,
     pub colorful: bool,
     pub align_left: bool,
-    pub auto_resize: AutoResize,
+    /// The rows Ctrl+C copied, when that was the last copy: Ctrl+V on the Arranger puts clips of them there.
+    pub copied: Vec<usize>,
     pub graph_open: bool,
     pub graph_tab: Tab,
     pub loop_mode: bool,
@@ -276,7 +268,7 @@ impl Default for RackUi {
             show_mixer: true,
             colorful: false,
             align_left: false,
-            auto_resize: AutoResize::Min,
+            copied: Vec::new(),
             graph_open: false,
             graph_tab: Tab::Vel,
             loop_mode: false,
@@ -305,9 +297,9 @@ impl RackUi {
 
     /// Back to the defaults for a new or opened project (view options stay).
     pub fn reset(&mut self) {
-        let keep = (self.name_pct, self.show_mixer, self.colorful, self.align_left, self.auto_resize, self.opts.clone());
+        let keep = (self.name_pct, self.show_mixer, self.colorful, self.align_left, self.opts.clone());
         *self = RackUi::default();
-        (self.name_pct, self.show_mixer, self.colorful, self.align_left, self.auto_resize, self.opts) = keep;
+        (self.name_pct, self.show_mixer, self.colorful, self.align_left, self.opts) = keep;
     }
 
     /// Follow a channel renumbering (`m(old row) = new row`, `None` = removed).
@@ -319,6 +311,7 @@ impl RackUi {
         for g in &mut self.groups {
             g.members = set(&g.members);
         }
+        self.copied = self.copied.iter().filter_map(|&r| m(r)).collect();
         self.soloed = self.soloed.and_then(m);
         self.pre_solo = None; // rows renumbered: unsolo turns everything on
         self.loop_len = self.loop_len.iter().filter_map(|(&r, &l)| m(r).map(|n| (n, l))).collect();
@@ -623,7 +616,6 @@ pub fn filter_tick(s: &mut State) -> bool {
         return false;
     }
     s.rack.filter = s.rack.groups.iter().position(|g| g.members.contains(&r)).map_or(Filter::Unsorted, Filter::Group);
-    autosize(s);
     true
 }
 
@@ -820,7 +812,6 @@ pub fn join_group(s: &mut State, r: usize, name: &str) {
     };
     rack.groups[g].members.insert(r);
     rack.filter = Filter::Group(g);
-    autosize(s);
 }
 
 pub(crate) fn channel_name(s: &State, r: usize) -> String {
@@ -940,7 +931,6 @@ impl App {
             let s = &mut self.state;
             let zipped: BTreeSet<usize> = used.iter().enumerate().filter(|&(_, &u)| !u).map(|(r, _)| r).collect();
             s.rack.zipped = if zipped.len() == used.len() { BTreeSet::new() } else { zipped };
-            autosize(s);
             self.invalidate();
         }
         if crate::prefs::check(&crate::prefs::SELECT_FIRST_CHANNEL) {
@@ -1032,32 +1022,6 @@ pub fn transpose_selected(s: &mut State, semis: i32) {
     s.piano.dirty = true;
 }
 
-/// Window height for Auto resize (§17): Minimum = fit the shown rows; Maximum = down to the screen bottom.
-pub fn auto_height(s: &State) -> Option<f32> {
-    let fit = 96.0 + crate::views::rack::rows_h(s).max(crate::views::rack::ROW_H);
-    let room = (s.screen.1 - s.rack_pos.1 - 4.0).max(crate::views::rack::MIN_H);
-    match s.rack.auto_resize {
-        AutoResize::Off => None,
-        AutoResize::Min => Some(fit.min(room)),
-        AutoResize::Max => Some(room),
-    }
-}
-
-/// Apply Auto resize after the shown rows changed.
-pub fn autosize(s: &mut State) {
-    if let Some(h) = auto_height(s) {
-        s.rack_size.1 = h.max(crate::views::rack::MIN_H);
-    }
-}
-
-/// Keep the step count when a column left of the steps changes width (§17: the window width follows).
-pub fn relayout(s: &mut State, f: impl FnOnce(&mut State)) {
-    let before = crate::views::rack::base_w(s);
-    f(s);
-    let after = crate::views::rack::base_w(s);
-    s.rack_size.0 = (s.rack_size.0 + after - before).max(crate::views::rack::min_w(s));
-}
-
 // ---------------------------------------------------------------------------------------------------------
 // Renumbering (delete, clone, move, sort)
 
@@ -1142,7 +1106,6 @@ pub fn remove_last(s: &mut State) {
 pub fn push_channel(s: &mut State, mut ch: os_model::Channel) {
     ch.index = s.project.channels.len() as u16;
     s.project.channels.push(ch);
-    autosize(s);
 }
 
 /// `reorder` in the project and the app state: `map` gives each row's new row (`None`: the channel goes).
@@ -1173,7 +1136,6 @@ pub(crate) fn remap_ui(s: &mut State, map: &[Option<usize>]) {
     if s.rack.sel.is_empty() && !s.project.channels.is_empty() {
         s.rack.select_only(s.selected_channel);
     }
-    autosize(s);
 }
 
 /// Clone rows (§18): each copy goes right below its channel, named "<name> #2", same settings and mixer track,
@@ -1370,7 +1332,6 @@ pub fn box_accept(s: &mut State, b: RBox, text: &str) {
             let members = if b == RBox::GroupSel { s.rack.sel.clone() } else { BTreeSet::new() };
             s.rack.groups.push(Group { name: text.to_string(), members });
             s.rack.filter = Filter::Group(s.rack.groups.len() - 1);
-            autosize(s);
         }
         RBox::RenameGroup(g) if !text.is_empty() => {
             if let Some(g) = s.rack.groups.get_mut(g) {
@@ -1391,7 +1352,7 @@ pub fn box_accept(s: &mut State, b: RBox, text: &str) {
         RBox::NameWidth => {
             if let Ok(v) = text.trim_end_matches('%').trim().parse::<f32>() {
                 if v.is_finite() {
-                    relayout(s, |s| s.rack.name_pct = v.round().clamp(NAME_PCT_MIN as f32, NAME_PCT_MAX as f32) as u32);
+                    s.rack.name_pct = v.round().clamp(NAME_PCT_MIN as f32, NAME_PCT_MAX as f32) as u32;
                 }
             }
         }
@@ -1488,8 +1449,6 @@ pub enum RCmd {
     StretchClips(bool, i32),
     ZipSel,
     UnzipAll,
-    AutoResize(AutoResize),
-    ResizeNow,
     NameWidth(u32),
     /// Channel button width ▸ Custom: a box for the percent (Lemon Studio's design; the original's entry shows the
     /// dragged width).
@@ -1566,16 +1525,6 @@ pub fn options_menu(s: &State, x: f32, y: f32) -> Popup {
         PItem::sub(
             "Group arranger tracks created by Loop starter",
             vec![PItem::not_yet("Don't group tracks"), PItem::not_yet("Group tracks"), PItem::not_yet("Always create a track for the pattern clip")],
-        ),
-        PItem::sub(
-            "Auto resize",
-            vec![
-                it("Off", RCmd::AutoResize(AutoResize::Off)).mark(Mark::Radio(r.auto_resize == AutoResize::Off)),
-                it("Minimum height", RCmd::AutoResize(AutoResize::Min)).mark(Mark::Radio(r.auto_resize == AutoResize::Min)),
-                it("Maximum height", RCmd::AutoResize(AutoResize::Max)).mark(Mark::Radio(r.auto_resize == AutoResize::Max)),
-                PItem::sep(),
-                it("Resize now", RCmd::ResizeNow),
-            ],
         ),
         opt(s, "Auto switch display filter"),
         PItem::sub("Channel button width", width),
@@ -1786,13 +1735,16 @@ fn value_groups(s: &State, knob: Option<KnobId>, other: Option<crate::typein::Ta
         },
     }
     // spec: ui/type-in-value.md §8
-    v.push(match knob {
-        Some(k) => PItem::new("Enter value...", Cmd::TypeIn(crate::typein::Target::Knob(k))),
-        None => match other {
-            Some(t) => PItem::new("Enter value...", Cmd::TypeIn(t)),
-            None => PItem::not_yet("Enter value..."),
-        },
-    });
+    // A number box has its Input a number... at the top of its menu instead.
+    if !other.is_some_and(|t| t.is_number()) {
+        v.push(match knob {
+            Some(k) => PItem::new("Enter value...", Cmd::TypeIn(crate::typein::Target::Knob(k))),
+            None => match other {
+                Some(t) => PItem::new("Enter value...", Cmd::TypeIn(t)),
+                None => PItem::not_yet("Enter value..."),
+            },
+        });
+    }
     v.push(match (knob, other) {
         (Some(k), _) => PItem::sub("Set...", set_items(s, k)),
         (None, Some(t)) => PItem::sub("Set...", box_set_items(s, t)),
@@ -1852,7 +1804,7 @@ pub fn knob_menu(s: &State, k: KnobId, auto: Option<(u32, String, f64)>, x: f32,
 
 /// Right click on the mixer box (§12).
 pub fn mixer_menu(s: &State, r: usize, x: f32, y: f32) -> Popup {
-    let mut items = vec![it("Reset", RCmd::MixerReset(r))];
+    let mut items = vec![crate::typein::input_item(crate::typein::Target::RackTrack(r)), it("Reset", RCmd::MixerReset(r))];
     items.extend(value_groups(s, None, Some(crate::typein::Target::RackTrack(r)), None));
     items.push(PItem::sep());
     items.push(it("Assign to free mixer track", RCmd::AssignFree(r)));
@@ -1890,7 +1842,7 @@ pub fn filter_edit_menu(s: &State, x: f32, y: f32) -> Popup {
 /// Pattern length box right click (§7).
 pub fn length_menu(s: &State, x: f32, y: f32) -> Popup {
     let (cur, bar) = (explicit_len(s), bar_steps(s));
-    let mut items = vec![PItem::head("Set to"), it("Auto", RCmd::SetLen(None)).mark(Mark::Radio(cur.is_none()))];
+    let mut items = vec![crate::typein::input_item(crate::typein::Target::RackLen), PItem::head("Set to"), it("Auto", RCmd::SetLen(None)).mark(Mark::Radio(cur.is_none()))];
     for bars in [1u32, 2, 4, 8, 16, 32] {
         let label = if bars == 1 { "1 bar".to_string() } else { format!("{bars} bars") };
         items.push(it(label, RCmd::SetLen(Some(bars * bar))).mark(Mark::Radio(cur == Some(bars * bar))));
@@ -2078,6 +2030,7 @@ fn run_now(app: &mut App, c: RCmd) -> Option<String> {
         }
         RCmd::CopySel => {
             copy_rows(s, &sel);
+            s.rack.copied.clone_from(&sel);
             None
         }
         RCmd::PasteSel => {
@@ -2162,7 +2115,6 @@ fn run_now(app: &mut App, c: RCmd) -> Option<String> {
         RCmd::SetFilter(f) => {
             s.rack.filter = f;
             s.rack_scroll = 0.0;
-            autosize(s);
             None
         }
         RCmd::AddGroup => {
@@ -2175,7 +2127,6 @@ fn run_now(app: &mut App, c: RCmd) -> Option<String> {
                     s.rack.groups.remove(g);
                 }
                 s.rack.filter = Filter::All;
-                autosize(s);
             }
             None
         }
@@ -2271,35 +2222,19 @@ fn run_now(app: &mut App, c: RCmd) -> Option<String> {
         }
         RCmd::ZipSel => {
             s.rack.zipped.extend(sel.iter().copied());
-            autosize(s);
             None
         }
         RCmd::UnzipAll => {
             s.rack.zipped.clear();
-            autosize(s);
-            None
-        }
-        RCmd::AutoResize(a) => {
-            s.rack.auto_resize = a;
-            autosize(s);
-            None
-        }
-        RCmd::ResizeNow => {
-            let keep = s.rack.auto_resize;
-            if keep == AutoResize::Off {
-                s.rack.auto_resize = AutoResize::Min;
-            }
-            autosize(s);
-            s.rack.auto_resize = keep;
             None
         }
         RCmd::NameWidth(p) => {
-            relayout(s, |s| s.rack.name_pct = p);
+            s.rack.name_pct = p;
             None
         }
         RCmd::SizeToFit => {
             let w = crate::views::rack::fit_name_w(s);
-            relayout(s, |s| s.rack.name_pct = ((w / NAME_W * 100.0).ceil() as u32).clamp(40, 400));
+            s.rack.name_pct = ((w / NAME_W * 100.0).ceil() as u32).clamp(40, 400);
             None
         }
         RCmd::AlignLeft(l) => {
@@ -2307,7 +2242,7 @@ fn run_now(app: &mut App, c: RCmd) -> Option<String> {
             None
         }
         RCmd::ShowMixer => {
-            relayout(s, |s| s.rack.show_mixer = !s.rack.show_mixer);
+            s.rack.show_mixer = !s.rack.show_mixer;
             None
         }
         RCmd::Colorful => {
@@ -2316,11 +2251,9 @@ fn run_now(app: &mut App, c: RCmd) -> Option<String> {
         }
         // The loop boxes take width (§15).
         RCmd::Opt(label) => {
-            relayout(s, |s| {
-                if !s.rack.opts.remove(label) {
-                    s.rack.opts.insert(label);
-                }
-            });
+            if !s.rack.opts.remove(label) {
+                s.rack.opts.insert(label);
+            }
             None
         }
         RCmd::Clone(_)
@@ -2469,8 +2402,9 @@ pub fn key(app: &mut App, key: &winit::keyboard::Key, ctrl: bool, alt: bool) -> 
             RCmd::SetFilter(all[j])
         }
         Key::Named(NamedKey::Delete) if alt => RCmd::DeleteSel,
+        // Back to the Arranger: the rack is one tab of its window now, and closing it would close both.
         Key::Named(NamedKey::Escape) => {
-            s.hide(Win::ChannelRack);
+            s.raise(Win::Playlist);
             app.invalidate();
             return true;
         }
@@ -2525,6 +2459,9 @@ pub enum FillHit {
     Close,
     /// Fill type combo: Manual -> Fill every -> Euclidean.
     Type,
+    /// A number's box: its sequence length, or (`true`) its step count or interval. The wheel steps it, right-click:
+    /// Input a number.
+    Number(bool),
     Len(i32),
     Amount(i32),
     Rotate(i32),
@@ -2591,7 +2528,7 @@ pub fn fill_hit(s: &mut State, h: FillHit) {
             f.kind = FillType::Manual;
             f.rotate = 0;
         }
-        FillHit::Accept | FillHit::Close | FillHit::Inside => {}
+        FillHit::Accept | FillHit::Close | FillHit::Inside | FillHit::Number(_) => {}
     }
     f.rebuild();
 }
@@ -2777,7 +2714,7 @@ mod tests {
     fn mixer_box_and_led_type_in_value() {
         use crate::typein::{accept, caption, text, Target};
         let mut app = App::new(None);
-        let type_in = |m: Popup| m.items.iter().find(|i| i.label == "Enter value...").map(|i| (i.enabled, i.cmd.clone())).unwrap();
+        let type_in = |m: Popup| m.items.iter().find(|i| i.label == "Enter value..." || i.label == crate::typein::INPUT_LABEL).map(|i| (i.enabled, i.cmd.clone())).unwrap();
         assert_eq!(type_in(mixer_menu(&app.state, 0, 0.0, 0.0)), (true, Cmd::TypeIn(Target::RackTrack(0))));
         assert_eq!(type_in(led_menu(&app.state, 1, 0.0, 0.0)), (true, Cmd::TypeIn(Target::RackLed(1))));
 
@@ -2893,17 +2830,14 @@ mod tests {
         assert_eq!(find(loop_menu(&app.state, 0.0, 0.0), ALWAYS_ADVANCED), (true, Mark::Check(false)));
 
         assert!(!loop_boxes(&app.state));
-        let w = app.state.rack_size.0;
         run(&mut app, RCmd::Opt(ALWAYS_ADVANCED));
         assert_eq!(find(loop_menu(&app.state, 0.0, 0.0), ALWAYS_ADVANCED).1, Mark::Check(true));
         assert!(loop_boxes(&app.state) && !app.state.rack.loop_mode);
-        assert_eq!(app.state.rack_size.0, w + LOOP_W, "room for the boxes");
         app.state.rack.loop_len.insert(1, 5);
         assert_eq!((loop_box_len(&app.state, 1), loop_box_len(&app.state, 0)), (5, pattern_steps(&app.state)));
         assert_eq!(row_len(&app.state, 1), pattern_steps(&app.state), "loop mode off: the length plays no part");
         run(&mut app, RCmd::Opt(ALWAYS_ADVANCED));
         assert!(!loop_boxes(&app.state));
-        assert_eq!(app.state.rack_size.0, w);
     }
 
     /// Mute removed steps: a step turned off keeps its note, muted (the step shows off and stays silent); turned on
@@ -2949,11 +2883,9 @@ mod tests {
             b.text = text.into();
             crate::patterns::accept(&mut app.state);
         };
-        let w = app.state.rack_size.0;
         typed(&mut app, "250%");
         assert_eq!(app.state.rack.name_pct, 250);
         assert_eq!(custom(&app), ("Custom (250%)".to_string(), true, Mark::Radio(true)));
-        assert!(app.state.rack_size.0 > w, "the window widens with the buttons");
         typed(&mut app, "abc");
         assert_eq!(app.state.rack.name_pct, 250);
         typed(&mut app, "1000");
@@ -3038,7 +2970,7 @@ mod tests {
         let s = &mut app.state;
         let last = s.project.channels.len() - 1;
         assert!(last >= 3);
-        s.rack_size.1 = crate::views::rack::MIN_H;
+        s.wins[0] = crate::app::WinState { rect: os_ui::Rect::new(300.0, 200.0, 700.0, 243.0), maxed: false, mini: false };
         s.rack.sel = BTreeSet::from([last]);
         assert!(!focus_tick(s, true), "unticked");
         assert_eq!(s.rack_scroll, 0.0);

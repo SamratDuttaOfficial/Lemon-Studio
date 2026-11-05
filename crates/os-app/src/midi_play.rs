@@ -20,6 +20,17 @@ use crate::record::Extra;
 use crate::step_edit::Src;
 use crate::views::midi_page::{CurveEdit, MAct};
 
+/// A value box's number on Settings ▸ MIDI, as the box shows it (-1 for "---").
+pub fn box_value(s: &crate::app::State, m: MAct) -> Option<f64> {
+    let p = &s.midi;
+    Some(match m {
+        MAct::OutPort => cfg::output(p.selected_output()?).port.map_or(-1.0, f64::from),
+        MAct::InPort => cfg::input(&p.selected_input()?.name).port.map_or(-1.0, f64::from),
+        MAct::Offset(o) => f64::from(cfg::offset(o)),
+        _ => return None,
+    })
+}
+
 /// What Settings > MIDI shows of the devices, kept up to date by `App::midi_tick`.
 #[derive(Debug, Default, Clone)]
 pub struct Page {
@@ -580,6 +591,12 @@ impl App {
             (true, false) => format!("{name}: enabled"),
             (false, _) => format!("{name}: off"),
         });
+    }
+
+    /// A number typed for a value box of the page: the box takes it (a port below 0 is "---").
+    pub(crate) fn midi_page_set(&mut self, m: MAct, v: f64) {
+        let Some(now) = box_value(&self.state, m) else { return };
+        self.midi_page_step(m, Some((v.round() - now) as i32));
     }
 
     /// The wheel (or a drag, or right-click with `reset`) on a value box of the page: `steps` up or down.

@@ -3,14 +3,14 @@
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
 //! Where the windows were when Lemon Studio last closed, put back at the next start: the main window (its restored
-//! frame and whether it was maximized) and, inside it, the Playlist, Mixer and Piano roll (their floating rects and
-//! whether each was maximized or collapsed to its title bar), the Channel rack (its place and size), the Plugin
+//! frame and whether it was maximized) and, inside it, the Arranger's window (with its Instrument rack tab), Mixer and
+//! Piano roll (their floating rects and whether each was maximized or collapsed to its title bar), the Plugin
 //! performance monitor, the Tempo tapper and the Touch controller. App-wide, kept in `settings.txt` (`settings_file`)
 //! as the app closes, never in the project. Which windows are open is not kept: a start shows its usual ones.
 //!
 //! Keys: `window_main` (`x,y,w,h,maximized`: outer top-left and inner size in the units the window system places
 //! windows in, points on macOS and pixels elsewhere), `window_playlist`, `window_mixer`, `window_piano_roll`
-//! (`x,y,w,h,maximized,collapsed`), `window_channel_rack` (`x,y,w,h`), `window_plugin_performance`,
+//! (`x,y,w,h,maximized,collapsed`), `window_plugin_performance`,
 //! `window_tempo_tapper`, `window_touch_controller` (`x,y`); positions inside the main window are logical px, switches
 //! `1` / `0`. A value that cannot be read leaves that window as a first start has it. The first paint keeps every
 //! window's part in the workspace, should the main window be smaller now (`win_clamp`).
@@ -19,11 +19,9 @@ use os_ui::Rect;
 
 use crate::app::{State, Win, WinState};
 use crate::settings_file::{get, write};
-use crate::views;
 
 /// The Playlist, Mixer and Piano roll (`State::wins`) and their keys.
 const WINS: [(Win, &str); 3] = [(Win::Playlist, "window_playlist"), (Win::Mixer, "window_mixer"), (Win::PianoRoll, "window_piano_roll")];
-const RACK: &str = "window_channel_rack";
 const PERF: &str = "window_plugin_performance";
 const TAPPER: &str = "window_tempo_tapper";
 const TOUCH: &str = "window_touch_controller";
@@ -63,11 +61,6 @@ pub fn restore(s: &mut State) {
             s.wins[i] = WinState { rect: Rect::new(x, y, rw, rh), maxed: max == 1.0, mini: mini == 1.0 };
         }
     }
-    if let Some([x, y, w, h]) = numbers(RACK) {
-        s.rack_pos = (x, y);
-        // Not below the smallest size a resize leaves it (`views::rack::snap_size`).
-        s.rack_size = (w.max(views::rack::min_w(s)), h.max(views::rack::MIN_H));
-    }
     // Placed: they open there, not centred.
     for (key, pos, placed) in [(PERF, &mut s.perf.pos, &mut s.perf.placed), (TAPPER, &mut s.tapper.pos, &mut s.tapper.placed), (TOUCH, &mut s.touch.pos, &mut s.touch.placed)] {
         if let Some([x, y]) = numbers(key) {
@@ -86,7 +79,6 @@ pub fn save(s: &State) {
             keep(key, &[ws.rect.x, ws.rect.y, ws.rect.w, ws.rect.h, switch(ws.maxed), switch(ws.mini)]);
         }
     }
-    keep(RACK, &[s.rack_pos.0, s.rack_pos.1, s.rack_size.0, s.rack_size.1]);
     for (key, pos, placed) in [(PERF, s.perf.pos, s.perf.placed), (TAPPER, s.tapper.pos, s.tapper.placed), (TOUCH, s.touch.pos, s.touch.placed)] {
         if placed {
             keep(key, &[pos.0, pos.1]);
@@ -136,8 +128,6 @@ mod tests {
         s.wins[0] = WinState { rect: Rect::new(400.0, 150.5, 900.0, 500.0), maxed: false, mini: false };
         s.wins[1] = WinState { rect: Rect::new(-200.0, 600.0, 1400.0, 420.0), maxed: false, mini: true };
         s.wins[2] = WinState { rect: Rect::new(300.0, 200.0, 1100.0, 700.0), maxed: true, mini: false };
-        s.rack_pos = (820.0, 330.0);
-        s.rack_size = (900.0, 400.0);
         s.perf.pos = (500.0, 300.0);
         s.perf.placed = true;
         s.tapper.pos = (700.0, 420.0);
@@ -151,13 +141,12 @@ mod tests {
         for i in 0..3 {
             assert_eq!((b.wins[i].rect, b.wins[i].maxed, b.wins[i].mini), (a.wins[i].rect, a.wins[i].maxed, a.wins[i].mini), "window {i}");
         }
-        assert_eq!((b.rack_pos, b.rack_size), ((820.0, 330.0), (900.0, 400.0)));
         assert_eq!((b.perf.pos, b.perf.placed, b.tapper.pos, b.tapper.placed), ((500.0, 300.0), true, (700.0, 420.0), true));
         assert!(!b.touch.placed, "never opened: still centred the first time");
     }
 
-    /// A value that cannot be read leaves its window as a first start has it; a rack kept smaller than a resize allows
-    /// comes back at the smallest size.
+    /// A value that cannot be read leaves its window as a first start has it; what an older version kept for the rack's
+    /// own window is left alone.
     #[test]
     fn unreadable_values_keep_the_defaults() {
         write("window_playlist", "10,20,abc,40,0,0");
@@ -171,8 +160,6 @@ mod tests {
         let after: Vec<_> = app.state.wins.iter().map(|w| (w.rect, w.maxed, w.mini)).collect();
         assert_eq!(after, before);
         assert!(!app.state.tapper.placed);
-        let min_w = views::rack::min_w(&app.state);
-        assert_eq!((app.state.rack_pos, app.state.rack_size), ((100.0, 120.0), (min_w, views::rack::MIN_H)));
         assert_eq!(main_win(), None);
     }
 

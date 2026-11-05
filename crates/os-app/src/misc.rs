@@ -197,10 +197,10 @@ pub fn menu(app: &crate::app::App, row: usize, m: M, x: f32, y: f32) -> crate::p
         return Popup { x, y, items: vec![PItem::new("Reset", Cmd::Misc(row, m, mp::default_of(m)))], sub: None, scroll: [0; 2] };
     }
     let cur = app.state.project.channels.get(row).map_or(mp::default_of(m), |ch| get(&ch.misc, m));
-    let items = mp::list_entries(m)
-        .into_iter()
-        .map(|(label, v)| PItem::new(label, Cmd::Misc(row, m, v)).mark(Mark::Radio((v - cur).abs() < 0.5)))
-        .collect();
+    let list = mp::list_entries(m).into_iter().map(|(label, v)| PItem::new(label, Cmd::Misc(row, m, v)).mark(Mark::Radio((v - cur).abs() < 0.5)));
+    // A number box's list stops short of its range: any other number is typed. The chord list is names.
+    let input = mp::number_box(m).then(|| [crate::typein::input_item(crate::typein::Target::Misc(row, m)), PItem::sep()]);
+    let items = input.into_iter().flatten().chain(list).collect();
     Popup { x, y, items, sub: None, scroll: [0; 2] }
 }
 

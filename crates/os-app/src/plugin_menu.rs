@@ -222,7 +222,6 @@ fn add_generator_now(app: &mut App, index: usize, after: Option<usize>) -> Optio
     let s = &mut app.state;
     s.selected_channel = ch;
     s.rack.select_only(ch);
-    crate::rack::autosize(s);
     if after.is_none() {
         // Keep the new row in view.
         let r = crate::views::rack::rect(s);

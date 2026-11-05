@@ -109,6 +109,8 @@ mod project_plugins;
 mod presets;
 mod misc;
 mod misc_page;
+#[cfg(test)]
+mod tab_tests;
 mod note_names;
 mod save_form;
 mod scroll_speed;
@@ -1293,9 +1295,8 @@ fn linux_icon() -> Option<winit::window::Icon> {
 fn screenshot(args: &[String]) {
     let mut out = None;
     let mut view = "playlist".to_string();
-    let mut rack = true;
+    let mut rack = false;
     let mut browser = true;
-    let mut rack_w: Option<f32> = None;
     let mut rack_roll = false;
     let mut browser_tab: Option<usize> = None;
     let mut browser_w: Option<f32> = None;
@@ -1326,9 +1327,7 @@ fn screenshot(args: &[String]) {
     let mut perf = false;
     let mut cpu_view: Option<String> = None;
     let mut floats: Vec<(app::Win, os_ui::Rect)> = Vec::new();
-    let mut rack_pos: Option<(f32, f32)> = None;
     let mut insert: Option<u16> = None;
-    let mut rack_h: Option<f32> = None;
     let mut rack_scroll: Option<f32> = None;
     let mut rack_all = false;
     let mut it = args.iter();
@@ -1342,6 +1341,7 @@ fn screenshot(args: &[String]) {
             "--scale" => scale = it.next().and_then(|v| v.parse().ok()).filter(|s: &f32| *s >= 0.5 && *s <= 4.0).unwrap_or(1.0),
             "--view" => view = it.next().cloned().unwrap_or_default(),
             "--no-rack" => rack = false,
+            "--rack" => rack = true,
             "--no-browser" => browser = false,
             "--rack-roll" => rack_roll = true,
             "--browser-menu" => browser_menu = true,
@@ -1392,7 +1392,6 @@ fn screenshot(args: &[String]) {
             "--info-edit" => info_edit = it.next().and_then(|v| v.parse().ok()),
             "--lane-menu" => lane_menu = true,
             "--menu" => menu = it.next().and_then(|v| v.parse().ok()),
-            "--rack-width" => rack_w = it.next().and_then(|v| v.parse().ok()),
             "--pattern" => pattern = it.next().and_then(|v| v.parse().ok()),
             "--channel" => channel = it.next().and_then(|v| v.parse().ok()),
             // Physical canvas size "WxH" (default 1920x1080 times the scale), e.g. FL's window on a 150 % display:
@@ -1429,17 +1428,6 @@ fn screenshot(args: &[String]) {
                     if let (Some(win), [x, y, w, h]) = (win, &v[..]) {
                         floats.push((win, os_ui::Rect::new(*x, *y, *w, *h)));
                     }
-                }
-            }
-            // "--rack-pos x,y[,w,h]": the channel rack moved there, and sized.
-            "--rack-pos" => {
-                let v: Vec<f32> = it.next().map(|v| v.split(',').filter_map(|n| n.parse().ok()).collect()).unwrap_or_default();
-                if let [x, y, ..] = v[..] {
-                    rack_pos = Some((x, y));
-                }
-                if let [_, _, w, h] = v[..] {
-                    rack_w = Some(w);
-                    rack_h = Some(h);
                 }
             }
             // The channel rack shows every channel (not the group the project saved).
@@ -1513,11 +1501,8 @@ fn screenshot(args: &[String]) {
             app.state.z.push(*w);
         }
     }
-    if let Some(p) = rack_pos {
-        app.state.rack_pos = p;
-    }
     if rack {
-        app.state.z.push(app::Win::ChannelRack);
+        app.state.raise(app::Win::ChannelRack);
     }
     app.state.rack_roll_view = rack_roll;
     app.state.menu_open = menu;
@@ -1547,12 +1532,6 @@ fn screenshot(args: &[String]) {
         app.alt = true;
         app.midi_file_chosen(p.into(), piano);
         app.alt = false;
-    }
-    if let Some(w) = rack_w {
-        app.state.rack_size.0 = w;
-    }
-    if let Some(h) = rack_h {
-        app.state.rack_size.1 = h;
     }
     if rack_all {
         app.state.rack.filter = rack::Filter::All;

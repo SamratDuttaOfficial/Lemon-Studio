@@ -16,6 +16,9 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
 - The rack's menu sets the selected channels' swing mix (0 to 100% or a typed value), turns their Truncate swing
   notes on or off (a swung note keeps its end, so it gets shorter) and gives them one colour (Color selected ▸
   All...); a channel's Cut itself gives it a cut group of its own, as the original does. One undo step each
+- Every number box has Input a number... on its right-click menu, beside the wheel: the tempo, the pattern selector, the
+  rack's mixer track, pattern length and loop boxes, the Advanced fill dialog, the settings window's boxes and PPI ruler,
+  the Remote control box and a channel's Misc page. Knobs and faders keep Enter value... for the same thing
 - The mixer box's and the mute LED's right-click menus type in, copy, paste and set their value (a mixer track, on or
   off); Burn selected loops to pattern; Channel button width ▸ Custom (a typed percent); the options Auto switch
   display filter, Focus selected channel on playback, Mute removed steps (a removed step keeps its note, muted), Show
@@ -48,6 +51,17 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
 
 ## ✅ Song arrangement
 
+- The Arranger and the Instrument rack are the two tabs of one window, so neither covers the other and each gets all of
+  its room. F5 and F6 go to a tab (pressed again, to the other one), Ctrl+Tab flips between them, and hovering a tab
+  shows its shortcuts. A channel's name button drags onto the Arranger, opening its tab on the way: an audio or
+  automation channel makes its own clip, a channel with notes a clip of the pattern that plays it, a sampler with no
+  notes an audio clip of its sample. Ctrl+C on the rack then Ctrl+V on the Arranger does the same at the song position.
+  What is carried from the browser opens a tab the same way
+- Each row of the clip source picker has its channel's on / off, pan, volume and mixer track, tiny, and they are the
+  rack's own controls: the drag, the wheel and the right-click menus work there too. A pattern's row shows the channel it
+  plays (the selected one if it plays several and that is one of them, else the first; the hints name it); an empty
+  pattern's row has none. The clip selected, and every clip of a marquee, lights its source in the list, which opens on
+  the right tab and scrolls to it
 - Playlist with pattern, audio and automation clips
 - Clip groups, markers and several arrangements
 - Time markers with FL's actions (right-click a marker): Start, Loop, Marker loop, Marker skip and Marker pause

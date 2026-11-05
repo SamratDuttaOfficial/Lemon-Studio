@@ -64,6 +64,10 @@ const TOOL_ICONS: [Icon; 9] =
 /// preview.
 const PICK_ROW: f32 = pl::PICK_ROW;
 const PICK_TITLE: f32 = 26.0;
+/// Width of the picker panel: its names beside each row's tiny channel controls (`pick_controls`).
+pub const PICK_W: f32 = 204.0;
+/// Width of those controls, from a row's right edge: the LED, the two knobs and the mixer track box.
+const PICK_CTRL_W: f32 = 62.0;
 
 pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     let t = ui.t;
@@ -75,7 +79,8 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     let (fr, fc) = super::frame_rects(s, Win::Playlist, r);
     let cover = grid_rect(s, fr, fc);
     ui.c.set_cover((fr.h >= 2.0 * crate::app::TITLE_H).then_some(cover));
-    let (r, client) = super::framed(ui, s, Win::Playlist, r, &title, 281.0, true);
+    // The window buttons are on the tab strip (`super::tabs`).
+    let (r, client) = super::framed(ui, s, Win::Playlist, r, &title, 281.0, false);
     ui.c.set_cover(None);
     // The arrangement name opens the arrangement menu; hovered it turns orange with a down arrow (§12, as FL).
     {
@@ -83,8 +88,8 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
         let x0 = r.x + 281.0 + ui.c.text_width(f, "Arranger - ");
         let w = ui.c.text_width(f, &arr);
         let arrow_w = ui.c.text_width(f, "  \u{203a}  ");
-        // Short of the window buttons, as the title (a narrow window cuts it).
-        let room = Rect::new(r.x, r.y, super::title_room(r, true).max(0.0), 23.0);
+        // Inside the title bar (a narrow window cuts it).
+        let room = Rect::new(r.x, r.y, super::title_room(r, false).max(0.0), 23.0);
         let hit = Rect::new(x0 - 2.0, r.y, w + arrow_w * 0.7, 22.0).intersect(&room);
         ui.c.push_clip(room);
         if ui.hit(hit, Action::PlArrangement, "Arrangements (switch, add, clone, rename, delete)") {
@@ -131,11 +136,11 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     }
 
     // A part of its own: a repaint of the grid alone (a scroll) skips it.
-    let pick = Rect::new(r.x, client.y, 160.0, client.h);
+    let pick = Rect::new(r.x, client.y, PICK_W, client.h);
     ui.part(Seg::PlPicker, pick, |ui| picker(ui, s, pick));
 
     // Track-header strip: add button and the NOTE / CHAN / PAT filters.
-    let strip = Rect::new(r.x + 162.0, client.y + 1.0, 108.0, 38.0);
+    let strip = Rect::new(r.x + PICK_W + 2.0, client.y + 1.0, 108.0, 38.0);
     if super::lemon(ui) {
         ui.c.fill_rrect(strip, lk::r_btn(t), t.track_header);
     } else {
@@ -149,7 +154,7 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     }
 
     // Arrangement geometry.
-    let head_x = r.x + 162.0;
+    let head_x = r.x + PICK_W + 2.0;
     let head_w = 98.0;
     let grid = grid_rect(s, r, client);
     debug_assert_eq!(grid, cover);
@@ -326,7 +331,7 @@ pub fn scroll_parts(s: &State, grid: Rect) -> ScrollParts {
 
 /// The arrangement grid in a window laid out at `r` with client rect `client` (see `super::frame_rects`).
 fn grid_rect(s: &State, r: Rect, client: Rect) -> Rect {
-    let grid_x = r.x + 162.0 + 98.0 + 12.0;
+    let grid_x = r.x + PICK_W + 2.0 + 98.0 + 12.0;
     let grid_w = (r.right() - grid_x - 4.0 - bar_sizes().1).max(1.0);
     let grid_y = client.y + 42.0 + if pl::markers(s).is_empty() { 0.0 } else { MARKER_H };
     Rect::new(grid_x, grid_y, grid_w, (r.bottom() - grid_y).max(0.0))
@@ -356,6 +361,11 @@ fn picker(ui: &mut Ui, s: &State, p: Rect) {
     }
     let items: Vec<ClipSource> = pick_items(s);
     let cur = pl::source(s);
+    // The selected clips' sources are lit with the current one: what is selected on the grid shows in the list.
+    let selected: Vec<ClipSource> = {
+        let all = pl::clips(s);
+        s.playlist.sel.iter().filter_map(|&i| all.get(i).map(|c| c.source)).collect()
+    };
     // spec: ui/playlist.md §1a (picker panel, measured from FL): framed list + 15 px scroll bar, 19 px footer with "+".
     let bottom = p.bottom() - FOOT_H;
     let bx = Rect::span(p.x, p.right() - 6.0, p.y + 44.0, bottom);
@@ -384,7 +394,10 @@ fn picker(ui: &mut Ui, s: &State, p: Rect) {
         // A taller item: the name in a title strip, its contents previewed under it (FL's resized picker).
         let tall = pitch > PICK_ROW;
         let title = if tall { Rect::new(row.x, row.y, row.w, PICK_TITLE) } else { row };
-        let body = if tall { Rect::span(row.x + 3.0, row.right() - 3.0, title.bottom(), row.bottom() - 3.0) } else { row.inset(3.0) };
+        // The channel's controls sit at the right of the title; a row's preview stays clear of them.
+        let channel = pick_channel(s, src);
+        let ctrl_w = if channel.is_some() { PICK_CTRL_W } else { 0.0 };
+        let body = if tall { Rect::span(row.x + 3.0, row.right() - 3.0, title.bottom(), row.bottom() - 3.0) } else { Rect::span(row.x + 3.0, row.right() - 3.0 - ctrl_w, row.y + 3.0, row.bottom() - 3.0) };
         let hov = ui.hit(row, Action::PlPick(src), "Select clip source (right-click for its menu)");
         let filled = pick_used(s, src);
         let k = if hov { 0.05 } else { 0.0 };
@@ -420,12 +433,19 @@ fn picker(ui: &mut Ui, s: &State, p: Rect) {
             // Empty pattern: dark face (owner's FL screenshot).
             ui.c.fill_rect_gradient(row, ui.t.s(0x2a2d2e).shade(k), ui.t.s(0x232627).shade(k), 0.0);
         }
-        if src == cur && !filled {
-            ui.c.stroke_rrect(row.inset(0.5), if lemon { lk::r_btn(ui.t) } else { 0.0 }, 1.0, ui.t.a(0xa8e44a));
+        // The current source and the selected clips' sources: a bright frame.
+        let lit = src == cur || selected.contains(&src);
+        if lit {
+            let frame = if lemon { ui.t.accent } else { ui.t.a(0xa8e44a) };
+            ui.c.fill_rrect(row, if lemon { lk::r_btn(ui.t) } else { 0.0 }, frame.with_alpha(40));
+            ui.c.stroke_rrect(row.inset(0.5), if lemon { lk::r_btn(ui.t) } else { 0.0 }, 1.5, frame);
         }
         let ic = Color::rgb(if filled { TITLE_TEXT } else { 0xa6aaab });
         icons::draw(ui.c, kind_icon(pl::source_kind(s, src)), Rect::new(row.x + 4.0, title.cy() - 6.0, 12.0, 12.0), ic);
-        ui.c.text_clip(Font::new(14), row.x + 20.0, title.cy() - 8.0, row.w - 23.0, ic, &pl::source_name(s, src));
+        ui.c.text_clip(Font::new(14), row.x + 20.0, title.cy() - 8.0, row.w - 23.0 - ctrl_w, ic, &pl::source_name(s, src));
+        if let Some(ch) = channel {
+            pick_controls(ui, s, ch, Rect::new(row.right() - PICK_CTRL_W, title.y, PICK_CTRL_W, title.h), matches!(src, ClipSource::Pattern(_)));
+        }
         if src == cur {
             let ax = list.x - 1.0;
             let mark = if lemon { ui.t.accent } else { Color::rgb(0xe64363) };
@@ -450,6 +470,78 @@ fn picker(ui: &mut Ui, s: &State, p: Rect) {
     let (cx, cy) = ((list.x + list.right()) / 2.0, foot.y + FOOT_H / 2.0);
     ui.c.fill_rect(Rect::new(cx - 3.5, cy - 0.5, 8.0, 2.0), pc);
     ui.c.fill_rect(Rect::new(cx - 0.5, cy - 3.5, 2.0, 8.0), pc);
+}
+
+/// The rack row whose controls a picker item shows: an audio or automation clip's channel; for a pattern, the channel
+/// it plays, the selected channel where it plays several and that is one of them, else the first in the rack. `None` for a
+/// pattern with no notes.
+pub fn pick_channel(s: &State, src: ClipSource) -> Option<usize> {
+    let row_of = |index: u16| s.project.channels.iter().position(|c| c.index == index);
+    match src {
+        ClipSource::Channel(c) => row_of(c),
+        ClipSource::Pattern(n) => {
+            let notes = &s.project.pattern(n)?.notes;
+            let selected = s.project.channels.get(s.selected_channel).map(|c| c.index);
+            if selected.is_some_and(|c| notes.iter().any(|x| x.channel == c)) {
+                return Some(s.selected_channel);
+            }
+            s.project.channels.iter().position(|c| notes.iter().any(|x| x.channel == c.index))
+        }
+    }
+}
+
+/// A picker row's tiny copy of its channel's rack controls, in `r`: on / off, pan, volume, mixer track. They are the rack's
+/// own controls (the same actions on the same channel), so the drag, the wheel and the right-click menu work as there,
+/// and the rack shows what they set. `named`: the hints name the channel (a pattern's row may play several).
+fn pick_controls(ui: &mut Ui, s: &State, row: usize, r: Rect, named: bool) {
+    use crate::knobs::KnobId;
+    let t = ui.t;
+    let Some(ch) = s.project.channels.get(row) else { return };
+    let tell = |text: String| if named { format!("{}: {text}", crate::rack::channel_name(s, row)) } else { text };
+    let cy = r.cy().round();
+    let hit_h = 18.0_f32.min(r.h);
+    let lemon = super::lemon(ui);
+    // On / off, or the padlock of a locked channel.
+    let lx = r.x + 6.5;
+    let lr = Rect::new(lx - 5.5, cy - hit_h / 2.0, 11.0, hit_h);
+    let hov = ui.hit(lr, Action::ChannelEnable(row), tell("Mute / solo".into()));
+    if s.rack.locked.contains(&row) {
+        let c = if ch.enabled { t.a(0x97da3a) } else { t.s(0x67696b) };
+        ui.c.stroke_rrect(Rect::new(lx - 1.5, cy - 4.5, 3.0, 4.0), 1.5, 1.0, c);
+        ui.c.fill_rrect(Rect::new(lx - 3.0, cy - 1.0, 6.0, 5.0), 1.0, c);
+    } else {
+        os_ui::kit::led(ui.c, t, lx, cy, 3.5, os_ui::kit::State::hover(hov).with_on(ch.enabled));
+    }
+    // Pan and volume.
+    for (k, knob) in [KnobId::ChanPan(row), KnobId::ChanVol(row)].into_iter().enumerate() {
+        let kx = r.x + 18.5 + 12.5 * k as f32;
+        let kr = Rect::new(kx - 6.0, cy - hit_h / 2.0, 12.0, hit_h);
+        let hov = ui.hit(kr, Action::Knob(knob), tell(s.knob_text(knob)));
+        os_ui::kit::knob(ui.c, t, kx, cy, 5.5, s.knob(knob), false, os_ui::kit::KnobLook::Row, os_ui::kit::State::hover(hov));
+    }
+    // The mixer track.
+    let mb = Rect::new(r.right() - 24.0, cy - 7.0, 22.0, 14.0);
+    let hov = ui.hit(mb, Action::RackMixer(row), tell(format!("Target mixer track: {}", super::rack::insert_name(ch.mixer_track))));
+    if lemon {
+        lk::small_box(ui.c, t, mb, t.rack_row_box, hov);
+    } else {
+        ui.c.fill_rrect(mb, 2.0, t.rack_control_border);
+        ui.c.fill_rect(mb.inset(1.0), t.rack_row_box);
+    }
+    let label = if ch.mixer_track == 0 { "M".to_string() } else { ch.mixer_track.to_string() };
+    ui.c.text_center(Font::new(11), mb, if hov { t.glyph } else { t.text }, &label);
+}
+
+/// Scrolls the picker so `src`'s row shows (a list that does not hold it stays).
+pub fn reveal_source(s: &mut State, src: ClipSource) {
+    let Some(i) = pick_items(s).iter().position(|&x| x == src) else { return };
+    let (_, client) = super::frame_rects(s, Win::Playlist, s.win_rect(Win::Playlist));
+    // The list's height, as `picker` lays it out.
+    let view = (client.h - FOOT_H - 44.0 - 2.0).max(0.0);
+    let pitch = s.playlist.pick_row();
+    let (top, bottom) = (i as f32 * pitch, (i + 1) as f32 * pitch + 3.0);
+    let at = s.playlist.pick_scroll;
+    s.playlist.pick_scroll = if top < at { top } else if bottom > at + view { (bottom - view).max(0.0) } else { at };
 }
 
 /// The picker's scroll bar in the Classic design (§1a, measured from FL): bordered dithered track, raised thumb with

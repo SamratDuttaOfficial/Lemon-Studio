@@ -595,7 +595,6 @@ fn place(s: &mut State, imp: Imported, o: &Options, name: &str, n: u16) {
     rack.filter = crate::rack::Filter::Group(0);
     s.selected_channel = base;
     s.rack.select_only(base);
-    crate::rack::autosize(s);
     s.piano.dirty = true;
 }
 

@@ -641,6 +641,11 @@ pub fn wheel_value(m: M, v: f32, notches: f32) -> Option<f32> {
 pub fn list_on_click(m: M) -> bool {
     kind(m) == Kind::List
 }
+/// Whether `m` is a number box.
+pub fn number_box(m: M) -> bool {
+    matches!(kind(m), Kind::Spin { .. })
+}
+
 pub fn list_on_right(m: M) -> bool {
     matches!(kind(m), Kind::Spin { .. } | Kind::List)
 }

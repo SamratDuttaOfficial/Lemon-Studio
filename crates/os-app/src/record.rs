@@ -1305,6 +1305,7 @@ mod tests {
         let ch = app.state.project.channels[1].index;
         crate::piano::set_control(&mut app.state, ch, ControlPoint::VOLUME, 70, 1000);
         crate::piano::set_control(&mut app.state, ch, ControlPoint::VOLUME, 200, 2000);
+        app.state.raise(crate::app::Win::ChannelRack);
         app.paint(&mut c, None);
         let k = hit_rect(&app, &Action::Knob(KnobId::ChanVol(1)));
         app.toggle_record();

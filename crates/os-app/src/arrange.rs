@@ -2,10 +2,11 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
-//! VIEW ▸ Arrange windows ▸ (spec: ui/menu-submenus.md §2): Realign and the layouts move and resize the Playlist,
-//! Mixer, Piano roll and Channel rack, whether they are shown or not (which windows show does not change).
-//! - Realign (Shift+Ctrl+H) and Desktop (default): the layout of a new install, the three windows maximized and the
-//!   rack where it first opens (the original's manual: Realign restores the default-install layout).
+//! VIEW ▸ Arrange windows ▸ (spec: ui/menu-submenus.md §2): Realign and the layouts move and resize the Arranger's
+//! window (with its Instrument rack tab), the Mixer and the Piano roll, whether they are shown or not (which windows show
+//! does not change).
+//! - Realign (Shift+Ctrl+H) and Desktop (default): the layout of a new install, the three windows maximized (the
+//!   original's manual: Realign restores the default-install layout).
 //! - Desktop (alternate) (Lemon Studio's design; the original's rects were not measured): the three float, the
 //!   Playlist over the top 55 % of the workspace, the Piano roll under it on the left 60 % and the Mixer on the right.
 //! - Save custom layout keeps the current one in the settings (`window_layout`); Custom, greyed until then, brings it
@@ -33,8 +34,8 @@ pub enum Layout {
     SaveCustom,
 }
 
-/// Settings key of the saved custom layout: per window (Playlist, Mixer, Piano roll) "x y w h maxed mini", then the
-/// rack's "x y w h", separated by ";".
+/// Settings key of the saved custom layout: per window (Playlist, Mixer, Piano roll) "x y w h maxed mini", separated by
+/// ";". One saved when the rack was a window of its own has its rect after them, which is left out.
 const KEY: &str = "window_layout";
 
 /// The windows of a new install: Playlist, Mixer, Piano roll (`State::wins` order), all maximized.
@@ -45,9 +46,6 @@ pub fn default_wins() -> [WinState; 3] {
         WinState { rect: Rect::new(480.0, 140.0, 1000.0, 640.0), maxed: true, mini: false },
     ]
 }
-
-/// Where the Channel rack first opens.
-pub const RACK_POS: (f32, f32) = (317.0, 195.0);
 
 /// The submenu's rows, in the original's order.
 pub fn items(_: &State) -> Vec<PItem> {
@@ -65,13 +63,13 @@ pub fn items(_: &State) -> Vec<PItem> {
     ]
 }
 
-/// The saved custom layout: the three windows and the rack's rect.
-fn saved() -> Option<([WinState; 3], Rect)> {
+/// The saved custom layout: the three windows.
+fn saved() -> Option<[WinState; 3]> {
     let text = crate::prefs::text(KEY)?;
     let parts: Vec<Vec<f32>> = text.split(';').map(|p| p.split_whitespace().filter_map(|v| v.parse().ok()).collect()).collect();
     let win = |v: &Vec<f32>| (v.len() == 6).then(|| WinState { rect: Rect::new(v[0], v[1], v[2], v[3]), maxed: v[4] != 0.0, mini: v[5] != 0.0 });
     match parts.as_slice() {
-        [a, b, c, r] if r.len() == 4 => Some(([win(a)?, win(b)?, win(c)?], Rect::new(r[0], r[1], r[2], r[3]))),
+        [a, b, c] | [a, b, c, _] => Some([win(a)?, win(b)?, win(c)?]),
         _ => None,
     }
 }
@@ -81,11 +79,7 @@ impl App {
     pub(crate) fn arrange(&mut self, l: Layout) {
         let s = &mut self.state;
         match l {
-            Layout::Realign | Layout::Default => {
-                s.wins = default_wins();
-                s.rack_pos = RACK_POS;
-                s.rack_size = views::rack::DEFAULT_SIZE;
-            }
+            Layout::Realign | Layout::Default => s.wins = default_wins(),
             Layout::Into => return self.move_into_workspace(),
             Layout::Alternate => {
                 let w = s.work_rect();
@@ -93,20 +87,16 @@ impl App {
                 let left = (w.w * 0.6).round();
                 let float = |x: f32, y: f32, ww: f32, hh: f32| WinState { rect: Rect::new(x, y, ww, hh), maxed: false, mini: false };
                 s.wins = [float(w.x, w.y, w.w, top), float(w.x + left, w.y + top, w.w - left, w.h - top), float(w.x, w.y + top, left, w.h - top)];
-                s.rack_pos = RACK_POS;
             }
             Layout::Custom => {
-                let Some((wins, rack)) = saved() else { return };
+                let Some(wins) = saved() else { return };
                 s.wins = wins;
-                s.rack_pos = (rack.x, rack.y);
-                s.rack_size = (rack.w, rack.h);
                 // A layout saved on a larger screen comes back inside this one.
                 self.move_into_workspace();
             }
             Layout::SaveCustom => {
                 let win = |w: &WinState| format!("{} {} {} {} {} {}", w.rect.x, w.rect.y, w.rect.w, w.rect.h, u8::from(w.maxed), u8::from(w.mini));
-                let mut parts: Vec<String> = s.wins.iter().map(win).collect();
-                parts.push(format!("{} {} {} {}", s.rack_pos.0, s.rack_pos.1, s.rack_size.0, s.rack_size.1));
+                let parts: Vec<String> = s.wins.iter().map(win).collect();
                 crate::prefs::set_text(KEY, &parts.join(";"));
                 s.message = Some("Custom layout saved".into());
             }
@@ -115,10 +105,10 @@ impl App {
     }
 }
 
-/// Where the channel window first opens: right of the Channel rack, level with its top.
+/// Where the channel window first opens: over the Instrument rack's steps, just below its title bar.
 pub fn channel_home(s: &State) -> (f32, f32) {
     let r = views::rack::rect(s);
-    ((r.right() + 8.0).min(1920.0 - 440.0), r.y.min(1080.0 - 210.0))
+    ((r.x + views::rack::cols(s).step_x).min(1920.0 - 440.0), (r.y + 34.0).min(1080.0 - 210.0))
 }
 
 impl App {
@@ -166,18 +156,15 @@ mod tests {
         assert_eq!((pr.y, pr.right(), mx.x, mx.right()), (pl.bottom(), mx.x, pr.right(), work.right()));
         assert_eq!(mx.bottom(), work.bottom());
         app.state.wins[0].rect.h -= 40.0;
-        app.state.rack_pos = (400.0, 300.0);
         let kept = app.state.wins[0].rect;
         app.arrange(Layout::SaveCustom);
         assert!(enabled("Custom"), "saved in the settings");
         app.arrange(Layout::Realign);
         assert!(app.state.wins.iter().all(|w| w.maxed));
         assert_eq!(app.state.wins[0].rect, default_wins()[0].rect);
-        assert_eq!(app.state.rack_pos, RACK_POS);
         app.arrange(Layout::Custom);
         assert_eq!(app.state.wins[0].rect, kept);
         assert!(!app.state.wins[0].maxed);
-        assert_eq!(app.state.rack_pos, (400.0, 300.0));
     }
 
     /// Align all channel editors (VIEW and Shift+F12) puts a moved channel window back right of the rack.

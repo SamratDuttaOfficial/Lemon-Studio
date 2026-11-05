@@ -357,6 +357,8 @@ pub enum Cmd {
     TypeIn(crate::typein::Target),
     /// "Reset" of a knob, fader or slider menu: back to its default (spec: ui/mixer.md §6.3).
     Reset(crate::knobs::Control),
+    /// Settings ▸ MIDI: a Port or offset box back to its default.
+    MidiReset(crate::views::midi_page::MAct),
     /// Plugin presets (spec: plugins/presets.md).
     #[cfg_attr(not(windows), allow(dead_code))]
     Preset(crate::presets::PCmd),
@@ -624,6 +626,8 @@ pub struct PlaylistState {
     pub edit: Option<TextEdit>,
     /// The value box's mode last accepted: normalized (spec: ui/type-in-value.md §3).
     pub typein_norm: bool,
+    /// A number accepted in the value box that takes the app to set (`App::typein_settle`).
+    pub typed: Option<(crate::typein::Target, f64)>,
     /// Soloed track: its own state and the others' before the solo.
     pub solo: Option<(u16, Vec<bool>)>,
     /// Zoom tool: the view before "zoom out" (bar width, scroll x, scroll y).
@@ -678,6 +682,7 @@ impl Default for PlaylistState {
             popup: None,
             edit: None,
             typein_norm: false,
+            typed: None,
             solo: None,
             zoom_back: None,
             hover_clip: None,
@@ -1448,6 +1453,46 @@ pub fn place(s: &mut State, track: u16, tick: u32) -> usize {
     clips(s).len() - 1
 }
 
+/// Puts rack row `row` on the arranger at (`track`, `tick`), selected with what is selected, its source current (the
+/// caller keeps the undo step): an audio or automation channel's own clip; a channel with notes, a clip of the pattern that
+/// plays it (the current one if it does, else the first); a sampler with a sample and no notes, an audio clip of that
+/// sample; a channel with nothing yet, a clip of the current pattern. What to tell the user, if anything.
+pub fn place_channel(s: &mut State, row: usize, track: u16, tick: u32) -> Option<String> {
+    let ch = s.project.channels.get(row)?;
+    let (kind, index, sampler, sample) = (ch.kind, ch.index, ch.kind.is_sampler(), ch.sample_path.clone());
+    let name = crate::rack::channel_name(s, row);
+    let selected = s.playlist.sel.clone();
+    let plays = |p: &os_model::Pattern| p.notes.iter().any(|n| n.channel == index);
+    let current = s.pattern.max(1);
+    let with_notes = if s.project.pattern(current).is_some_and(plays) { Some(current) } else { s.project.patterns.iter().filter(|p| plays(p)).map(|p| p.number).min() };
+    let src = match (kind, with_notes, sample) {
+        (ChannelKind::AudioClip | ChannelKind::Automation, ..) => ClipSource::Channel(index),
+        (_, Some(n), _) => ClipSource::Pattern(n),
+        // The audio clip of that sample if there is one already, else a new one.
+        (_, None, Some(path)) if sampler => match s.project.channels.iter().find(|c| c.kind == ChannelKind::AudioClip && c.sample_path.as_deref() == Some(&path)) {
+            Some(c) => ClipSource::Channel(c.index),
+            None => {
+                let added = add_audio_clip_in(s, &path, track, tick, None);
+                let mut all = selected;
+                all.extend(added);
+                s.playlist.sel = all;
+                crate::views::playlist::reveal_source(s, source(s));
+                return Some(if added.is_some() { format!("Added audio clip {name}") } else { format!("Could not read {name} as audio") });
+            }
+        },
+        (_, None, _) => ClipSource::Pattern(current),
+    };
+    s.playlist.source = Some(src);
+    if let ClipSource::Pattern(n) = src {
+        s.pattern = n;
+    }
+    s.playlist.picker = source_kind(s, src);
+    crate::views::playlist::reveal_source(s, src);
+    let i = place(s, track, tick);
+    s.playlist.sel.push(i);
+    (matches!(src, ClipSource::Pattern(_)) && with_notes.is_none()).then(|| format!("{name} has no notes yet: placed {}", source_name(s, src)))
+}
+
 /// Delete clips by index (selection indices are remapped).
 pub fn delete(s: &mut State, mut idx: Vec<usize>) {
     idx.sort_unstable();
@@ -1782,6 +1827,22 @@ pub fn duplicate(s: &mut State) {
 pub fn copy(s: &mut State) {
     let idx = if s.playlist.sel.is_empty() { Vec::new() } else { s.playlist.sel.clone() };
     s.playlist.clipboard = idx.iter().filter_map(|&i| clips(s).get(i).copied()).collect();
+    // The clips are what was copied last, not the rack's channels.
+    s.rack.copied.clear();
+}
+
+/// Ctrl+V on the Arranger after Ctrl+C on the Instrument rack: a clip of each copied channel at the song position, on the
+/// selected track and the ones under it (`place_channel`).
+fn paste_channels(s: &mut State) -> Option<String> {
+    let rows = s.rack.copied.clone();
+    let (track, at) = (s.playlist.track, s.playlist.pos);
+    s.playlist.sel.clear();
+    let mut said = None;
+    for (k, row) in rows.into_iter().enumerate() {
+        let t = track.saturating_add(k as u16).min(TRACKS - 1);
+        said = place_channel(s, row, t, at).or(said);
+    }
+    said
 }
 
 /// Paste at the song position, keeping the clips' tracks and spacing.
@@ -2826,7 +2887,9 @@ pub fn knob_menu(s: &State, auto: Option<(u32, String, f64)>, typein: Option<cra
         Some(crate::typein::Target::Fader(t)) => Some(crate::knobs::Control::Fader(t)),
         _ => None,
     };
-    let mut items: Vec<PItem> = reset.map(|c| PItem::new("Reset", Cmd::Reset(c))).into_iter().collect();
+    // A number box's Input a number... goes first.
+    let input = typein.filter(|t| t.is_number()).map(crate::typein::input_item);
+    let mut items: Vec<PItem> = input.into_iter().chain(reset.map(|c| PItem::new("Reset", Cmd::Reset(c)))).collect();
     let events = crate::events::menu_item(auto.as_ref(), None);
     if let Some((tgt, name, value)) = auto {
         let [init, delete] = crate::init::items(s, Some((tgt, value)));
@@ -2838,10 +2901,11 @@ pub fn knob_menu(s: &State, auto: Option<(u32, String, f64)>, typein: Option<cra
             events,
         ]);
     }
-    if typein.is_some() {
+    // A number box's value is not a controller's to set.
+    if typein.is_some_and(|t| !t.is_number()) {
         items.extend(crate::remote::menu_items(typein));
     }
-    if let Some(t) = typein {
+    if let Some(t) = typein.filter(|t| !t.is_number()) {
         items.extend([PItem::head("Value"), PItem::new("Enter value...", Cmd::TypeIn(t))]);
     }
     Popup { x, y, items, sub: None, scroll: [0; 2] }
@@ -3254,6 +3318,7 @@ pub fn press_grid(app: &mut App, grid: Rect, right: bool) {
                     s.pattern = n;
                 }
                 s.playlist.picker = source_kind(s, c.source);
+                crate::views::playlist::reveal_source(s, c.source);
                 // A resized clip lends its length to the clips placed next; a clip of natural length clears it.
                 s.playlist.lock_len = (c.length != source_len(s, c.source)).then_some((c.source, c.length));
                 // Grouped clips go along (§3a); clicking one selects its whole group.
@@ -3603,6 +3668,15 @@ pub fn drag_move(app: &mut App, d: PlDrag, grid: Rect) {
 
 /// Button released.
 pub fn drag_end(app: &mut App, d: PlDrag, grid: Rect) {
+    // What the marquee selected shows in the picker, on its list.
+    if matches!(d, PlDrag::Marquee { .. }) {
+        let s = &mut app.state;
+        let first = s.playlist.sel.first().and_then(|&i| clips(s).get(i)).map(|c| c.source);
+        if let Some(src) = first {
+            s.playlist.picker = source_kind(s, src);
+            crate::views::playlist::reveal_source(s, src);
+        }
+    }
     let s = &mut app.state;
     let g = PGeom::new(s, grid);
     let overlay = s.playlist.overlay.take();
@@ -4093,9 +4167,14 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             app.reset_control(c);
             return None;
         }
+        Cmd::MidiReset(m) => {
+            app.midi_page_reset(m);
+            return None;
+        }
         Cmd::TypeIn(t) => {
             let at = app.mouse;
             crate::typein::open(&mut app.state, t, at);
+            app.typein_opened();
             app.invalidate();
             return None;
         }
@@ -4292,8 +4371,12 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
         }
         Cmd::Paste => {
             snapshot(s);
-            paste(s);
-            None
+            if s.rack.copied.is_empty() {
+                paste(s);
+                None
+            } else {
+                paste_channels(s)
+            }
         }
         Cmd::Duplicate => {
             snapshot(s);
@@ -4378,7 +4461,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             snapshot(s);
             (!delete_space(s)).then(|| "Delete space: make a time selection first (right-drag the ruler)".into())
         }
-        Cmd::Consolidate | Cmd::ConsolidateTrack(_) | Cmd::ConsolidateClip(_) | Cmd::ExportTracks | Cmd::QuantizeStarts | Cmd::PointValue(..) | Cmd::ClipPreview(_) | Cmd::TypeIn(_) | Cmd::Reset(_) | Cmd::Remote(_) | Cmd::MidiExt(_) => None,
+        Cmd::Consolidate | Cmd::ConsolidateTrack(_) | Cmd::ConsolidateClip(_) | Cmd::ExportTracks | Cmd::QuantizeStarts | Cmd::PointValue(..) | Cmd::ClipPreview(_) | Cmd::TypeIn(_) | Cmd::Reset(_) | Cmd::MidiReset(_) | Cmd::Remote(_) | Cmd::MidiExt(_) => None,
         Cmd::StretchMode => {
             s.playlist.stretch = !s.playlist.stretch;
             Some(if s.playlist.stretch { "Stretch mode on: resizing an audio clip stretches it".into() } else { "Stretch mode off".into() })

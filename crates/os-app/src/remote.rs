@@ -123,7 +123,7 @@ impl Link {
 
 /// Whether `t` can be linked: the piano roll tool dialogs' knobs live only while their dialog is open.
 fn linkable(t: Target) -> bool {
-    !matches!(t, Target::Knob(KnobId::Strum(_) | KnobId::Arp(_) | KnobId::PianoDlg(_) | KnobId::AutoLfo(..)) | Target::RackTrack(_) | Target::RackLed(_))
+    !t.is_number() && !matches!(t, Target::Knob(KnobId::Strum(_) | KnobId::Arp(_) | KnobId::PianoDlg(_) | KnobId::AutoLfo(..)) | Target::RackLed(_))
 }
 
 /// A target as `settings.txt` keeps it (`none` for one that is not linkable, which reads back as nothing).
@@ -144,7 +144,8 @@ fn target_text(t: Target) -> String {
         },
         Target::Fader(m) => format!("fader:{m}"),
         Target::Param(key, i) => format!("param:{key}:{i}"),
-        Target::Latency(..) | Target::RackTrack(_) | Target::RackLed(_) => "none".into(),
+        // Not linkable (`linkable`).
+        _ => "none".into(),
     }
 }
 
@@ -368,6 +369,18 @@ impl RAct {
     }
 }
 
+/// A value box's number as the box shows it (-1 for "---").
+pub fn box_value(s: &State, a: RAct) -> Option<f64> {
+    let b = s.link_box.as_ref()?;
+    Some(match a {
+        RAct::Port => b.port.map_or(-1.0, f64::from),
+        RAct::Ctrl => b.cc.map_or(-1.0, f64::from),
+        RAct::Channel => f64::from(b.ch) + 1.0,
+        RAct::Time => f64::from(b.time),
+        _ => return None,
+    })
+}
+
 /// Multilink to controllers (spec §4): on, and the knobs changed since, in order.
 #[derive(Debug, Default, Clone)]
 pub struct Multi {
@@ -552,8 +565,8 @@ impl App {
                 crate::params::set_param_value(&mut self.state, key, index, f64::from(v));
                 self.record_plugin_param(key, index, f64::from(v));
             }
-            // Never linked (no remote control).
-            Target::Latency(..) | Target::RackTrack(_) | Target::RackLed(_) => {}
+            // Never linked (`linkable`).
+            _ => {}
         }
         self.invalidate();
     }
@@ -610,6 +623,21 @@ impl App {
                 let i = Formula::ALL.iter().position(|&f| f == b.formula).unwrap_or(0);
                 b.formula = Formula::ALL[(i + 1) % Formula::ALL.len()];
             }
+        }
+        self.invalidate();
+    }
+
+    /// A number typed for one of the box's value boxes: the box takes it, as far as its range goes.
+    pub(crate) fn link_box_set(&mut self, a: RAct, v: f64) {
+        let Some(b) = self.state.link_box.as_mut() else { return };
+        let byte = |max: f64| (v >= 0.0).then(|| v.round().min(max) as u8);
+        match a {
+            RAct::Port => b.port = byte(255.0),
+            RAct::Ctrl => b.cc = byte(127.0),
+            // Counted from 1, as the box shows it.
+            RAct::Channel => b.ch = (v.round() - 1.0).clamp(0.0, 15.0) as u8,
+            RAct::Time => b.time = v.round().clamp(f64::from(SMOOTH_MIN), f64::from(SMOOTH_MAX)) as u16,
+            _ => return,
         }
         self.invalidate();
     }

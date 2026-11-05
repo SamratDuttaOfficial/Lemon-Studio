@@ -727,7 +727,6 @@ impl Command {
                 if let Some(n) = name {
                     s.project.channels[row].name = text(&n);
                 }
-                crate::rack::autosize(s);
                 s.control.settle(&mut s.project);
                 let id = s.project.channels[row].id;
                 if !sampler {

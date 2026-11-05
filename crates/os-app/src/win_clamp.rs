@@ -105,7 +105,6 @@ fn covered(r: [i32; 4], screens: &[[i32; 4]]) -> bool {
 /// `None` for the browser panel and docked plugin windows.
 pub fn rect_of(s: &State, w: Win) -> Option<Rect> {
     Some(match w {
-        Win::ChannelRack => views::rack::rect(s),
         Win::Plugin => views::channel_win::rect(s),
         Win::Perf => views::perf::rect(s),
         Win::Tapper => views::tapper::rect(s),
@@ -124,7 +123,6 @@ pub fn rect_of(s: &State, w: Win) -> Option<Rect> {
 fn set_pos(s: &mut State, w: Win, pos: (f32, f32)) {
     let pos = (pos.0.round(), pos.1.round());
     match w {
-        Win::ChannelRack => s.rack_pos = pos,
         Win::Plugin => s.plugin_pos = pos,
         Win::Perf => s.perf.pos = pos,
         Win::Tapper => s.tapper.pos = pos,
@@ -149,7 +147,7 @@ pub fn drag_to(s: &mut State, w: Win, want: (f32, f32)) {
     }
 }
 
-/// The windows placed by position (Channel rack, channel settings, Plugin performance monitor, Tempo tapper) keep their
+/// The windows placed by position (channel settings, Plugin performance monitor, Tempo tapper) keep their
 /// part in the workspace as it is now (the main window or the workspace shrank); the floating Playlist, Mixer and Piano
 /// roll are kept where they are shown (`State::float_rect`). Returns whether a window moved.
 pub fn keep_all(s: &mut State) -> bool {
@@ -158,7 +156,7 @@ pub fn keep_all(s: &mut State) -> bool {
         return false;
     }
     let mut moved = false;
-    for w in [Win::ChannelRack, Win::Plugin, Win::Perf, Win::Tapper, Win::Touch, Win::Strum, Win::Arp, Win::PianoDlg, Win::Events] {
+    for w in [Win::Plugin, Win::Perf, Win::Tapper, Win::Touch, Win::Strum, Win::Arp, Win::PianoDlg, Win::Events] {
         let Some(r) = rect_of(s, w) else { continue };
         let pos = keep(r.x, r.y, r.w, work);
         if pos != (r.x, r.y) {
@@ -172,8 +170,8 @@ pub fn keep_all(s: &mut State) -> bool {
 impl App {
     /// VIEW ▸ Into workspace: every window partly outside the workspace moves fully back in, as little as it takes,
     /// keeping its size where it fits. One wider or taller than the workspace shrinks to it (the Playlist, Mixer and
-    /// Piano roll not below their smallest size, the Channel rack in whole steps and rows); one that can't shrink goes
-    /// to the workspace's left or top edge. Hidden windows too, so they open inside; a maximized window's floating
+    /// Piano roll not below their smallest size); one that can't shrink goes to the workspace's left or top edge.
+    /// Hidden windows too, so they open inside; a maximized window's floating
     /// rect too.
     pub(crate) fn move_into_workspace(&mut self) {
         let s = &mut self.state;
@@ -183,16 +181,7 @@ impl App {
                 s.wins[i].rect = inside(s.float_rect(w), work, w.min_size());
             }
         }
-        // The rack's side that doesn't fit, in whole steps or rows (`snap_size` rounds to the nearest: half one less).
-        let r = views::rack::rect(s);
-        let fit = views::rack::snap_size(s, work.w - views::rack::STEP_W / 2.0, work.h - views::rack::ROW_H / 2.0);
-        if r.w > work.w {
-            s.rack_size.0 = fit.0;
-        }
-        if r.h > work.h {
-            s.rack_size.1 = fit.1;
-        }
-        for w in [Win::ChannelRack, Win::Plugin, Win::Perf, Win::Tapper, Win::Touch, Win::Strum, Win::Arp, Win::PianoDlg, Win::Events] {
+        for w in [Win::Plugin, Win::Perf, Win::Tapper, Win::Touch, Win::Strum, Win::Arp, Win::PianoDlg, Win::Events] {
             if let Some(r) = rect_of(s, w) {
                 let to = inside(r, work, (r.w, r.h));
                 set_pos(s, w, (to.x, to.y));
@@ -222,10 +211,11 @@ mod tests {
         app.state.wins[i].maxed = false;
         app.state.wins[i].rect = Rect::new(230.0, 110.0, 820.0, 430.0);
         app.paint(&mut c, None);
-        app.mouse_move(500.0, 120.0);
+        // On the tab strip, right of the tabs.
+        app.mouse_move(800.0, 120.0);
         app.mouse_down();
         for k in 1..30 {
-            app.mouse_move(500.0 + k as f32 * 0.8, 120.0 + k as f32 * 0.8);
+            app.mouse_move(800.0 + k as f32 * 0.8, 120.0 + k as f32 * 0.8);
             let _ = app.take_damage();
             app.paint(&mut c, None);
             let r = app.state.wins[i].rect;
@@ -307,7 +297,7 @@ mod tests {
             app.state.wins[i].maxed = false;
             app.state.wins[i].mini = false;
         }
-        for w in [Win::Playlist, Win::PianoRoll, Win::Mixer, Win::ChannelRack, Win::Plugin] {
+        for w in [Win::Playlist, Win::PianoRoll, Win::Mixer, Win::Plugin] {
             app.state.raise(w);
         }
         app.act(Action::ToggleWin(Win::Perf));
@@ -316,7 +306,7 @@ mod tests {
         app
     }
 
-    const WINDOWS: [Win; 7] = [Win::Playlist, Win::PianoRoll, Win::Mixer, Win::ChannelRack, Win::Plugin, Win::Perf, Win::Tapper];
+    const WINDOWS: [Win; 6] = [Win::Playlist, Win::PianoRoll, Win::Mixer, Win::Plugin, Win::Perf, Win::Tapper];
 
     /// The pixels (centres) of `w`'s title bar within `area`: those its move hits cover, whatever is on top.
     fn bar_points(app: &App, w: Win, area: Rect) -> Vec<(f32, f32)> {
@@ -392,7 +382,7 @@ mod tests {
         let all = Rect::new(0.0, 0.0, 1920.0, 1080.0);
         // What may take a press on a title bar instead of the move: its controls (buttons, menus, tools, knobs, boxes:
         // all small) and the frame's resize edges.
-        let control = |a: &Action, r: Rect| matches!(a, Action::WinResize(..) | Action::RackResize(_)) || (*a != Action::Swallow && r.w <= 100.0 && r.h <= 32.0);
+        let control = |a: &Action, r: Rect| matches!(a, Action::WinResize(..)) || (*a != Action::Swallow && r.w <= 170.0 && r.h <= 32.0);
         for w in WINDOWS {
             let work = app.state.work_rect();
             for (out, strip, back) in [
@@ -425,7 +415,6 @@ mod tests {
         let mut app = app_with_windows(&mut c);
         let all = Rect::new(0.0, 0.0, 1920.0, 1080.0);
         drag(&mut app, &mut c, Win::Playlist, all, (-5000.0, 0.0));
-        drag(&mut app, &mut c, Win::ChannelRack, all, (9000.0, 300.0));
         drag(&mut app, &mut c, Win::Tapper, all, (-5000.0, 5000.0));
         drag(&mut app, &mut c, Win::Perf, all, (0.0, 5000.0));
         // The mixer wider than the workspace (as tall as the screen allows), the piano roll inside.
@@ -448,15 +437,6 @@ mod tests {
         }
         assert_eq!(rect(&app, Win::Playlist).x, work.x, "off the left: at the workspace's left edge");
         assert_eq!(rect(&app, Win::PianoRoll), Rect::new(600.0, 200.0, 700.0, 400.0), "inside: left alone");
-        // A channel rack bigger than a small workspace shrinks to it in whole steps and rows.
-        let Some(mut small) = canvas(1000, 600) else { return };
-        app.state.rack_size = (1500.0, 900.0);
-        app.paint(&mut small, None);
-        app.menu_item(VIEW, i);
-        let (work, r) = (app.state.work_rect(), rect(&app, Win::ChannelRack));
-        assert!(r.x >= work.x && r.right() <= work.right() && r.y >= work.y && r.bottom() <= work.bottom(), "{r:?} in {work:?}");
-        assert!(r.w > work.w - crate::views::rack::STEP_W && r.h > work.h - crate::views::rack::ROW_H, "{r:?} fills {work:?}");
-        assert_eq!(app.state.rack_size, crate::views::rack::snap_size(&app.state, r.w, r.h));
     }
 
     /// Spec "Lemon Studio": the clamp holds whatever "Don't limit windows to screen" says; the check is declared, off

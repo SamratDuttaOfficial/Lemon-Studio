@@ -21,7 +21,7 @@ use windows_sys::Win32::Graphics::Gdi::{
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::Threading::GetCurrentThreadId;
-use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetActiveWindow, GetFocus, GetKeyState, ReleaseCapture, SetCapture, SetFocus, VK_CONTROL, VK_MENU};
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetActiveWindow, GetFocus, GetKeyState, ReleaseCapture, SetActiveWindow, SetCapture, SetFocus, VK_CONTROL, VK_MENU};
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
 use super::*;
@@ -132,6 +132,14 @@ pub fn focus_main() {
         if !main.is_null() {
             SetFocus(main);
         }
+    }
+}
+
+/// The keyboard to the main window, its detached plugin windows staying above it.
+pub fn activate_main(main: isize) {
+    unsafe {
+        SetActiveWindow(main as HWND);
+        SetFocus(main as HWND);
     }
 }
 

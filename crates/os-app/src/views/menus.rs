@@ -85,6 +85,8 @@ pub enum MenuCmd {
     /// The last tweaked parameters' entries.
     Params(crate::params::MenuEntry),
     StopSound,
+    /// The pattern selector's Input a number...: the value box for the pattern's number.
+    InputPattern,
     CancelRecording,
     SelectUnused,
     PurgeClips,
@@ -288,6 +290,7 @@ const ADD_OTHER: &[Item] = &[
 /// The pattern list column is built from the project; this is its placeholder (never drawn).
 const PAT_LIST: &[Item] = &[];
 const PAT_CMDS: &[Item] = &[
+    it(crate::typein::INPUT_LABEL, "").on().cmd(MenuCmd::InputPattern),
     it("New empty pattern...", "Shift+F4").on().cmd(MenuCmd::Pattern(crate::patterns::Cmd::FindFirst)),
     it("Next empty pattern...", "F4").on().cmd(MenuCmd::Pattern(crate::patterns::Cmd::FindNext)),
     it("Next empty pattern (unnamed)", "Ctrl+F4").on().cmd(MenuCmd::Pattern(crate::patterns::Cmd::FindNextNoName)),
@@ -606,6 +609,7 @@ pub fn tip(menu: usize, item: &Item) -> &'static str {
         MenuCmd::Sub(Sub::Match) => crate::timing::MATCH_TIP,
         MenuCmd::CompTakes => crate::timing::COMP_TIP,
         MenuCmd::StopSound => "Silences everything now: hanging notes, long tails, plugins stuck on",
+        MenuCmd::InputPattern => "Type the number of the pattern to select",
         MenuCmd::CancelRecording => "Stops recording and throws away what this take recorded",
         MenuCmd::SelectUnused => "Selects the instruments that no pattern or clip plays",
         MenuCmd::PurgeClips => "Deletes the audio clip channels that no clip in the arranger uses",
@@ -1189,7 +1193,7 @@ mod tests {
         assert_eq!(pick(VIEW, playlist.pick.unwrap().1), Action::ToggleWin(Win::Playlist));
         assert_eq!(playlist.mark, Mark::Check(app.state.shown(Win::Playlist)));
         // Patterns in use head PATTERNS, the current one marked.
-        assert_eq!(bar[PATTERNS].rows[0].label, "New empty pattern...", "a new project uses no pattern yet");
+        assert_eq!(bar[PATTERNS].rows[0].label, crate::typein::INPUT_LABEL, "a new project uses no pattern yet");
         app.state.project.patterns.iter_mut().find(|p| p.number == 1).expect("pattern 1").name = Some("Intro".into());
         let first = bar_model(&app.state)[PATTERNS].rows[0].clone();
         assert_eq!((first.label.as_str(), first.mark, first.pick), ("Intro", Mark::Radio(true), Some((PATTERNS, PATTERN_PICK + 1))));
@@ -1292,6 +1296,8 @@ pub fn pattern_popup(x: f32, y: f32) -> crate::playlist::Popup {
     use crate::playlist::{Cmd, PItem, Popup};
     let items = PAT_CMDS
         .iter()
+        // The list's row is not the selector's number box.
+        .filter(|it| !matches!(it.cmd, MenuCmd::InputPattern))
         .map(|it| match it.kind {
             Kind::Sep => PItem::sep(),
             Kind::Head => PItem::head(it.label),

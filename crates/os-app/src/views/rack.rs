@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
-//! Channel rack window: a floating, resizable child window.
+//! The Instrument rack: a tab of the Arranger's window (`super::tabs`), filling its page.
 // spec: ui/channel-rack.md
 
 use os_ui::kit::lemon as lk;
@@ -16,10 +16,6 @@ use crate::rack::{self as rk, FillHit, FillType, Tab};
 
 pub const ROW_H: f32 = 30.0;
 pub const STEP_W: f32 = 16.0;
-/// Default outer size (§1): 16 steps, FL's 499 px plus Lemon Studio's wider name button (§17).
-pub const DEFAULT_SIZE: (f32, f32) = (499.0 + rk::NAME_W - rk::FL_NAME_W, 246.0);
-/// Smallest height: one row (§5).
-pub const MIN_H: f32 = 96.0 + ROW_H;
 /// Space above the first row and below the last one inside the rows panel.
 const PAD: f32 = 18.0;
 /// The Classic name button's face: the channel colour mixed this far toward the theme's neutral face (`clip_colors`
@@ -31,10 +27,6 @@ const GRAPH_TABS_H: f32 = 20.0;
 /// Advanced fill dialog size (§22, Lemon Studio layout).
 pub const FILL_W: f32 = 285.0;
 pub const FILL_H: f32 = 446.0;
-
-/// Resize edges (bit set) for `Action::RackResize`.
-pub const EDGE_RIGHT: u8 = 1;
-pub const EDGE_BOTTOM: u8 = 2;
 
 /// Horizontal layout of a row (§3, §17): the name button width and the mixer column move everything right of them.
 #[derive(Debug, Clone, Copy)]
@@ -63,48 +55,20 @@ pub fn base_w(s: &State) -> f32 {
     259.0 + c.dx + c.loop_w
 }
 
-/// Smallest width (Lemon Studio's; FL's is 4 steps, §5): four beats of the project's signature, and never under the
-/// default 16 steps, below which the title bar's right group runs into the speaker and the "Instrument rack" title.
-pub fn min_w(s: &State) -> f32 {
-    let steps = (4 * rk::beat_steps(s)).max(16);
-    base_w(s) + STEP_W * (steps - 1) as f32
-}
-
-/// Snap a dragged size so whole steps and rows appear (§5), at least [`min_w`] and one row.
-pub fn snap_size(s: &State, w: f32, h: f32) -> (f32, f32) {
-    let b = base_w(s);
-    let w = b + STEP_W * ((w - b) / STEP_W).round();
-    let h = 96.0 + ROW_H * ((h - 96.0) / ROW_H).round();
-    (w.max(min_w(s)), h.max(MIN_H))
-}
-
 /// Whether every note of channel `ch` in the pattern is a plain step (§6: otherwise the row shows
 /// the mini piano roll even in step mode).
 fn plain_steps(notes: &[os_model::Note], ch: u16) -> bool {
     notes.iter().filter(|n| n.channel == ch).all(|n| n.length == 0 && n.key == 60)
 }
 
-/// The window's outer rectangle.
+/// The rack's page: its tab's place in the Arranger's window.
 pub fn rect(s: &State) -> Rect {
-    Rect::new(s.rack_pos.0, s.rack_pos.1, s.rack_size.0, s.rack_size.1)
+    super::frame_rects(s, Win::ChannelRack, s.win_rect(Win::ChannelRack)).0
 }
 
-/// Where the window paints: its rect and the graph editor, which hangs below it (§14).
-pub fn paint_area(s: &State) -> Rect {
-    match graph_rect(s) {
-        Some(g) => rect(s).union(&g.outset(2.0)),
-        None => rect(s),
-    }
-}
-
-/// Everything the window can paint or hit (incl. the resize zones past its edges and the graph editor, which hangs
-/// below the window, §14).
+/// Everything the window can paint or hit (incl. the resize zones past its edges).
 pub fn bounds(s: &State) -> Rect {
-    let r = rect(s).outset(4.0);
-    match graph_rect(s) {
-        Some(g) => r.union(&g.outset(2.0)),
-        None => r,
-    }
+    s.win_area(Win::ChannelRack)
 }
 
 /// Inside of the rows panel (§1: border at x 4 and W−6, y 29 and H−30).
@@ -114,7 +78,7 @@ pub fn panel(win: Rect) -> Rect {
 
 /// Steps that fit the window width (§3: 16 at the default width, 36 at 819 px).
 pub fn visible_steps(s: &State) -> u32 {
-    (((s.rack_size.0 - base_w(s)) / STEP_W).floor() as i32 + 1).max(1) as u32
+    (((rect(s).w - base_w(s)) / STEP_W).floor() as i32 + 1).max(1) as u32
 }
 
 /// A shown row: its channel, the content offset of its name button top, and whether it is zipped (§17).
@@ -161,7 +125,7 @@ fn scroll(s: &State) -> f32 {
 
 /// Screen y of a row's name button top.
 fn row_y(s: &State, p: &RowPos) -> f32 {
-    s.rack_pos.1 + 30.0 + p.top - scroll(s) - 2.0
+    rect(s).y + 30.0 + p.top - scroll(s) - 2.0
 }
 
 /// The channel row at screen y `y` (inside the rows panel), if any.
@@ -181,13 +145,13 @@ pub fn name_rect(s: &State, r: usize) -> Option<Rect> {
     let p = layout(s).into_iter().find(|p| p.row == r)?;
     let c = cols(s);
     let ry = row_y(s, &p);
-    Some(Rect::new(s.rack_pos.0 + c.name_x, ry, c.name_w, 26.0))
+    Some(Rect::new(rect(s).x + c.name_x, ry, c.name_w, 26.0))
 }
 
 /// The step column under screen x `x` (any row), if inside the step area.
 pub fn step_at(s: &State, x: f32) -> Option<u32> {
     let c = cols(s);
-    let f = (x - (s.rack_pos.0 + c.step_x) + sx(s)) / STEP_W;
+    let f = (x - (rect(s).x + c.step_x) + sx(s)) / STEP_W;
     (f >= 0.0).then_some(f as u32)
 }
 
@@ -204,16 +168,17 @@ pub fn fit_name_w(s: &State) -> f32 {
     (longest as f32 * 7.5 + 14.0).max(40.0)
 }
 
-/// Graph editor panel (§14) under the focused row: steps area wide, `GRAPH_H` tall.
+/// Graph editor panel (§14) under the focused row: steps area wide, `GRAPH_H` tall, kept on the page.
 pub fn graph_rect(s: &State) -> Option<Rect> {
     if !s.rack.graph_open || !s.shown(Win::ChannelRack) {
         return None;
     }
     let p = layout(s).into_iter().find(|p| p.row == s.selected_channel && !p.zipped)?;
-    let c = cols(s);
-    let x = s.rack_pos.0 + c.step_x - 2.0;
+    let (c, win) = (cols(s), rect(s));
+    let x = win.x + c.step_x - 2.0;
     let w = visible_steps(s) as f32 * STEP_W + 3.0;
-    Some(Rect::new(x, row_y(s, &p) + 27.0, w, GRAPH_H))
+    let y = (row_y(s, &p) + 27.0).min(win.bottom() - GRAPH_H).max(win.y + 30.0);
+    Some(Rect::new(x, y, w, GRAPH_H.min((win.bottom() - y).max(GRAPH_TABS_H))))
 }
 
 /// The columns of the steps playing at ticks `a` and `b` in pattern mode, when they differ: lit steps down the
@@ -259,20 +224,16 @@ fn shorten(ui: &mut Ui, f: Font, text: &str, w: f32) -> String {
 
 pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) {
     let t = ui.t;
+    let outer = s.win_rect(Win::ChannelRack);
+    super::window_body(ui, outer);
+    let _ = super::float_frame(ui, s, Win::ChannelRack, outer);
     let win = rect(s);
     let (x, y, w, h) = (win.x, win.y, win.w, win.h);
     let c = cols(s);
     let lemon = super::lemon(ui);
     let hv = crate::high_visibility::on();
-    // Frame (§1). Lemon (spec: ui/lemon-design.md §5): one rounded outlined panel.
-    if lemon {
-        lk::outlined(ui.c, win, lk::r_panel(t), t.window_border, t.window_body);
-    } else {
-        ui.c.fill_rect(win, t.window_border);
-        let body = win.inset(1.0);
-        ui.c.fill_rect(body, t.window_body);
-        ui.c.fill_rect(Rect::new(body.x, body.y, body.w, 1.0), t.window_title_hi);
-    }
+    // The page (§1), running into the tab strip above it.
+    ui.c.fill_rect(win, t.window_body);
     ui.hit(win, Action::RackArea, "Instrument rack");
     let bar = Rect::span(x + 1.0, x + w - 1.0, y + 1.0, y + 29.0);
     ui.hit(bar, Action::WinDrag(Win::ChannelRack), "Instrument rack - drag to move");
@@ -363,7 +324,7 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) {
             spin_mark(ui, x + 94.0, ry + 13.0, t.text_dim.shade(-0.1));
         }
         // Name button (§13): the channel colour fills the face.
-        let nhov = ui.hit(nb, Action::ChannelSelect(i), "Click: plugin window, Shift+click: rename, right-click: channel menu");
+        let nhov = ui.hit(nb, Action::ChannelSelect(i), "Click: plugin window, drag: onto the Arranger, Shift+click: rename, right-click: channel menu");
         let base = ch.color.map_or(t.name_button, |col| rgb(col).mix(t.name_button, NAME_MIX));
         let face = if focused { base.shade(0.18).mix(t.name_button_sel, 0.5) } else { base };
         let face = if nhov { face.shade(0.06) } else { face };
@@ -466,16 +427,18 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) {
         super::scrollbar(ui, track, true, scroll, view_h, total_h, Scroll::RackY);
     }
 
-    // Footer (§4, §16).
-    add_button(ui, x + c.name_x, c.name_w, y + h);
+    // Under the last row (§4, §16), which on a tall page is far above the page's bottom.
+    let rows_end = y + 30.0 + PAD + rows_h(s) - scroll;
+    add_button(ui, x + c.name_x, c.name_w, (rows_end + 30.0).min(y + h));
     if let Some(k) = cur_step {
         let k = k % len.max(1);
         let px = step_x0 + STEP_W * k as f32 - sx;
+        let py = (rows_end + 1.0).min(y + h - 30.0);
         if px >= step_x0 - 1.0 && px + 13.0 <= steps_right + 2.0 {
             if lemon {
-                ui.c.fill_rrect(Rect::new(px, y + h - 30.0, 13.0, 7.0), 2.5, t.accent);
+                ui.c.fill_rrect(Rect::new(px, py, 13.0, 7.0), 2.5, t.accent);
             } else {
-                ui.c.fill_rect(Rect::new(px, y + h - 30.0, 13.0, 7.0), ui.t.s(0x5a6064));
+                ui.c.fill_rect(Rect::new(px, py, 13.0, 7.0), ui.t.s(0x5a6064));
             }
         }
     }
@@ -500,13 +463,8 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) {
     ui.c.polyline(&[(x + w - 23.0, cy - 3.0), (x + w - 20.0, cy), (x + w - 23.0, cy + 3.0)], 1.3, chev);
     }
 
-    // Resize zones: right edge, bottom edge, corner (§5).
-    let (r, b) = (win.right(), win.bottom());
-    ui.hit(Rect::span(r - 3.0, r + 4.0, y + 29.0, b - 8.0), Action::RackResize(EDGE_RIGHT), "Drag to resize");
-    ui.hit(Rect::span(x, r - 8.0, b - 3.0, b + 4.0), Action::RackResize(EDGE_BOTTOM), "Drag to resize");
-    ui.hit(Rect::span(r - 10.0, r + 4.0, b - 10.0, b + 4.0), Action::RackResize(EDGE_RIGHT | EDGE_BOTTOM), "Drag to resize");
-
     graph_editor(ui, s, sx, first_step, steps_shown);
+    super::resize_zones(ui, s, Win::ChannelRack, outer);
 }
 
 /// Title bar contents (§2, §7). Left items follow the name column; the right group follows the right edge.
@@ -666,9 +624,6 @@ fn title_bar(ui: &mut Ui, s: &State, win: Rect, c: Cols, f: &FrameInfo) {
             ui.c.fill_rect(Rect::new(b.x + 0.5, b.y + 2.0, b.w - 1.0, 1.0), Color::rgb(0x71292b));
         }
     }
-    let close = Rect::new(r - 22.0, y + 6.0, 16.0, 16.0);
-    let hov = ui.hit(close, Action::CloseWin(Win::ChannelRack), "Close");
-    icons::draw(ui.c, Icon::Close, close.inset(1.5), if hov { ui.t.tx(0xffffff) } else { t.glyph });
 }
 
 /// One step button (§3): bordered, lighter at the top, a dark dash below the top edge (red at the play position).
@@ -713,7 +668,7 @@ fn graph_editor(ui: &mut Ui, s: &State, sx: f32, first: u32, shown: u32) {
     let ch = s.project.channels.get(s.selected_channel).map(|c| c.index);
     let notes = rk::row_notes(s, s.selected_channel);
     ui.c.push_clip(bars);
-    let x0 = s.rack_pos.0 + cols(s).step_x;
+    let x0 = rect(s).x + cols(s).step_x;
     let group = rk::beat_steps(s);
     for k in first..first + shown + 1 {
         let cx = x0 + STEP_W * k as f32 - sx;
@@ -919,11 +874,11 @@ pub fn paint_fill(ui: &mut Ui, s: &State) {
     ui.c.text(Font::new(12), r.x + 12.0, gy + 2.0, t.menu_pop_head_text, "Sequence");
     let rows: [(&str, String, Option<FillHit>, Option<(FillHit, FillHit)>); 3] = [
         ("Fill type", fd.kind.label().to_string(), Some(FillHit::Type), None),
-        ("Sequence length", fd.len.to_string(), None, Some((FillHit::Len(-1), FillHit::Len(1)))),
+        ("Sequence length", fd.len.to_string(), Some(FillHit::Number(false)), Some((FillHit::Len(-1), FillHit::Len(1)))),
         (
             if fd.kind == FillType::Euclid { "Step count" } else { "Interval" },
             if fd.kind == FillType::Manual { "---".into() } else { fd.amount.to_string() },
-            None,
+            (fd.kind != FillType::Manual).then_some(FillHit::Number(true)),
             (fd.kind != FillType::Manual).then_some((FillHit::Amount(-1), FillHit::Amount(1))),
         ),
     ];
@@ -932,6 +887,7 @@ pub fn paint_fill(ui: &mut Ui, s: &State) {
         ui.c.text(font, r.x + 14.0, ry + 2.0, t.text_dim, label);
         let vb = Rect::new(r.x + 140.0, ry, 90.0, 21.0);
         let hov = match click {
+            Some(FillHit::Number(_)) => ui.hit(vb, Action::RackFill(click.unwrap_or(FillHit::Inside)), "Scroll to change, right-click: input a number"),
             Some(h) => ui.hit(vb, Action::RackFill(h), "Click to change"),
             None => false,
         };
