@@ -79,11 +79,11 @@ fn rename(ui: &mut Ui, s: &State, m: &Modal, f: &Rename) {
     panel(ui, Rect::new(r.x + 5.0, r.y + 28.0, r.w - 10.0, r.h - 28.0 - 55.0));
     let (x, w) = (r.x + 16.0, r.w - 32.0);
     label(ui, x, r.y + 38.0, Rename::FIELDS[0], true);
-    field(ui, Rect::new(x, r.y + 56.0, w, 24.0), &f.name, f.focus == 0, DHit::Form(FHit::Field(0)), "The project's new name");
+    field(ui, Rect::new(x, r.y + 56.0, w, 24.0), &f.name, f.focus == 0, DHit::Form(FHit::Field(0)), "Type the project's new name");
     check(ui, x, r.y + 100.0, Rename::CHECKS[0], f.rename_folder, true, FHit::Check(0), "Rename the data folder too");
     let fr = Rect::new(x + 20.0, r.y + 114.0, w - 20.0, 24.0);
     if f.folder_editable() {
-        field(ui, fr, &f.folder, f.focus == 1, DHit::Form(FHit::Field(1)), "The data folder's new name");
+        field(ui, fr, &f.folder, f.focus == 1, DHit::Form(FHit::Field(1)), "Type the data folder's new name");
     } else {
         field_off(ui, fr, if f.rename_folder { f.folder_name() } else { &f.folder.text });
     }

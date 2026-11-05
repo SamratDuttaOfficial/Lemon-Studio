@@ -194,7 +194,7 @@ mod tests {
         app.state.selected_channel = 1;
         app.paint(&mut c, None);
         let b = hit_rect(&app, &Action::ToggleWin(Win::Touch));
-        assert_eq!(hint(&app, &Action::ToggleWin(Win::Touch)), "Touch controller (Alt+F7)");
+        assert_eq!(hint(&app, &Action::ToggleWin(Win::Touch)), "Show or hide the Touch controller (Alt+F7)");
         app.mouse_move(b.cx(), b.cy());
         app.mouse_down();
         app.mouse_up();

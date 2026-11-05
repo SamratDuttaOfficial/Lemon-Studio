@@ -46,11 +46,11 @@ pub fn paint(ui: &mut Ui, s: &State, e: &TextEdit, t: Target, norm: bool) {
     // ✓, ✗ and the caption.
     let dim = th.tx(0x6a6d6e);
     let ok = Rect::new(r.x + 3.0, r.y + 30.0, 16.0, 18.0);
-    let ok_hov = ui.hit(ok, Action::TypeIn(TiAct::Accept), "Accept");
+    let ok_hov = ui.hit(ok, Action::TypeIn(TiAct::Accept), "Accept this value (Enter)");
     let (cx, cy) = (ok.cx(), ok.cy());
     ui.c.polyline(&[(cx - 4.5, cy), (cx - 1.5, cy + 3.5), (cx + 4.5, cy - 4.0)], 1.5, if ok_hov { th.text } else { dim });
     let close = Rect::new(r.x + 23.0, r.y + 30.0, 16.0, 18.0);
-    let close_hov = ui.hit(close, Action::TypeIn(TiAct::Close), "Close (Esc)");
+    let close_hov = ui.hit(close, Action::TypeIn(TiAct::Close), "Close without changing the value (Esc)");
     let (cx, cy, c) = (close.cx(), close.cy(), if close_hov { th.text } else { dim });
     ui.c.line(cx - 4.0, cy - 4.0, cx + 4.0, cy + 4.0, 1.5, c);
     ui.c.line(cx - 4.0, cy + 4.0, cx + 4.0, cy - 4.0, 1.5, c);

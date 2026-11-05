@@ -243,7 +243,6 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
     if s.toolbar.hint_bar {
         toolbar::paint_hint_bar(ui, s, f);
     }
-    tabs::paint_tip(ui, s);
     let overlays = ui.hit_count();
     // The toolbar editor's palette goes over the windows, which docked plugin windows leave free like any overlay (spec:
     // ui/toolbar-menu.md §8).
@@ -286,7 +285,32 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
     if over_dialog {
         playlist::paint_overlays(ui, s);
     }
+    hover_tip(ui, s);
     overlays
+}
+
+/// The tooltip of the control the mouse rests on (`App::tip_tick`): what it does, in a dark bubble under the control, over
+/// it where there is no room below. Over everything, and it takes no clicks.
+fn hover_tip(ui: &mut Ui, s: &State) {
+    let Some((anchor, text)) = &s.tip else {
+        s.tip_drawn.set(None);
+        return;
+    };
+    let t = ui.t;
+    let font = os_ui::Font::new(13);
+    let lines = wrap(ui.c, font, &text.replace('\t', "  "), 320.0);
+    let w = lines.iter().map(|l| ui.c.text_width(font, l)).fold(0.0f32, f32::max).ceil() + 16.0;
+    let (lh, (sw, sh)) = (16.0, ui.c.size());
+    let h = lines.len() as f32 * lh + 10.0;
+    let below = anchor.bottom() + 5.0;
+    let y = if below + h <= sh { below } else { (anchor.y - 5.0 - h).max(0.0) };
+    let b = Rect::new(anchor.x.min(sw - w - 2.0).max(0.0), y, w, h);
+    ui.c.fill_rrect(b.outset(1.0), 6.0, Color::rgb(0).with_alpha(90));
+    ui.c.fill_rrect(b, 5.0, t.s(0x0b0d0f).with_alpha(245));
+    for (k, l) in lines.iter().enumerate() {
+        ui.c.text(font, b.x + 8.0, b.y + 5.0 + k as f32 * lh, t.tx(0xe6e6e6), l);
+    }
+    s.tip_drawn.set(Some(b.outset(2.0)));
 }
 
 /// Where window `w` paints: its rect. The resize zones past its edges are hits only. A repaint that misses this skips

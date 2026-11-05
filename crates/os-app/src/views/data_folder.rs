@@ -69,9 +69,9 @@ pub fn paint_row(ui: &mut Ui, s: &State, row: &Row, g: Rect, x0: f32, y: f32, h:
             let path = df::path_text(s);
             let pw = (g.right() - 12.0 - (fb.right() + 8.0)).max(0.0);
             let pr = Rect::new(fb.right() + 8.0, y + 4.0, pw, 24.0);
-            let hov_f = ui.hit(fb, Action::Settings(SAct::Button(SET_FOLDER)), SET_FOLDER);
+            let hov_f = ui.hit(fb, Action::Settings(SAct::Button(SET_FOLDER)), "Choose the project's data folder");
             let pw = ui.c.text_width(f, &path).min(pr.w);
-            let hov_p = ui.hit(Rect::new(pr.x, pr.y, pw, pr.h), Action::Settings(SAct::Button(SET_FOLDER)), SET_FOLDER);
+            let hov_p = ui.hit(Rect::new(pr.x, pr.y, pw, pr.h), Action::Settings(SAct::Button(SET_FOLDER)), "Choose the project's data folder");
             button_face(ui, fb, hov_f || hov_p);
             let icon = Rect::new(fb.cx() - 6.5, fb.cy() - 6.5, 13.0, 13.0);
             crate::icons::draw(ui.c, crate::icons::Icon::Folder, icon, if hov_f || hov_p { t.glyph } else { t.text });

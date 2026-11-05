@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
-//! The plugin window's Cut part and Whole audio tabs on a sample's channel (`os_model::clip_fx`): what the piece or the
+//! The plugin window's This clip and Source audio tabs on a sample's channel (`os_model::clip_fx`): what the piece or the
 //! whole sample is, its plugins, and its automation lanes over its waveform. The frame draws the page in place of the
 //! plugin's editor, as it does the Misc tab; values come from the app (`crate::clip_fx::page_vals`), edits go back to it as
 //! [`Event`]s. A lane being dragged is kept here until the button is let go: one edit, one undo step.
@@ -18,11 +18,42 @@ pub const PAGE_W: f32 = 780.0;
 pub const PAGE_H: f32 = 500.0;
 pub const SLOTS: usize = 10;
 
-/// Which of the two tabs.
+/// Which of the two tabs: this clip, or the source audio all its clips come from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tab {
     Cut,
     Whole,
+}
+
+impl Tab {
+    /// The tab's name.
+    pub fn name(self) -> &'static str {
+        match self {
+            Tab::Cut => "This clip",
+            Tab::Whole => "Source audio",
+        }
+    }
+
+    /// What the tab is for, in its tooltip.
+    pub fn about(self) -> &'static str {
+        match self {
+            Tab::Cut => "This clip: plugins and automation for just this clip in the Arranger",
+            Tab::Whole => "Source audio: plugins and automation for the whole file, heard on every clip of it",
+        }
+    }
+}
+
+/// Where the song position stands on a tab.
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
+pub enum Pos {
+    /// At this second of the sample: playback starts or is here.
+    At(f64),
+    /// In the song before this clip, or after it.
+    Before,
+    After,
+    /// On no clip of this audio.
+    #[default]
+    Away,
 }
 
 /// One plugin slot as shown.
@@ -45,7 +76,7 @@ pub struct LaneVals {
     pub inherited: Vec<AutoPoint>,
 }
 
-/// A cut on the sample's clock (the Whole audio tab).
+/// A cut on the sample's clock (the Source audio tab).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Mark {
     pub from_s: f64,
@@ -73,6 +104,8 @@ pub struct Side {
     /// The lane the app wants shown (a lane just added): a newer `focus_serial` takes over from the user's last choice.
     pub focus: Lane,
     pub focus_serial: u32,
+    /// Where the song position is here.
+    pub pos: Pos,
 }
 
 impl Default for Side {
@@ -88,6 +121,7 @@ impl Default for Side {
             marks: Vec::new(),
             focus: Lane::Volume,
             focus_serial: 0,
+            pos: Pos::Away,
         }
     }
 }
@@ -97,8 +131,6 @@ impl Default for Side {
 pub struct PageVals {
     pub cut: Side,
     pub whole: Side,
-    /// Where playback is on the sample's clock, seconds, while a clip of it plays.
-    pub playhead: Option<f64>,
 }
 
 impl PageVals {
@@ -134,6 +166,7 @@ impl PageVals {
                     v.on = !v.on;
                 }
             }
+            Event::SetPos { tab, at } => self.side_mut(*tab).pos = Pos::At(*at),
             _ => {}
         }
     }
@@ -156,6 +189,8 @@ pub enum Event {
     AddLane { tab: Tab, x: i32, y: i32 },
     /// A lane's points after an edit (empty: it has none any more).
     SetLane { tab: Tab, lane: Lane, points: Vec<AutoPoint> },
+    /// The time ruler was clicked or dragged: the song position goes to this second of the sample.
+    SetPos { tab: Tab, at: f64 },
 }
 
 /// Mouse buttons the page takes.
@@ -181,6 +216,8 @@ pub enum Press {
 enum Drag {
     Point { lane: Lane, i: usize, moved: bool },
     Mix { slot: u8, mix: f32 },
+    /// The time ruler: where the song position is being put.
+    Pos { at: f64 },
 }
 
 /// The page's own state: per tab the lane shown, what is being dragged, the hint.
@@ -220,6 +257,8 @@ pub enum Hit {
     Point(usize),
     /// The lane editor, away from any point.
     Plot,
+    /// The time ruler over the lane editor: it places the song position.
+    Ruler,
 }
 
 fn tab_at(t: Tab) -> usize {
@@ -239,6 +278,8 @@ const ROW_H: f32 = 20.0;
 const LANES_Y: f32 = SLOTS_Y + SLOTS as f32 * ROW_H + 26.0;
 const BOTTOM: f32 = PAGE_H - 8.0;
 const AXIS_H: f32 = 16.0;
+const RULER_H: f32 = 16.0;
+const PLOT_Y: f32 = INFO_H + 32.0;
 
 fn rows_shown() -> usize {
     ((BOTTOM - LANES_Y) / ROW_H) as usize
@@ -266,9 +307,14 @@ fn clear_rect() -> Rect {
     Rect::new(PAGE_W - 8.0 - 92.0, INFO_H + 6.0, 92.0, 20.0)
 }
 
+/// The time ruler over the lane editor's plot.
+pub fn ruler_rect() -> Rect {
+    Rect::new(RIGHT_X, PLOT_Y, plot_rect().w, RULER_H)
+}
+
 /// The lane editor's plot.
 pub fn plot_rect() -> Rect {
-    Rect::span(RIGHT_X, PAGE_W - 8.0, INFO_H + 32.0, BOTTOM - AXIS_H)
+    Rect::span(RIGHT_X, PAGE_W - 8.0, PLOT_Y + RULER_H, BOTTOM - AXIS_H)
 }
 
 /// The lane the tab shows: the app's when it asked last, else the user's; Volume when that one is gone.
@@ -358,6 +404,9 @@ pub fn hit(ui: &PageUi, vals: &PageVals, tab: Tab, x: f32, y: f32) -> Option<Hit
             };
         }
     }
+    if ruler_rect().contains(x, y) {
+        return Some(Hit::Ruler);
+    }
     let lane = shown(ui, side, tab)?;
     if clear_rect().contains(x, y) && !points(ui, lane).is_empty() {
         return Some(Hit::Clear);
@@ -406,6 +455,12 @@ pub fn press(ui: &mut PageUi, vals: &PageVals, tab: Tab, x: f32, y: f32, b: Butt
                 out.push(Event::SetLane { tab, lane: l.lane, points: Vec::new() });
             }
             Press::Repaint
+        }
+        (Button::Left, Hit::Ruler) => {
+            let at = x_to_s(side, plot_rect(), x);
+            ui.drag = Some(Drag::Pos { at });
+            out.push(Event::SetPos { tab, at });
+            Press::Capture
         }
         (Button::Left, Hit::Point(i)) => {
             let Some(l) = shown(ui, side, tab) else { return Press::Nothing };
@@ -461,6 +516,12 @@ pub fn motion(ui: &mut PageUi, vals: &PageVals, tab: Tab, x: f32, y: f32) -> boo
             ui.hint = format!("Mix: {:.0}%", mix * 100.0);
             true
         }
+        Some(Drag::Pos { .. }) => {
+            let at = x_to_s(side, plot_rect(), x);
+            ui.drag = Some(Drag::Pos { at });
+            ui.hint = format!("Song position: {}", time_text(at));
+            true
+        }
         None => {
             let h = hit(ui, vals, tab, x, y);
             let changed = h != ui.hover;
@@ -482,6 +543,7 @@ pub fn release(ui: &mut PageUi, tab: Tab, out: &mut Vec<Event>) {
             }
         }
         Some(Drag::Mix { slot, mix }) => out.push(Event::SetMix { tab, slot, mix }),
+        Some(Drag::Pos { at }) => out.push(Event::SetPos { tab, at }),
         _ => {}
     }
     ui.preview = None;
@@ -535,16 +597,17 @@ fn hint_of(ui: &PageUi, vals: &PageVals, tab: Tab, h: Option<Hit>, x: f32, y: f3
         Hit::SlotName(k) => match side.slots.get(usize::from(k)).and_then(|s| s.name.as_ref()) {
             Some(n) => format!("{n}: click to open, right-click for its menu"),
             None => match tab {
-                Tab::Cut => "Add a plugin to this cut only".into(),
-                Tab::Whole => "Add a plugin to all of this audio, every cut of it".into(),
+                Tab::Cut => "Add a plugin to this clip only".into(),
+                Tab::Whole => "Add a plugin to the source audio, heard on every clip of it".into(),
             },
         },
         Hit::SlotLed(_) => "Plugin on / off".into(),
         Hit::SlotMix(k) => format!("Mix: {:.0}%", side.slots.get(usize::from(k)).map_or(100.0, |s| s.mix * 100.0)),
         Hit::LaneRow(i) => side.lanes.get(i).map_or(String::new(), |l| format!("Show the {} line", l.name)),
         Hit::AddLane => "Automate a parameter of a plugin here".into(),
+        Hit::Ruler => "Click or drag to place the song position: playback starts here".into(),
         Hit::Clear => match tab {
-            Tab::Cut => "Remove this cut's own line: it follows the whole audio's again".into(),
+            Tab::Cut => "Remove this clip's own line: it follows the source audio's again".into(),
             Tab::Whole => "Remove this line".into(),
         },
         Hit::Point(i) => {
@@ -573,18 +636,18 @@ fn lane_state(l: &LaneVals) -> u8 {
 /// What the editor's top line says about the lane shown.
 fn status_text(l: &LaneVals, tab: Tab, side: &Side) -> String {
     match (tab, l.own.is_empty(), l.inherited.is_empty()) {
-        (Tab::Cut, false, false) => "This cut's own line: the whole audio's does not touch it here.".into(),
-        (Tab::Cut, false, true) => "This cut's own line.".into(),
-        (Tab::Cut, true, false) => "Following the whole audio's line. Click to draw this cut's own.".into(),
-        (Tab::Cut, true, true) => "No automation. Click to draw this cut's own line.".into(),
+        (Tab::Cut, false, false) => "This clip's own line: the source audio's does not touch it here.".into(),
+        (Tab::Cut, false, true) => "This clip's own line.".into(),
+        (Tab::Cut, true, false) => "Following the source audio's line. Click to draw this clip's own.".into(),
+        (Tab::Cut, true, true) => "No automation. Click to draw this clip's own line.".into(),
         (Tab::Whole, _, _) => {
             let n = side.marks.iter().filter(|m| m.own.contains(&l.lane)).count();
             match (l.own.is_empty(), n) {
-                (true, 0) => "No automation. Click to draw a line for every cut of this audio.".into(),
-                (true, n) => format!("No line here. {n} cut(s) have their own."),
-                (false, 0) => "Moves every cut of this audio.".into(),
-                (false, 1) => "Moves every cut of this audio but the 1 with its own line.".into(),
-                (false, n) => format!("Moves every cut of this audio but the {n} with their own line."),
+                (true, 0) => "No automation. Click to draw a line for every clip of this audio.".into(),
+                (true, n) => format!("No line here. {n} clip(s) have their own."),
+                (false, 0) => "Moves every clip of this audio.".into(),
+                (false, 1) => "Moves every clip of this audio but the 1 with its own line.".into(),
+                (false, n) => format!("Moves every clip of this audio but the {n} with their own line."),
             }
         }
     }
@@ -596,7 +659,7 @@ pub fn paint(c: &mut Canvas, p: &Palette, ox: f32, oy: f32, vals: &PageVals, ui:
     let at = |r: Rect| Rect::new(r.x + ox, r.y + oy, r.w, r.h);
     let (text, dim, line) = (p.tx(0xd4dade), p.tx(0x8c9296), p.s(0x13191d));
     if !side.available {
-        let msg = "Double-click a piece of this audio in the playlist to see that cut here.";
+        let msg = "Double-click a clip of this audio in the Arranger to see it here.";
         c.text_center(Font::new(15), at(Rect::new(0.0, 0.0, PAGE_W, PAGE_H)), dim, msg);
         return;
     }
@@ -605,8 +668,8 @@ pub fn paint(c: &mut Canvas, p: &Palette, ox: f32, oy: f32, vals: &PageVals, ui:
     let heading = |c: &mut Canvas, y: f32, s: &str| c.text(Font::condensed(11, 4).bold(), ox + LEFT_X, oy + y, dim, s);
 
     heading(c, SLOTS_Y - 17.0, match tab {
-        Tab::Cut => "PLUGINS ON THIS CUT",
-        Tab::Whole => "PLUGINS ON THE WHOLE AUDIO",
+        Tab::Cut => "PLUGINS ON THIS CLIP",
+        Tab::Whole => "PLUGINS ON THE SOURCE AUDIO",
     });
     for (k, s) in side.slots.iter().enumerate().take(SLOTS) {
         slot_row(c, p, at(slot_rect(k)), k, s, ui, ox, oy);
@@ -641,17 +704,75 @@ pub fn paint(c: &mut Canvas, p: &Palette, ox: f32, oy: f32, vals: &PageVals, ui:
                 Tab::Whole => "Remove line",
             });
         }
-        plot(c, p, ox, oy, side, l, pts, tab, vals.playhead);
+        let pos = match &ui.drag {
+            Some(Drag::Pos { at }) => Pos::At(*at),
+            _ => side.pos,
+        };
+        plot(c, p, ox, oy, side, l, pts, tab, pos);
+        ruler(c, p, ox, oy, side, tab, pos);
+    }
+}
+
+/// The time ruler: times along it and the song position's flag, as on the Arranger's. Where the song position is not on
+/// this audio it says so, so the missing line explains itself.
+#[allow(clippy::too_many_arguments)]
+fn ruler(c: &mut Canvas, p: &Palette, ox: f32, oy: f32, side: &Side, tab: Tab, pos: Pos) {
+    let plot = plot_rect();
+    let r0 = ruler_rect();
+    let r = Rect::new(r0.x + ox, r0.y + oy, r0.w, r0.h);
+    c.fill_rect(r, p.ruler);
+    c.push_clip(r);
+    let f = Font::new(11);
+    let span = (side.to_s - side.from_s).max(1e-6);
+    // A label about every 90 px.
+    let want = span * 90.0 / f64::from(r.w.max(1.0));
+    let step = [0.01, 0.02, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 15.0, 30.0, 60.0, 120.0, 300.0, 600.0].into_iter().find(|&k| k >= want).unwrap_or(1200.0);
+    let mut k = (side.from_s / step).ceil();
+    while k * step <= side.to_s {
+        let s = k * step;
+        let x = s_to_x(side, plot, s) + ox;
+        c.fill_rect(Rect::new(x.round(), r.bottom() - 4.0, 1.0, 4.0), p.ruler_text.with_alpha(150));
+        c.text(f, x.round() + 3.0, r.y + 1.0, p.ruler_text, &short_time(s, step));
+        k += 1.0;
+    }
+    match pos {
+        Pos::At(s) => {
+            let x = s_to_x(side, plot, s.clamp(side.from_s, side.to_s)) + ox;
+            let (y0, k) = (r.y + 0.5, 9.0);
+            c.fill_polygon(&[(x - 0.5, y0 - 0.5), (x + k + 1.0, y0 - 0.5), (x - 0.5, y0 + k + 1.0)], p.s(0x0b1114));
+            c.fill_polygon(&[(x, y0), (x + k, y0), (x, y0 + k)], p.playhead);
+        }
+        other => {
+            let msg = match (other, tab) {
+                (Pos::Before, _) => "Song position is before this clip: click to place it here",
+                (Pos::After, _) => "Song position is after this clip: click to place it here",
+                _ => "Song position is not on this audio: click to place it here",
+            };
+            let w = c.text_width(f, msg) + 12.0;
+            let b = Rect::new(r.cx() - w / 2.0, r.y, w, r.h);
+            c.fill_rect(b, p.ruler);
+            c.text_center(f, b, p.tx(0xd4dade), msg);
+        }
+    }
+    c.pop_clip();
+}
+
+/// A ruler label: minutes and seconds, with as many decimals as the spacing `step` needs.
+fn short_time(s: f64, step: f64) -> String {
+    let m = (s / 60.0).floor();
+    let rest = s - m * 60.0;
+    if step >= 1.0 {
+        format!("{m:.0}:{rest:02.0}")
+    } else if step >= 0.1 {
+        format!("{m:.0}:{rest:04.1}")
+    } else {
+        format!("{m:.0}:{rest:05.2}")
     }
 }
 
 fn info(c: &mut Canvas, p: &Palette, ox: f32, oy: f32, side: &Side, tab: Tab) {
     let (text, dim) = (p.tx(0xd4dade), p.tx(0x8c9296));
-    let title = match tab {
-        Tab::Cut => "Cut part",
-        Tab::Whole => "Whole audio",
-    };
-    c.text(Font::new(15).bold(), ox + LEFT_X, oy + 4.0, text, title);
+    c.text(Font::new(15).bold(), ox + LEFT_X, oy + 4.0, text, tab.name());
     // Two columns of rows.
     let per = side.rows.len().div_ceil(2).max(1);
     let (w, rh) = ((PAGE_W - 2.0 * LEFT_X) / 2.0, 14.0);
@@ -718,7 +839,7 @@ fn lane_line(side: &Side, r: Rect, pts: &[AutoPoint], plot: Rect) -> Vec<(f32, f
 }
 
 #[allow(clippy::too_many_arguments)]
-fn plot(c: &mut Canvas, p: &Palette, ox: f32, oy: f32, side: &Side, l: &LaneVals, pts: &[AutoPoint], tab: Tab, playhead: Option<f64>) {
+fn plot(c: &mut Canvas, p: &Palette, ox: f32, oy: f32, side: &Side, l: &LaneVals, pts: &[AutoPoint], tab: Tab, pos: Pos) {
     let plot = plot_rect();
     let r = Rect::new(plot.x + ox, plot.y + oy, plot.w, plot.h);
     c.fill_rect(r, p.s(0x171a1c));
@@ -767,8 +888,9 @@ fn plot(c: &mut Canvas, p: &Palette, ox: f32, oy: f32, side: &Side, l: &LaneVals
             c.stroke_circle(x, y, 4.0, 1.5, p.a(0x49f1b1));
         }
     }
-    if let Some(s) = playhead.filter(|&s| s >= side.from_s && s <= side.to_s) {
-        c.fill_rect(Rect::new(s_to_x(side, plot, s) + ox, r.y, 1.0, r.h), p.tx(0xffffff).with_alpha(170));
+    // The song position, playing or not: the line playback runs along.
+    if let Pos::At(s) = pos {
+        c.fill_rect(Rect::new(s_to_x(side, plot, s.clamp(side.from_s, side.to_s)) + ox, r.y, 1.5, r.h), p.playhead);
     }
     c.pop_clip();
     // The time axis under the plot: its two ends. The value scale inside it: its top, its plain value and its bottom.
@@ -780,7 +902,7 @@ fn plot(c: &mut Canvas, p: &Palette, ox: f32, oy: f32, side: &Side, l: &LaneVals
     let end_w = c.text_width(f, &end);
     c.text(f, r.right() - end_w, y, dim, &end);
     let scale_x = r.x + 4.0;
-    // Clear of the marks along the top of the Whole audio tab.
+    // Clear of the marks along the top of the Source audio tab.
     c.text(f, scale_x, r.y + 6.0, dim, &value_text(l.lane, 1.0));
     c.text(f, scale_x, neutral + 2.0, dim, &value_text(l.lane, l.lane.neutral()));
     let lh = c.line_height(f);
@@ -805,7 +927,7 @@ mod tests {
     }
 
     fn vals(lanes: Vec<LaneVals>) -> PageVals {
-        PageVals { cut: side(lanes.clone()), whole: side(lanes), playhead: None }
+        PageVals { cut: side(lanes.clone()), whole: side(lanes) }
     }
 
     fn plain() -> PageVals {
@@ -1051,7 +1173,7 @@ mod tests {
         assert!(status_text(&own, Tab::Cut, &s).contains("own line"));
         assert!(status_text(&follows, Tab::Cut, &s).contains("Following"));
         assert!(status_text(&none, Tab::Cut, &s).contains("No automation"));
-        assert!(status_text(&own, Tab::Whole, &s).contains("every cut"));
+        assert!(status_text(&own, Tab::Whole, &s).contains("every clip"));
         let mut marked = side(vec![]);
         marked.marks = vec![Mark { from_s: 0.0, to_s: 1.0, own: vec![Lane::Volume] }, Mark { from_s: 1.0, to_s: 2.0, own: vec![] }];
         assert!(status_text(&own, Tab::Whole, &marked).contains("1 with its own"), "{}", status_text(&own, Tab::Whole, &marked));
@@ -1060,11 +1182,43 @@ mod tests {
         assert_eq!(lane_state(&none), 0);
     }
 
+    /// The ruler places the song position: at once on the press, again where the drag ends, and the line goes along.
+    #[test]
+    fn the_ruler_places_the_song_position() {
+        let v = plain();
+        let mut ui = PageUi::default();
+        let mut out = Vec::new();
+        let (r, plot) = (ruler_rect(), plot_rect());
+        assert_eq!(hit(&ui, &v, Tab::Cut, r.cx(), r.cy()), Some(Hit::Ruler));
+        assert_eq!(press(&mut ui, &v, Tab::Cut, r.cx(), r.cy(), Button::Left, NO_SCREEN, &mut out), Press::Capture);
+        assert!(matches!(out[..], [Event::SetPos { tab: Tab::Cut, at }] if (at - 15.0).abs() < 0.01), "{out:?}");
+        out.clear();
+        assert!(motion(&mut ui, &v, Tab::Cut, plot.x + plot.w * 0.25, r.y - 200.0));
+        assert!(ui.hint.starts_with("Song position"), "{}", ui.hint);
+        // Past the end it stops at the end.
+        motion(&mut ui, &v, Tab::Cut, plot.right() + 500.0, r.cy());
+        assert!(out.is_empty(), "one position per press and release");
+        release(&mut ui, Tab::Cut, &mut out);
+        assert_eq!(out, vec![Event::SetPos { tab: Tab::Cut, at: 20.0 }]);
+        assert!(!ui.dragging());
+        // What the page shows until the app's values follow.
+        let mut w = v.clone();
+        w.apply(&out[0]);
+        assert_eq!(w.cut.pos, Pos::At(20.0));
+        assert_eq!(w.whole.pos, Pos::Away, "the other tab's is its own");
+        // A right click on it does nothing, and a tab with no clip takes nothing.
+        assert_eq!(press(&mut ui, &v, Tab::Cut, r.cx(), r.cy(), Button::Right, NO_SCREEN, &mut out), Press::Nothing);
+        let mut none = plain();
+        none.cut.available = false;
+        assert_eq!(hit(&ui, &none, Tab::Cut, r.cx(), r.cy()), None);
+    }
+
     #[test]
     fn the_page_fits_its_parts() {
         assert!(lane_row_rect(rows_shown() - 1).bottom() <= PAGE_H);
         assert!(slot_rect(SLOTS - 1).bottom() < LANES_Y - 16.0);
         assert!(plot_rect().bottom() + AXIS_H <= PAGE_H);
+        assert_eq!(ruler_rect().bottom(), plot_rect().y);
         assert!(plot_rect().right() <= PAGE_W);
         assert!(rows_shown() >= 5);
         assert!(LEFT_X + LEFT_W < RIGHT_X);

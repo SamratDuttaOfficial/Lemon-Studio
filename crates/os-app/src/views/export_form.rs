@@ -200,7 +200,7 @@ fn combo(ui: &mut Ui, f: &ExportForm, b: Rect, k: u8, boxes: &mut Vec<(u8, Rect)
 /// A click anywhere else only closes it. The MIDI import form's combos use it too.
 pub(super) fn list<S: AsRef<str>>(ui: &mut Ui, s: &State, items: &[S], now: usize, b: Rect) {
     let t = ui.t;
-    hit(ui, Rect::new(0.0, 0.0, s.screen.0, s.screen.1), DHit::Form(FHit::Shut), "");
+    hit(ui, Rect::new(0.0, 0.0, s.screen.0, s.screen.1), DHit::Form(FHit::Shut), "Click outside the list to close it");
     let h = items.len() as f32 * ITEM_H + 6.0;
     let below = Rect::new(b.x, b.bottom() + 2.0, b.w.max(120.0), h);
     let p = if below.bottom() > s.screen.1 - 4.0 { Rect::new(below.x, (b.y - 2.0 - h).max(0.0), below.w, h) } else { below };
@@ -216,7 +216,7 @@ pub(super) fn list<S: AsRef<str>>(ui: &mut Ui, s: &State, items: &[S], now: usiz
     let lh = ui.c.line_height(font);
     for (i, text) in items.iter().enumerate() {
         let row = Rect::new(p.x + 1.0, p.y + 3.0 + i as f32 * ITEM_H, p.w - 2.0, ITEM_H);
-        if hit(ui, row, DHit::Form(FHit::Item(i as u8)), "") {
+        if hit(ui, row, DHit::Form(FHit::Item(i as u8)), "Use this choice") {
             if lemon {
                 lk::row_highlight(ui.c, t, row);
             } else {

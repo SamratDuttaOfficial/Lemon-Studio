@@ -176,8 +176,8 @@ pub fn paint_row(ui: &mut Ui, s: &State, m: MRow, g: Rect, x0: f32, y: f32, h: f
         }
         MRow::Link(of) => {
             let (c, hint) = match of {
-                CurveOf::Velocity => (&crate::prefs::VELOCITY_LINK, "Note on velocity link target"),
-                CurveOf::Release => (&crate::prefs::RELEASE_LINK, "Release velocity link target"),
+                CurveOf::Velocity => (&crate::prefs::VELOCITY_LINK, "What a played note's velocity becomes: none, Velocity, Mod A or Mod B"),
+                CurveOf::Release => (&crate::prefs::RELEASE_LINK, "What a played note's release velocity becomes: none or Release"),
             };
             let b = Rect::new(x0, y + 3.0, 100.0, 21.0);
             let hov = ui.hit(b, Action::Settings(SAct::Combo(c.label, b.x, b.bottom())), hint);
@@ -233,7 +233,7 @@ fn list(ui: &mut Ui, b: Rect, title: &'static str, rows: &[(String, String, bool
     for (i, (name, info, on)) in rows.iter().take(n).enumerate() {
         let rr = Rect::new(b.x + 2.0, top + i as f32 * ROW_H, b.w - 4.0, ROW_H);
         let act_row = if power { MAct::Input(i) } else { MAct::Output(i) };
-        let hov = ui.hit(rr, act(act_row), title);
+        let hov = ui.hit(rr, act(act_row), "Select this device, to set its options below");
         if i == sel {
             let c = if lemon { t.brand_sel(os_theme::design::lemon::COLORED_DARK) } else { t.a(0x2d5a8c) };
             ui.c.fill_rect(rr, c);
@@ -340,7 +340,7 @@ pub fn paint_curve(ui: &mut Ui, e: &CurveEdit, win: Rect) {
     let lemon = super::lemon(ui);
     let (panel, graph, reset, accept, close) = curve_rects(win);
     let rad = if lemon { lk::r_panel(t) } else { 0.0 };
-    ui.hit(panel, act(MAct::CurveBody), "");
+    ui.hit(panel, act(MAct::CurveBody), "Drag the three handles to shape the curve");
     ui.c.fill_rrect(panel.outset(3.0), rad + 3.0, Color::rgb(0).with_alpha(70));
     ui.c.fill_rrect(panel, rad, t.s(0x1c1e21));
     ui.c.fill_rrect(panel.inset(1.0), (rad - 1.0).max(0.0), t.s(0x2b2d30));
@@ -367,7 +367,7 @@ pub fn paint_curve(ui: &mut Ui, e: &CurveEdit, win: Rect) {
         ui.c.fill_circle(hx, hy, 5.5, if hov { t.glyph } else { t.text });
         ui.c.fill_circle(hx, hy, 3.5, t.s(0x141516));
     }
-    for (b, a, label, hint) in [(reset, MAct::CurveReset, "Reset", "Straight line"), (accept, MAct::CurveAccept, "Accept", "Keep this curve")] {
+    for (b, a, label, hint) in [(reset, MAct::CurveReset, "Reset", "Back to a straight line"), (accept, MAct::CurveAccept, "Accept", "Keep this curve")] {
         let hov = ui.hit(b, act(a), hint);
         button_face(ui, b, hov);
         ui.c.text_center(Font::new(13), b, if hov { t.glyph } else { t.text }, label);

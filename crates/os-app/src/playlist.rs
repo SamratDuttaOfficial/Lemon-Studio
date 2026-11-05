@@ -319,6 +319,9 @@ pub enum Cmd {
     GroupCollapse(u16),
     TrackUp(u16),
     TrackDown(u16),
+    /// A track's height, as a multiple of the Arranger's track height.
+    TrackHeight(u16, f32),
+    TracksHeightReset,
     TrackInsert(u16),
     TrackDelete(u16),
     TrackColor(u16, Option<Rgb>),
@@ -340,7 +343,7 @@ pub enum Cmd {
     Browser(crate::browser::BCmd),
     /// Plugin menus (spec: ui/plugin-menu.md).
     Plugin(crate::plugin_menu::PlugCmd),
-    /// The plugin window's Cut part and Whole audio tabs (`clip_fx`).
+    /// The plugin window's This clip and Source audio tabs (`clip_fx`).
     ClipFx(crate::clip_fx::C),
     /// The project picker (spec: ui/project-picker.md).
     Project(crate::project_picker::ProjCmd),
@@ -649,6 +652,8 @@ pub struct PlaylistState {
     pub row_h: f32,
     /// Last header click (track, time) for double-click rename.
     pub last_header: Option<(u16, std::time::Instant)>,
+    /// The last press on a track's bottom edge, for its double-click.
+    pub last_edge: Option<(u16, std::time::Instant)>,
     /// Last left click on an audio clip (clip, time): a second one soon after opens its sampler.
     pub last_clip: Option<(usize, std::time::Instant)>,
     /// Last left click in the ruler: a second one soon after clears the time selection.
@@ -693,6 +698,7 @@ impl Default for PlaylistState {
             lock_len: None,
             row_h: ROW_H,
             last_header: None,
+            last_edge: None,
             last_clip: None,
             last_ruler: None,
             waves: RefCell::new(HashMap::new()),
@@ -777,8 +783,14 @@ impl PlaylistState {
 /// Height of a member row of a collapsed group: a thin strip showing its clips as bars (§6a).
 pub const STRIP_H: f32 = 6.0;
 
+/// A track's height in px: the Arranger's track height times the track's own factor (`PlaylistTrack::height`), on the
+/// drawing grid.
+fn track_px(row_h: f32, factor: f32) -> f32 {
+    snap(f64::from((row_h * factor).clamp(ROW_MIN, ROW_MAX)))
+}
+
 /// Vertical layout of the tracks (§6a): every track's top in content pixels. Rows are `row_h` tall (`ROW_H` unless
-/// zoomed); members of a collapsed group are `STRIP_H` strips.
+/// zoomed) times their own factor; members of a collapsed group are `STRIP_H` strips.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Rows {
     top: Vec<f32>,
@@ -799,15 +811,15 @@ impl Rows {
             if !grouped {
                 collapsed = tr.is_some_and(|x| x.collapsed);
             }
-            y += if grouped && collapsed { STRIP_H } else { row_h };
+            y += if grouped && collapsed { STRIP_H } else { track_px(row_h, tr.map_or(1.0, |x| x.height)) };
         }
         top.push(y);
         Rows { top, row_h }
     }
 
-    /// A clip's height: its row less the 3 px gap.
-    pub fn clip_h(&self) -> f32 {
-        self.row_h - 3.0
+    /// The height of a clip on track `t`: its row less the 3 px gap.
+    pub fn clip_h(&self, t: u16) -> f32 {
+        self.height(t) - 3.0
     }
 
     pub fn top(&self, t: u16) -> f32 {
@@ -821,7 +833,7 @@ impl Rows {
 
     /// A collapsed group's member: drawn as a strip.
     pub fn strip(&self, t: u16) -> bool {
-        self.height(t) < self.row_h - 0.5
+        self.height(t) < STRIP_H + 0.5
     }
 
     /// The track at content height `y`.
@@ -905,7 +917,7 @@ impl PGeom {
         if self.rows.strip(c.track) {
             return Rect::new(x, self.y_of(c.track) + 1.0, w, STRIP_H - 2.0);
         }
-        Rect::new(x, self.y_of(c.track), w, self.rows.clip_h())
+        Rect::new(x, self.y_of(c.track), w, self.rows.clip_h(c.track))
     }
 
     /// `clip_rect` for drawing: an edge further than 2048 px outside the grid is pulled in to that distance, so every
@@ -923,7 +935,7 @@ impl PGeom {
     /// The body of a clip below its title strip (automation curves, notes, waveforms).
     pub fn body(&self, c: &Clip) -> Rect {
         let r = self.clip_rect(c);
-        Rect::new(r.x, r.y + TITLE_H, r.w, (self.rows.clip_h() - TITLE_H - 1.0).max(1.0))
+        Rect::new(r.x, r.y + TITLE_H, r.w, (self.rows.clip_h(c.track) - TITLE_H - 1.0).max(1.0))
     }
 }
 
@@ -2827,8 +2839,24 @@ pub fn track_menu(s: &State, t: u16, x: f32, y: f32) -> Popup {
         PItem::new("Delete one", Cmd::TrackDelete(t)),
         PItem::new("Move up", Cmd::TrackUp(t)),
         PItem::new("Move down", Cmd::TrackDown(t)),
+        PItem::sep(),
+        PItem::sub("Track height", height_items(s, t)),
     ]);
     Popup { x, y, items, sub: None, scroll: [0; 2] }
+}
+
+/// A track's Track height submenu: sizes against the other tracks, and all of them back to one height.
+fn height_items(s: &State, t: u16) -> Vec<PItem> {
+    let now = track_info(s, t).map_or(1.0, |x| x.height);
+    let mut items: Vec<PItem> = [(0.5, "Small"), (1.0, "Normal"), (1.5, "Large"), (2.0, "Extra large"), (3.0, "Huge")]
+        .into_iter()
+        .map(|(k, name)| PItem::new(name, Cmd::TrackHeight(t, k)).mark(Mark::Check((now - k).abs() < 0.001)))
+        .collect();
+    items.push(PItem::sep());
+    let any = s.project.arrangement().is_some_and(|a| a.tracks.iter().any(|x| x.height != 1.0));
+    let all = PItem::new("Reset all tracks", Cmd::TracksHeightReset).tip("Every track back to the normal height");
+    items.push(if any { all } else { all.off() });
+    items
 }
 
 /// The actions a time marker can take, as its menu lists them (§7a), with their kinds (spec: flp/events/playlist.md
@@ -2917,6 +2945,8 @@ pub fn knob_menu(s: &State, auto: Option<(u32, String, f64)>, typein: Option<cra
 /// Drags inside the playlist.
 #[derive(Debug, Clone)]
 pub enum PlDrag {
+    /// A track's bottom edge: its height as it was and where the press was.
+    TrackHeight { track: u16, y0: f32, h0: f32, factor0: f32 },
     /// `fresh` = the clip was just placed (its undo step stays even without a move).
     Move { x0: f32, y0: f32, orig: Vec<(usize, Clip)>, fresh: bool },
     ResizeL { x0: f32, orig: Vec<(usize, Clip)> },
@@ -3143,9 +3173,9 @@ pub fn press_grid(app: &mut App, grid: Rect, right: bool) {
         // Double-clicking an audio clip opens its channel's sampler and selects that channel in the rack (§9); a
         // pattern clip makes its pattern the current one and opens the piano roll (§2b, as FL does). Which modifier
         // opens what on an audio clip is General ▸ Input ▸ Manage shortcuts' (`crate::shortcuts::clip_double_click`):
-        // Show clip properties opens the same window on this piece's Cut part tab, Show channel settings on the tab it
+        // Show clip properties opens the same window on this piece's This clip tab, Show channel settings on the tab it
         // last showed; with neither row's modifier (a row set to "(disabled)"), the second click is a plain one. The
-        // window's Cut part tab shows the clip double-clicked last (`clip_fx`).
+        // window's This clip tab shows the clip double-clicked last (`clip_fx`).
         if !right && matches!(tool, PlTool::Draw | PlTool::Paint | PlTool::Select) {
             let audio = audio_clip_row(s, &c);
             if audio.is_some() || matches!(c.source, ClipSource::Pattern(_)) {
@@ -3545,6 +3575,7 @@ pub fn drag_move(app: &mut App, d: PlDrag, grid: Rect) {
             s.playlist.overlay = Some(Overlay::ZoomBox(Rect::span(x0.min(x), x0.max(x), y0.min(y), y0.max(y))));
         }
         PlDrag::Playback => {}
+        PlDrag::TrackHeight { track, y0, h0, .. } => set_track_px(s, track, h0 + y - y0),
         PlDrag::SongPos => {
             s.playlist.pos = snap_down(s, &g, g.tick_at(x), alt);
             crate::init::apply(s);
@@ -3697,6 +3728,15 @@ pub fn drag_end(app: &mut App, d: PlDrag, grid: Rect) {
         }
         PlDrag::ZoomBox { x0, y0 } => zoom_to(app, grid, x0, y0),
         PlDrag::Playback => app.transport.stop(),
+        PlDrag::TrackHeight { track, factor0, .. } => {
+            // A click leaves no undo step.
+            if track_info(s, track).is_some_and(|t| t.height == factor0) {
+                crate::history::unrecord(s);
+            }
+            // The edge is somewhere else now: what the hover knows of it, and its light, are old.
+            app.forget_hover();
+            app.invalidate();
+        }
         PlDrag::SongPos => {
             // The song jumps to the new position; a running pattern goes on as the song from there, a paused one
             // stops, as with the PAT / SONG switch (§7, audio/transport.md).
@@ -3880,6 +3920,23 @@ pub fn press_ruler(app: &mut App, grid: Rect, right: bool) {
     app.invalidate();
 }
 
+/// The song position goes to `tick` from outside the Arranger's ruler (a clip's tabs), as a click on the ruler puts it:
+/// SONG mode, the initial values, and the song jumping there while it plays.
+pub fn place_song_pos(app: &mut App, tick: u32) {
+    let s = &mut app.state;
+    s.playlist.pos = tick;
+    s.song_mode = true;
+    crate::init::apply(s);
+    if app.transport.playing() {
+        if app.transport.song() || !app.transport.paused() {
+            app.play_song_from(tick);
+        } else {
+            app.transport.stop();
+        }
+    }
+    app.invalidate();
+}
+
 /// The marker under x in the marker lane.
 pub fn marker_at(s: &State, g: &PGeom, x: f32) -> Option<usize> {
     markers(s).iter().enumerate().rev().find(|(_, m)| {
@@ -3951,6 +4008,36 @@ pub fn press_header(app: &mut App, t: u16, right: bool, at: (f32, f32)) {
     s.playlist.last_header = Some((t, now));
     if double {
         start_edit(s, EditTarget::TrackName(t), at);
+    }
+    app.invalidate();
+}
+
+/// A track's height set in px, kept to what the Arranger allows and whole pixels.
+fn set_track_px(s: &mut State, t: u16, px: f32) {
+    let row_h = s.playlist.row_h.clamp(ROW_MIN, ROW_MAX);
+    let factor = px.round().clamp(ROW_MIN, ROW_MAX) / row_h;
+    if let Some(tr) = arr_mut(s).tracks.get_mut(usize::from(t)) {
+        tr.height = factor;
+    }
+}
+
+/// A press on a track's bottom edge: a drag changes the track's height, a double-click puts it back to the others'.
+pub fn press_track_edge(app: &mut App, t: u16) {
+    let y0 = app.mouse.1;
+    let s = &mut app.state;
+    s.playlist.popup = None;
+    let now = std::time::Instant::now();
+    let double = s.playlist.last_edge.is_some_and(|(lt, when)| lt == t && now.duration_since(when).as_millis() < 450);
+    s.playlist.last_edge = (!double).then_some((t, now));
+    snapshot(s);
+    if double {
+        if let Some(tr) = arr_mut(s).tracks.get_mut(usize::from(t)) {
+            tr.height = 1.0;
+        }
+    } else {
+        let h0 = Rows::new(s).height(t);
+        let factor0 = track_info(s, t).map_or(1.0, |x| x.height);
+        app.drag = Some(Drag::Pl(PlDrag::TrackHeight { track: t, y0, h0, factor0 }));
     }
     app.invalidate();
 }
@@ -4773,6 +4860,18 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             None
         }
         Cmd::TrackUp(_) | Cmd::TrackDown(_) => None,
+        Cmd::TrackHeight(t, k) => {
+            snapshot(s);
+            if let Some(tr) = arr_mut(s).tracks.get_mut(usize::from(t)) {
+                tr.height = k;
+            }
+            None
+        }
+        Cmd::TracksHeightReset => {
+            snapshot(s);
+            arr_mut(s).tracks.iter_mut().for_each(|t| t.height = 1.0);
+            None
+        }
         Cmd::TrackInsert(t) => {
             snapshot(s);
             insert_track(s, t);

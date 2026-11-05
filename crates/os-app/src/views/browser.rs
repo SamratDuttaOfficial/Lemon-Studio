@@ -755,7 +755,7 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect) {
     ui.c.fill_rect(Rect::span(0.0, bw - 1.0, 83.0 + dy, 105.0 + dy), t.browser_title);
     let at = menu_at(s);
     let menu_open = s.playlist.popup.as_ref().is_some_and(|p| p.x == at.0 && p.y == at.1);
-    let mhov = ui.hit(Rect::new(2.0, 85.0 + dy, 16.0, 18.0), Action::BrowserMenu, "Browser options");
+    let mhov = ui.hit(Rect::new(2.0, 85.0 + dy, 16.0, 18.0), Action::BrowserMenu, "Open the browser options menu");
     if mhov || menu_open {
         ui.c.stroke_rrect(Rect::new(3.0, 86.0 + dy, 15.0, 16.0), 2.0, 1.2, t.browser_tab_outline);
     }
@@ -774,7 +774,7 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect) {
     ui.c.text(os_ui::Font::new(14), 52.0, 85.0 + dy, t.text_dim, "Browser");
     // Tabs (spec ui/browser.md §1): FL's five without Online content, sharing the strip.
     ui.c.fill_rect(Rect::span(0.0, bw - 1.0, 106.0 + dy, 141.0 + dy), t.browser_tabs);
-    const TIPS: [&str; 4] = ["All", "Current project", "Plugin library", "Favorites"];
+    const TIPS: [&str; 4] = ["Show everything in the browser", "Show the current project's contents", "Show the plugin library", "Show your favorite plugins and files"];
     for (i, icon) in [Icon::Wave, Icon::Page, Icon::Speaker, Icon::Star].into_iter().enumerate() {
         let cx = 25.0 + 50.0 * i as f32;
         let rr = Rect::new(cx - 18.0, 108.0 + dy, 36.0, 30.0);

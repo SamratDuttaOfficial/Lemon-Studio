@@ -129,7 +129,7 @@ fn flam(ui: &mut Ui, s: &State, x0: f32, y0: f32) {
     let lf = Font::new(15);
     // The Options tab: a slanted right edge, ▸ and its name.
     let r = Rect::new(x0 + 8.0, y0 + 29.0, 68.0, 18.0);
-    let hov = ui.hit(r, Action::PianoDlg(Act::Options), "Presets");
+    let hov = ui.hit(r, Action::PianoDlg(Act::Options), "Open the menu of flam presets");
     let mut g = Glyph::new();
     g.polygon(&[(r.x, r.y), (r.right(), r.y), (r.right() - 6.0, r.bottom()), (r.x, r.bottom())]);
     ui.c.glyph(if hov { t.s(0x3a3e41) } else { t.s(0x33373a) }, &g);
@@ -143,9 +143,9 @@ fn flam(ui: &mut Ui, s: &State, x0: f32, y0: f32) {
     knob(ui, s, x0, y0, 82.0, 73.0, Knob::FlamTime, true);
     label(ui, lf, x0 + 60.0, y0 + 127.0, 1, t.text, "Velocity");
     knob(ui, s, x0, y0, 82.0, 127.0, Knob::FlamVel, false);
-    switch(ui, s, x0, y0, 122.0, 64.0, Act::Absolute, "Absolute", "Absolute / relative time", lf, false);
+    switch(ui, s, x0, y0, 122.0, 64.0, Act::Absolute, "Absolute", "Time in milliseconds (off: in steps)", lf, false);
     switch(ui, s, x0, y0, 122.0, 84.0, Act::Before, "Before", "Insert flam before original drum", lf, false);
-    switch(ui, s, x0, y0, 20.0, 183.0, Act::Group, "Group notes", "Group notes", Font::new(13), false);
+    switch(ui, s, x0, y0, 20.0, 183.0, Act::Group, "Group notes", "Group each note with its flam", Font::new(13), false);
 }
 
 /// Flip (piano-flip.md §1): Flip horizontally, Preserve start times (greyed while that is off), Flip vertically.
@@ -270,7 +270,7 @@ fn lfo(ui: &mut Ui, s: &State, x0: f32, y0: f32) {
     // The shape box: the wave's picture and ▸, a menu.
     label(ui, lf, x0 + 15.0, y0 + 216.0, -1, t.text, "Shape");
     let r = Rect::new(x0 + 17.0, y0 + 238.0, 51.0, 24.0);
-    let hov = ui.hit(r, Action::PianoDlg(Act::ShapeMenu), "Shape");
+    let hov = ui.hit(r, Action::PianoDlg(Act::ShapeMenu), "Choose the wave shape");
     kit::combo(ui.c, t, r, "", lf, kit::State::hover(hov));
     wave(ui, Rect::new(r.x + 6.0, r.y + 6.0, 24.0, 12.0), set.shape, if hov { t.tx(0xffffff) } else { t.text });
     label(ui, lf, x0 + 132.0, y0 + 245.0, 1, t.text, "Phase");
@@ -305,7 +305,7 @@ fn quant(ui: &mut Ui, s: &State, x0: f32, y0: f32) {
     label(ui, lf, x0 + 69.0, y0 + 155.0, 1, t.text, "Duration");
     lfo_knob(ui, s, x0 + 90.0, y0 + 155.0, 14.0, Knob::QDur, false, kit::KnobLook::Ring, false);
     let r = Rect::new(x0 + 117.0, y0 + 146.0, 119.0, 19.0);
-    let hov = ui.hit(r, Action::PianoDlg(Act::DurMenu), "What happens to the note lengths");
+    let hov = ui.hit(r, Action::PianoDlg(Act::DurMenu), "Choose what happens to the note lengths");
     kit::combo(ui.c, t, r, d.quant.mode.name(), Font::new(13), kit::State::hover(hov));
 
     label(ui, lf, x0 + 46.0, y0 + 218.0, 1, t.text, "Levels");

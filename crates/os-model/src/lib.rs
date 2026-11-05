@@ -1949,12 +1949,14 @@ pub struct PlaylistTrack {
     pub collapsed: bool,
     /// Byte 47: FL draws a lock on such a group (meaning not measured; kept and drawn).
     pub locked: bool,
+    /// Bytes 13..17: the track's height as a multiple of the Arranger's track height (1 = as tall as the others).
+    pub height: f32,
 }
 
 impl PlaylistTrack {
     /// Track `number` as a new project has it: unnamed, default colour, on, not grouped.
     pub fn new(number: u32) -> Self {
-        PlaylistTrack { number, name: None, color: None, enabled: true, grouped: false, collapsed: false, locked: false }
+        PlaylistTrack { number, name: None, color: None, enabled: true, grouped: false, collapsed: false, locked: false, height: 1.0 }
     }
 }
 

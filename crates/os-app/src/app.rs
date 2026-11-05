@@ -315,6 +315,8 @@ pub enum Action {
     PlRuler,
     PlMarkers,
     PlHeader(u16),
+    /// A track's bottom edge: dragged, it changes the track's height.
+    PlTrackEdge(u16),
     PlLed(u16),
     /// A group track's collapse arrow (spec: ui/playlist.md §6a).
     PlGroupArrow(u16),
@@ -605,6 +607,16 @@ fn hover_is_visible(a: &Action) -> bool {
     )
 }
 
+/// How long the mouse rests on a control before its tooltip shows.
+pub(crate) const TIP_DELAY: std::time::Duration = std::time::Duration::from_millis(450);
+
+/// Whether a control under the mouse has a tooltip: what can be clicked, not the backgrounds, grids, rulers and scroll
+/// bars around it, whose hints stay on the hint panel.
+pub(crate) fn has_tip(a: &Action, r: Rect) -> bool {
+    let plain = hover_is_visible(a) || matches!(a, Action::PlHeader(_));
+    plain && !matches!(a, Action::Step(..)) && r.w <= 480.0 && r.h <= 140.0
+}
+
 /// Pixels from a note's right end that grab the end for resizing (spec: ui/piano-roll.md §8).
 fn resize_zone(note_w: f32) -> f32 {
     (note_w / 3.0).clamp(2.0, 8.0)
@@ -755,11 +767,6 @@ impl Ui<'_> {
     /// Whether `action` is held down by the left button, wherever the cursor is (a drag that began on it).
     pub fn held(&self, action: &Action) -> bool {
         self.pressed.as_ref() == Some(action)
-    }
-
-    /// What the mouse is over.
-    pub fn hovered(&self) -> Option<&Action> {
-        self.hover.as_ref()
     }
 
     /// Whether the mouse is over `rect` and last frame's topmost hit there was registered by this window
@@ -984,7 +991,7 @@ pub struct State {
     pub rec: crate::record::Rec,
     /// Mixer selection, slot requests, meters (spec: ui/mixer.md).
     pub mixer: crate::mixer::MixerUi,
-    /// The plugin window's Cut part and Whole audio tabs.
+    /// The plugin window's This clip and Source audio tabs.
     pub clip_fx: crate::clip_fx::ClipFxUi,
     /// Rack rows played by a hosted plugin.
     pub hosted_rows: Vec<usize>,
@@ -1107,6 +1114,10 @@ pub struct State {
     pub pat_ui: crate::patterns::PatternUi,
     /// Playlist, Mixer, Piano roll (see `Win::slot`).
     pub wins: [WinState; 3],
+    /// The tooltip showing: the control it is for and what it says (`App::tip_tick`).
+    pub tip: Option<(Rect, Cow<'static, str>)>,
+    /// Where the last paint drew it, to take it away.
+    pub tip_drawn: std::cell::Cell<Option<Rect>>,
     /// Size of the shell window in logical pixels (set each paint).
     pub screen: (f32, f32),
     /// The main window's monitor's own scale (device pixels per logical one, whatever Main GUI scaling says; set at
@@ -1306,6 +1317,10 @@ pub struct App {
     pub want_drag_window: bool,
     /// Show the horizontal-resize cursor (hovering or dragging a note end).
     pub resize_cursor: bool,
+    /// Since when the mouse rests on a control with a tooltip that is not showing yet.
+    tip_wait: Option<std::time::Instant>,
+    /// The song position the Arranger's line was last painted at while stopped.
+    line_pos: u32,
     /// Modifier keys held (set by the shell).
     pub ctrl: bool,
     pub shift: bool,
@@ -1478,6 +1493,8 @@ impl App {
                 global_snap: Default::default(),
                 pat_ui: Default::default(),
                 wins: crate::arrange::default_wins(),
+                tip: None,
+                tip_drawn: std::cell::Cell::new(None),
                 screen: (1920.0, 1080.0),
                 display_scale: 1.0,
                 ui_scale: 1.0,
@@ -1540,6 +1557,8 @@ impl App {
             unpinned: None,
             want_drag_window: false,
             resize_cursor: false,
+            tip_wait: None,
+            line_pos: 0,
             ctrl: false,
             shift: false,
             alt: false,
@@ -3997,11 +4016,13 @@ impl App {
     /// Periodic housekeeping; returns whether a repaint is needed.
     pub fn tick(&mut self) -> bool {
         self.typein_settle();
+        self.tip_tick(std::time::Instant::now());
+        self.line_tick();
         // Things the interface added get their ids before anything looks them up (`control::ids`).
         let s = &mut self.state;
         s.control.settle_tick(&mut s.project, s.piano.dirty);
         crate::clip_fx::settle(self);
-        self.state.clip_fx.play_tick = self.transport.playing().then(|| self.transport.tick());
+        self.state.clip_fx.play_tick = (self.transport.playing() && self.transport.song()).then(|| self.transport.tick());
         self.control_tick();
         self.plugin_tick();
         // Playback loops over the time selection, as it is now (spec: ui/recording.md §5).
@@ -5715,15 +5736,59 @@ impl App {
             if hint != self.hint {
                 self.damage_band(HINT_RECT);
             }
-            // A tab's shortcut shows in a bubble over the page under it.
-            if matches!(self.hover, Some(Action::PanelTab(_))) || matches!(hover, Some(Action::PanelTab(_))) {
-                self.invalidate();
-            }
+            self.hide_tip();
+            self.tip_wait = (hover.as_ref().zip(rect).is_some_and(|(a, r)| has_tip(a, r)) && !hint.is_empty()).then(std::time::Instant::now);
         }
         self.hover = hover;
         self.hover_rect = rect;
         self.hint = hint;
         changed
+    }
+
+    /// What is under the mouse moved: the next mouse move finds it again.
+    pub(crate) fn forget_hover(&mut self) {
+        self.hover = None;
+        self.hover_rect = None;
+    }
+
+    /// Takes the tooltip away, if one shows, and starts no new one until the mouse moves to another control.
+    pub(crate) fn hide_tip(&mut self) {
+        self.tip_wait = None;
+        if self.state.tip.take().is_some() {
+            match self.state.tip_drawn.take() {
+                Some(r) => self.damage_rect(r),
+                None => self.invalidate(),
+            }
+        }
+    }
+
+    /// The tooltip of the control the mouse has rested on for `TIP_DELAY`. Not over a drag, an open menu (its entries have
+    /// their own) or a text box. Runs each tick.
+    pub(crate) fn tip_tick(&mut self, now: std::time::Instant) {
+        let Some(since) = self.tip_wait else { return };
+        let s = &self.state;
+        if self.drag.is_some() || self.pressed.is_some() || s.menu_open.is_some() || s.playlist.popup.is_some() || s.playlist.edit.is_some() {
+            return;
+        }
+        if now.duration_since(since) < TIP_DELAY {
+            return;
+        }
+        self.tip_wait = None;
+        if let Some(r) = self.hover_rect {
+            self.state.tip = Some((r, self.hint.clone()));
+            self.invalidate();
+        }
+    }
+
+    /// The song position moved while stopped: the Arranger's line stands there now.
+    pub(crate) fn line_tick(&mut self) {
+        let pos = self.state.playlist.pos;
+        if pos != self.line_pos {
+            self.line_pos = pos;
+            if self.state.shown(Win::Playlist) {
+                self.damage_win(Win::Playlist);
+            }
+        }
     }
 
     /// Plain buttons, switches and menu entries act on the release over the same control instead of on the press, like
@@ -5839,6 +5904,23 @@ impl App {
     }
 
     pub fn mouse_down(&mut self) {
+        self.hide_tip();
+        let said = self.state.message.clone();
+        self.press_left();
+        self.show_new_message(said);
+    }
+
+    /// What a click just said shows on the hint panel over the clicked control's own hint, until the mouse moves on.
+    pub(crate) fn show_new_message(&mut self, before: Option<String>) {
+        if self.state.message != before {
+            if let Some(m) = &self.state.message {
+                self.hint = Cow::Owned(m.clone());
+                self.damage_band(HINT_RECT);
+            }
+        }
+    }
+
+    fn press_left(&mut self) {
         self.invalidate();
         self.hold = None;
         let (x, y) = self.mouse;
@@ -6088,6 +6170,9 @@ impl App {
         if matches!((&self.drag, &self.hover), (Some(Drag::PianoSplit { .. }), _) | (None, Some(Action::PianoSplitter))) {
             return Cursor::NsResize;
         }
+        if matches!((&self.drag, &self.hover), (Some(Drag::Pl(crate::playlist::PlDrag::TrackHeight { .. })), _) | (None, Some(Action::PlTrackEdge(_)))) {
+            return Cursor::NsResize;
+        }
         if matches!((&self.drag, &self.hover), (Some(Drag::BrowserSplit { .. }), _) | (None, Some(Action::BrowserSplitter))) {
             return Cursor::EwResize;
         }
@@ -6283,6 +6368,7 @@ impl App {
     /// Right button: delete notes in the piano roll (spec: ui/piano-roll.md §8); right-drag on
     /// a scroll bar scrolls.
     pub fn mouse_down_right(&mut self) {
+        self.hide_tip();
         self.close_song_info();
         if crate::typein::is_open(&self.state) || self.modal_open() {
             return;
@@ -6497,6 +6583,12 @@ impl App {
     }
 
     pub fn mouse_up(&mut self) {
+        let said = self.state.message.clone();
+        self.release_left();
+        self.show_new_message(said);
+    }
+
+    fn release_left(&mut self) {
         self.hold = None;
         self.shift_clone = false;
         self.release();
@@ -6939,6 +7031,7 @@ impl App {
     }
 
     pub fn wheel(&mut self, dx: f32, dy: f32, shift: bool, ctrl: bool) {
+        self.hide_tip();
         if self.modal_open() {
             return self.dialog_wheel(dy);
         }
@@ -7265,7 +7358,7 @@ impl App {
         let pl_grid = self.pl_grid;
         let pl_area = matches!(
             area,
-            Some(Action::PlaylistArea | Action::PlRuler | Action::PlMarkers | Action::PlHeader(_) | Action::PlLed(_) | Action::PlGroupArrow(_))
+            Some(Action::PlaylistArea | Action::PlRuler | Action::PlMarkers | Action::PlHeader(_) | Action::PlTrackEdge(_) | Action::PlLed(_) | Action::PlGroupArrow(_))
         );
         let s = &mut self.state;
         let (dx, dy) = if shift { (dy, dx) } else { (dx, dy) };
@@ -7292,13 +7385,13 @@ impl App {
                 Some(Win::Playlist)
             }
             // Shift+wheel over the track headers moves the selected track (spec: ui/playlist.md §6).
-            Some(Action::PlHeader(_) | Action::PlLed(_) | Action::PlGroupArrow(_)) if shift => {
+            Some(Action::PlHeader(_) | Action::PlTrackEdge(_) | Action::PlLed(_) | Action::PlGroupArrow(_)) if shift => {
                 let d = if dx + dy > 0.0 { -1 } else { 1 };
                 crate::playlist::snapshot(s);
                 crate::playlist::shift_tracks(s, d);
                 None
             }
-            Some(Action::PlHeader(_) | Action::PlLed(_) | Action::PlGroupArrow(_)) => {
+            Some(Action::PlHeader(_) | Action::PlTrackEdge(_) | Action::PlLed(_) | Action::PlGroupArrow(_)) => {
                 s.playlist_scroll.1 = (s.playlist_scroll.1 - sy * row_h).max(0.0);
                 Some(Win::Playlist)
             }
@@ -7312,6 +7405,7 @@ impl App {
     }
 
     pub fn key(&mut self, key: &winit::keyboard::Key, ctrl: bool, alt: bool) {
+        self.hide_tip();
         self.invalidate();
         // A dialog takes every key.
         if self.modal_open() {
@@ -7940,6 +8034,11 @@ impl App {
                     pl::press_markers(self, g, right);
                 }
             }
+            Action::PlTrackEdge(t) if !right => pl::press_track_edge(self, t),
+            Action::PlTrackEdge(t) => {
+                let at = self.mouse;
+                pl::press_header(self, t, true, at);
+            }
             Action::PlHeader(t) => {
                 let at = self.top_hit(self.mouse.0, self.mouse.1).map_or(self.mouse, |h| (h.rect.x, h.rect.y));
                 pl::press_header(self, t, right, at);
@@ -8402,6 +8501,10 @@ impl App {
                 if let Some(i) = w.slot() {
                     s.wins[i].mini = false;
                     s.wins[i].maxed = !s.wins[i].maxed;
+                    // Restored for the first time: the Arranger's window keeps all the width up to the browser.
+                    if w.is_tab() && !s.wins[i].maxed && s.wins[i].rect == crate::arrange::default_wins()[i].rect {
+                        s.wins[i].rect = crate::arrange::panel_home(s);
+                    }
                 }
             }
             // A second one leaves it maximized (spec: ui/toolbar-buttons.md §2).
@@ -8446,6 +8549,7 @@ impl App {
             | Action::PlRuler
             | Action::PlMarkers
             | Action::PlHeader(_)
+            | Action::PlTrackEdge(_)
             | Action::PlLed(_)
             | Action::PlGroupArrow(_)
             | Action::PlArrangement
@@ -13407,7 +13511,7 @@ mod tests {
         assert_eq!(row.mark, Mark::Check(false));
         // The toolbar's kick drum button (the 8th window button) opens and closes it too.
         let b = hit_rect(&app, &Action::ToggleWin(Win::Tapper));
-        assert_eq!((b.x, hint(&app, &Action::ToggleWin(Win::Tapper)).as_str()), (973.0 + 33.0 * 7.0, "Tap tempo (Ctrl+F5)"));
+        assert_eq!((b.x, hint(&app, &Action::ToggleWin(Win::Tapper)).as_str()), (973.0 + 33.0 * 7.0, "Show or hide Tap tempo (Ctrl+F5)"));
         click(&mut app, &mut c, b);
         assert!(app.state.shown(Win::Tapper) && app.state.in_front(Win::Tapper));
         click(&mut app, &mut c, b);
@@ -17858,7 +17962,7 @@ mod tests {
     }
 
     /// Double-click on audio clips follows General ▸ Input ▸ Manage shortcuts: the row whose modifier is held wins,
-    /// Show clip properties opens the window on the Cut part tab, and a row set to "(disabled)" never fires (spec: ui/settings-choices.md
+    /// Show clip properties opens the window on the This clip tab, and a row set to "(disabled)" never fires (spec: ui/settings-choices.md
     /// "Input: Manage shortcuts (2026-10-16)").
     #[test]
     fn audio_clip_double_click_follows_manage_shortcuts() {
@@ -17913,7 +18017,7 @@ mod tests {
     #[test]
     #[ignore]
     fn clip_fx_through_the_real_app() {
-        use crate::clip_page::{plot_rect, slot_rect, Tab};
+        use crate::clip_page::{plot_rect, slot_rect};
         use crate::playlist::{self as pl, Cmd, PItem};
         use crate::plugin_menu::PlugCmd;
         use os_model::clip_fx::{track_of, Lane};
@@ -18034,7 +18138,7 @@ mod tests {
         app.alt = false;
         pump(&mut app, 200);
         assert_eq!(app.plugins.window_of(row).map(|w| w.0), Some(frame_hwnd), "the same window");
-        assert_eq!(width(frame_hwnd), page_width, "on the Cut part tab");
+        assert_eq!(width(frame_hwnd), page_width, "on the This clip tab");
         assert_eq!(app.state.clip_fx.cut.get(&row), Some(&third), "it shows the piece double-clicked last");
         // Back to the plugin's own page by its tab, and a plain double-click on the second piece keeps that page.
         let (px, py) = tab_at(0);
@@ -19431,13 +19535,13 @@ mod tests {
             (Action::Util(Util::Help), "Help index / About..."),
             (Action::Util(Util::Save), "Save as... / Save new version (Shift+Ctrl+S)"),
             (Action::MenuItem(0, views::menus::FILE_EXPORT), "Export audio... (Ctrl+R)"),
-            (Action::MenuItem(views::menus::OPTIONS_MENU, views::menus::OPT_INFO), "Project info (F11)"),
-            (Action::ToggleWin(Win::Playlist), "Arranger / Maximize arranger (F5)"),
-            (Action::ToggleWin(Win::PianoRoll), "Piano roll / Maximize Piano roll (F7)"),
-            (Action::ToggleWin(Win::Browser), "Browser / Plugin palette (Alt+F8)"),
-            (Action::PickerOpen, "Plugin palette (F8)"),
-            (Action::ProjectPicker, "Clip palette / Plugin palette (Ctrl+F8)"),
-            (Action::ToggleWin(Win::Touch), "Touch controller (Alt+F7)"),
+            (Action::MenuItem(views::menus::OPTIONS_MENU, views::menus::OPT_INFO), "Open the project info (F11)"),
+            (Action::ToggleWin(Win::Playlist), "Show or hide the Arranger, right-click: maximize it (F5)"),
+            (Action::ToggleWin(Win::PianoRoll), "Show or hide the Piano roll, right-click: maximize it (F7)"),
+            (Action::ToggleWin(Win::Browser), "Show or hide the Browser, right-click: Plugin palette (Alt+F8)"),
+            (Action::PickerOpen, "Open the Plugin palette (F8)"),
+            (Action::ProjectPicker, "Open the Clip palette, right-click: Plugin palette (Ctrl+F8)"),
+            (Action::ToggleWin(Win::Touch), "Show or hide the Touch controller (Alt+F7)"),
         ] {
             assert_eq!(hint(&app, &a), h);
         }
@@ -19573,7 +19677,7 @@ mod tests {
             frame(&mut app, &mut c, None);
             for it in m.cols.iter().flat_map(|(_, items)| items.iter()).filter(|it| matches!(it.kind, Kind::Item)) {
                 // A row with a tip has it for its hint.
-                let about = views::menus::tip(menu, it);
+                let about = views::menus::row_hint(menu, it);
                 let Some(h) = app.hits.iter().rev().find(|h| (!about.is_empty() && h.hint == about) || h.hint == it.label || h.action == Action::Placeholder(it.label)) else { continue };
                 let label = c.text_width(f, &label_now(&app.state, menu, it));
                 let key = if it.shortcut.is_empty() { 0.0 } else { c.text_width(f.italic(), shortcut_now(it)) + 4.0 };

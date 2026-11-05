@@ -9,7 +9,7 @@
 //! as the app closes, never in the project. Which windows are open is not kept: a start shows its usual ones.
 //!
 //! Keys: `window_main` (`x,y,w,h,maximized`: outer top-left and inner size in the units the window system places
-//! windows in, points on macOS and pixels elsewhere), `window_playlist`, `window_mixer`, `window_piano_roll`
+//! windows in, points on macOS and pixels elsewhere), `window_arranger`, `window_mixer`, `window_piano_roll`
 //! (`x,y,w,h,maximized,collapsed`), `window_plugin_performance`,
 //! `window_tempo_tapper`, `window_touch_controller` (`x,y`); positions inside the main window are logical px, switches
 //! `1` / `0`. A value that cannot be read leaves that window as a first start has it. The first paint keeps every
@@ -21,7 +21,7 @@ use crate::app::{State, Win, WinState};
 use crate::settings_file::{get, write};
 
 /// The Playlist, Mixer and Piano roll (`State::wins`) and their keys.
-const WINS: [(Win, &str); 3] = [(Win::Playlist, "window_playlist"), (Win::Mixer, "window_mixer"), (Win::PianoRoll, "window_piano_roll")];
+const WINS: [(Win, &str); 3] = [(Win::Playlist, "window_arranger"), (Win::Mixer, "window_mixer"), (Win::PianoRoll, "window_piano_roll")];
 const PERF: &str = "window_plugin_performance";
 const TAPPER: &str = "window_tempo_tapper";
 const TOUCH: &str = "window_touch_controller";
@@ -149,7 +149,7 @@ mod tests {
     /// own window is left alone.
     #[test]
     fn unreadable_values_keep_the_defaults() {
-        write("window_playlist", "10,20,abc,40,0,0");
+        write("window_arranger", "10,20,abc,40,0,0");
         write("window_mixer", "10,20,30");
         write("window_piano_roll", "10,20,0,400,0,0");
         write("window_tempo_tapper", "NaN,5");

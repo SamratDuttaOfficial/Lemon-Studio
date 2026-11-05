@@ -41,7 +41,7 @@ pub const MIDI_WHEN_NECESSARY: Combo =
 pub const MIDI_EVERY_TIME: Combo =
     Combo { key: "midi_import_window_every_time", label: "Show every time", choices: MIDI_MODS, default: 1 };
 pub const MIDI_NEVER: Combo = Combo { key: "midi_import_window_never", label: "Don't show", choices: MIDI_MODS, default: 2 };
-/// Double-click on audio clips: the clip's properties: its channel's window on the Cut part tab (`clip_fx`).
+/// Double-click on audio clips: the clip's properties: its channel's window on the This clip tab (`clip_fx`).
 pub const CLIP_PROPERTIES: Combo =
     Combo { key: "audio_clip_double_click_properties", label: "Show clip properties", choices: CLIP_MODS, default: 2 };
 /// The clip's channel settings: its channel selected in the rack and its sampler window opened.

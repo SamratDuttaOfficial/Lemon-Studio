@@ -1807,6 +1807,7 @@ fn load_pl_track(events: &[Event], t: &PlTrackLoc, enc: TextEnc) -> PlaylistTrac
         grouped: r.get(46).is_some_and(|&b| b != 0),
         collapsed: r.get(61).is_some_and(|&b| b == 0),
         locked: r.get(47).is_some_and(|&b| b != 0),
+        height: r.get(13..17).map(|b| f32::from_le_bytes(b.try_into().unwrap())).filter(|h| h.is_finite() && *h > 0.0).unwrap_or(1.0),
     }
 }
 
@@ -3198,6 +3199,9 @@ fn apply_events(project: &Project, file: &mut FlpFile) -> Result<(), ProjectErro
             if t.locked != old.locked {
                 patch_bytes(&mut events[tl.record], 47, &[u8::from(t.locked)]);
             }
+            if t.height != old.height {
+                patch_bytes(&mut events[tl.record], 13, &t.height.to_le_bytes());
+            }
             if t.collapsed != old.collapsed {
                 patch_bytes(&mut events[tl.record], 61, &[u8::from(!t.collapsed)]);
             }
@@ -4013,7 +4017,7 @@ fn track_record(t: &PlaylistTrack) -> Vec<u8> {
     r[0..4].copy_from_slice(&t.number.to_le_bytes());
     r[4..8].copy_from_slice(&t.color.map_or(0x002D_2C29, |c| bgr_from_rgb(c, 0)).to_le_bytes());
     r[12] = u8::from(t.enabled);
-    r[13..17].copy_from_slice(&1.0f32.to_le_bytes());
+    r[13..17].copy_from_slice(&t.height.to_le_bytes());
     r[17] = if t.number <= 33 { 0xf0 } else { 0xff };
     r[18..21].fill(0xff);
     r[30] = 5;
@@ -5955,6 +5959,8 @@ mod tests {
         a0.tracks[4].grouped = true;
         a0.tracks[5].grouped = true;
         a0.tracks[5].locked = true;
+        // A track's own height.
+        a0.tracks[4].height = 2.5;
         edited.automations[0].points[1].value = 0.9;
         let mut ch = sampler(3, "Tempo", 0);
         ch.kind = ChannelKind::Automation;

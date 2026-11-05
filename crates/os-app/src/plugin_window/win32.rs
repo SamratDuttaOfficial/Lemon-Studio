@@ -367,6 +367,15 @@ impl FrameWindow {
         }
     }
 
+    /// A tick for a window the app has no channel values for: its tooltip still comes and goes.
+    pub fn tick_tip(&self) {
+        let mut st = self.state.borrow_mut();
+        if st.tip_tick(std::time::Instant::now()) {
+            drop(st);
+            unsafe { InvalidateRect(self.hwnd, std::ptr::null(), 0) };
+        }
+    }
+
     pub fn set_info(&self, info: ChannelInfo) {
         let mut st = self.state.borrow_mut();
         if st.take_info(info) {
@@ -467,7 +476,7 @@ impl FrameWindow {
         }
     }
 
-    /// Shows the Cut part or Whole audio tab.
+    /// Shows the This clip or Source audio tab.
     pub fn show_clip_tab(&self, tab: crate::clip_page::Tab) {
         self.state.borrow_mut().open_clip_tab(tab);
         unsafe { layout(self.hwnd) };

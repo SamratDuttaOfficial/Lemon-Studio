@@ -635,6 +635,137 @@ pub fn tip(menu: usize, item: &Item) -> &'static str {
     }
 }
 
+/// A dropdown row's hint: its tip (`tip`), else what the entry does, else its label. Found by what the entry does, as
+/// `tip` is; the entries dispatched by their place (`MenuCmd::None`) by their label.
+pub fn row_hint(menu: usize, item: &Item) -> &'static str {
+    use crate::app::CloseAll;
+    use crate::browser::Jump;
+    use crate::params::MenuEntry;
+    use crate::patterns::Cmd as P;
+    use crate::plugin_db::MenuView;
+    use crate::record::Opt;
+    use crate::views::settings as tab;
+    let about = tip(menu, item);
+    if !about.is_empty() {
+        return about;
+    }
+    match item.cmd {
+        MenuCmd::None => match item.label {
+            "New" => "Start a new project from the default template",
+            "Open..." => "Open a project file",
+            "Save" => "Save the project",
+            "Save as..." => "Save the project under another name",
+            "Save new version" => "Save the project as its next numbered version",
+            "Export audio..." => "Render the project to audio files",
+            "Export MP3..." => "Render the project to an MP3 file",
+            "Export MIDI..." => "Save the project's notes as a MIDI file",
+            "Exit" => "Exit Lemon Studio",
+            "About..." => "Show the version and the licence",
+            label => label,
+        },
+        // FILE.
+        MenuCmd::Sub(Sub::Templates) => "Start a new project from a template",
+        MenuCmd::Sub(Sub::OpenRecent) => "Open one of your recent projects",
+        MenuCmd::SaveToNewFolder => "Save the project into a new folder of its own",
+        MenuCmd::SaveAsTemplate => "Save a copy of the project as a template",
+        MenuCmd::DeleteUnused => "Delete the files in the project's folder it no longer uses, then save",
+        MenuCmd::Sub(Sub::Import) => "Import a MIDI file",
+        MenuCmd::ExportZip => "Save the project and its samples in one .zip file",
+        MenuCmd::RestoreBackup => "Open the newest backup of this project",
+        // EDIT.
+        MenuCmd::Undo => "Undo the last change",
+        MenuCmd::Redo => "Redo the change just undone",
+        // ADD.
+        MenuCmd::MorePlugins => "Pick a plugin to add as a new channel",
+        MenuCmd::Sampler => "Add a Lemon Sampler channel to the Instrument rack",
+        MenuCmd::AudioClip => "Add an audio clip channel to the Instrument rack",
+        MenuCmd::AutomationClip => "Add an automation clip channel to the Instrument rack",
+        MenuCmd::Layer => "Add a layer channel that holds the selected channels",
+        MenuCmd::View(MenuView::Categories) => "The plugin menus list plugins by category",
+        MenuCmd::View(MenuView::Simple) => "The plugin menus list plugins in one plain list",
+        MenuCmd::View(MenuView::Vendor) => "The plugin menus list plugins by vendor",
+        MenuCmd::Sub(Sub::Effect) => "Add an effect to the selected mixer track's first empty slot",
+        MenuCmd::PluginPalette => "Open the Plugin palette",
+        MenuCmd::Jump(Jump::PluginDb) => "Show the plugin library in the browser",
+        MenuCmd::Jump(Jump::Installed) => "Show all installed plugins in the browser",
+        MenuCmd::Jump(Jump::Presets) => "Show the plugin presets in the browser",
+        MenuCmd::Rescan => "Look for plugins that are new or have changed",
+        MenuCmd::Params(MenuEntry::Automation) => "Make an automation clip for the last control moved",
+        MenuCmd::NewPattern => "Make a new empty pattern",
+        // PATTERNS.
+        MenuCmd::InputPattern => "Type the number of the pattern to select",
+        MenuCmd::Pattern(P::FindFirst) => "Go to the first empty pattern and name it",
+        MenuCmd::Pattern(P::FindNext) => "Go to the next empty pattern and name it",
+        MenuCmd::Pattern(P::FindNextNoName) => "Go to the next empty pattern without naming it",
+        MenuCmd::Pattern(P::SelectInPlaylist) => "Select this pattern's clips in the Arranger",
+        MenuCmd::Pattern(P::Rename) => "Rename the pattern and set its colour",
+        MenuCmd::Pattern(P::ChangeColor) => "Choose the pattern's colour",
+        MenuCmd::Pattern(P::RandomColor) => "Give the pattern a random colour",
+        MenuCmd::Pattern(P::OpenInBrowser) => "Show the patterns in the browser",
+        MenuCmd::Pattern(P::TimeSignature) => "Set the pattern's time signature",
+        MenuCmd::Pattern(P::Transpose) => "Move the pattern's notes up or down by semitones",
+        MenuCmd::Pattern(P::InsertOne) => "Insert an empty pattern here, moving the later ones up",
+        MenuCmd::Pattern(P::Clone) => "Copy the pattern to the next number",
+        MenuCmd::Pattern(P::Delete) => "Delete the pattern",
+        MenuCmd::Pattern(P::MoveUp) => "Swap the pattern with the one before it",
+        MenuCmd::Pattern(P::MoveDown) => "Swap the pattern with the one after it",
+        MenuCmd::Pattern(P::SplitByChannel) => "Make one pattern per instrument with notes",
+        MenuCmd::Pattern(P::QuickRender) => "Render the pattern to a new audio clip",
+        MenuCmd::Pattern(P::RenderAsClip) => "Choose the settings, then render the pattern to a new audio clip",
+        MenuCmd::Pattern(P::RenderReplace) => "Render the pattern to a clip over its clips and mute those",
+        // VIEW.
+        MenuCmd::Window(Win::Playlist) => "Show or hide the Arranger",
+        MenuCmd::Window(Win::PianoRoll) => "Show or hide the Piano roll",
+        MenuCmd::Window(Win::ChannelRack) => "Show or hide the Instrument rack",
+        MenuCmd::Window(Win::Mixer) => "Show or hide the Mixer",
+        MenuCmd::Window(Win::Browser) => "Show or hide the Browser",
+        MenuCmd::Window(Win::Tapper) => "Show or hide Tap tempo",
+        MenuCmd::Window(Win::Touch) => "Show or hide the Touch controller",
+        MenuCmd::Window(Win::Perf) => "Show or hide the Plugin performance monitor",
+        MenuCmd::ClipPalette => "Open the Clip palette",
+        MenuCmd::Sub(Sub::Toolbars) => "Choose what the toolbar shows, or edit it",
+        MenuCmd::CloseAll(CloseAll::All) => "Close every window",
+        MenuCmd::CloseAll(CloseAll::Plugins) => "Close the channel settings and plugin windows",
+        MenuCmd::CloseAll(CloseAll::Unfocused) => "Close every window but the focused one",
+        MenuCmd::AlignEditors => "Put the channel window back and cascade the plugin windows from there",
+        MenuCmd::Sub(Sub::Arrange) => "Lay out the Arranger, Mixer and Piano roll windows",
+        MenuCmd::IntoWorkspace => "Move windows partly outside the workspace back in",
+        MenuCmd::Sub(Sub::Background) => "Set a picture behind the windows",
+        MenuCmd::Jump(Jump::Section("History")) => "Show the undo history in the browser",
+        MenuCmd::Jump(Jump::Section("Patterns")) => "Show the patterns in the browser",
+        MenuCmd::Jump(Jump::Section("Generators")) => "Show the instruments in use in the browser",
+        MenuCmd::Jump(Jump::Section("Effects")) => "Show the effects in use in the browser",
+        MenuCmd::Jump(Jump::Section("Remote control")) => "Show the remote control links in the browser",
+        // OPTIONS.
+        MenuCmd::Settings(tab::MIDI) => "Open the MIDI settings",
+        MenuCmd::Settings(tab::AUDIO) => "Open the audio settings",
+        MenuCmd::Settings(tab::GENERAL) => "Open the general settings",
+        MenuCmd::Settings(tab::FILE) => "Open the file settings",
+        MenuCmd::Settings(tab::PLUGINS) => "Open the plugin manager",
+        MenuCmd::Settings(tab::THEME) => "Open the theme settings",
+        MenuCmd::Settings(tab::PROJECT) => "Open this project's settings",
+        MenuCmd::Settings(tab::INFO) => "Open this project's info",
+        MenuCmd::Settings(tab::DEBUG) => "Open the debugging log",
+        MenuCmd::Midi(crate::midi_cfg::Switch::Remote) => "Take MIDI input (off: every input message is ignored)",
+        MenuCmd::Midi(crate::midi_cfg::Switch::Output) => "Send MIDI output (off: nothing is sent)",
+        MenuCmd::Midi(crate::midi_cfg::Switch::MasterSync) => "Send the MIDI master clock (off: no clock)",
+        MenuCmd::Typing => "Play notes with the computer keyboard",
+        MenuCmd::Metronome => "Metronome on or off",
+        MenuCmd::Record(Opt::Precount) => "Count in before recording starts",
+        MenuCmd::Record(Opt::Wait) => "Recording starts when input comes in",
+        MenuCmd::Record(Opt::Blend) => "Keep a pattern's earlier notes when recording over them",
+        MenuCmd::Record(Opt::Loop) => "Playback loops while recording (off: it runs on past the end)",
+        MenuCmd::StepEdit => "While stopped, played notes are written at the song position",
+        MenuCmd::Autoscroll => "Views follow the playhead while playing",
+        MenuCmd::Groups => "Grouped clips select and move together",
+        MenuCmd::Multilink => "Change knobs, then move a controller for each, to link them",
+        // HELP.
+        MenuCmd::Web(crate::help_links::HELP_INDEX_URL) => "Open the help pages in your web browser",
+        MenuCmd::Web(crate::help_links::WHATS_NEW_URL) => "Open the list of recent changes in your web browser",
+        _ => item.label,
+    }
+}
+
 /// What the click removal modes do (`lemon_sampler::params::DECLICK`, in order).
 const DECLICK_TIPS: [&str; 6] = [
     "Only the end of each sound is faded; a new note cuts the last one off",
@@ -1017,8 +1148,7 @@ pub fn paint_dropdown(ui: &mut Ui, s: &State, menu: usize, k: f32) {
                     // step to act on say nothing).
                     let about = tip(menu, item);
                     if ok {
-                        let hint = if about.is_empty() { item.label } else { about };
-                        let hov = ui.hit(rr, item_action(menu, flat, item), hint);
+                        let hov = ui.hit(rr, item_action(menu, flat, item), row_hint(menu, item));
                         ui.menu_row(crate::app::MENU_DROPDOWN);
                         if hov || open == Some(flat) {
                             light(ui, rr);
@@ -1124,7 +1254,7 @@ fn paint_recent(ui: &mut Ui, rows: &[Recent], at: Rect, open: Option<usize>) -> 
                 continue;
             }
             Recent::Project(n, p) => (Action::MenuItem(0, RECENT_PICK + n), p.to_string_lossy().into_owned()),
-            Recent::More => (Action::MenuSub(0, RECENT_MORE), "Older recent projects".to_string()),
+            Recent::More => (Action::MenuSub(0, RECENT_MORE), "Show older recent projects".to_string()),
         };
         let rr = Rect::new(at.x, y, at.w, mt.row);
         let hov = ui.hit(rr, act, hint);

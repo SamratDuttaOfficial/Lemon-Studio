@@ -57,6 +57,12 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
   automation channel makes its own clip, a channel with notes a clip of the pattern that plays it, a sampler with no
   notes an audio clip of its sample. Ctrl+C on the rack then Ctrl+V on the Arranger does the same at the song position.
   What is carried from the browser opens a tab the same way
+- The window is maximized at first, all the width from the browser to the window's edge, and its first restore keeps that
+  width
+- Each track has its own height: drag its bottom edge in the headers (a double-click puts it back), or use the track menu's
+  Track height. Saved in the project, one undo step, and the track-height zoom scales them all together
+- The song position has its line down the grid where it stands, not just the flag on the ruler; playing, that line is the
+  playhead
 - Each row of the clip source picker has its channel's on / off, pan, volume and mixer track, tiny, and they are the
   rack's own controls: the drag, the wheel and the right-click menus work there too. A pattern's row shows the channel it
   plays (the selected one if it plays several and that is one of them, else the first; the hints name it); an empty
@@ -165,21 +171,25 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
   stretch settings, the channel pitch or the tempo change
 - Plugins and automation on a piece of audio. Double-clicking an audio clip opens its channel's window as before, with
   two more tabs in its strip (Alt+double-click opens straight on the first of them; General ▸ Input ▸ Manage shortcuts):
-  - **Cut part** is the piece double-clicked: which part of the sample it plays, where it stands, its gain and fades,
+  - **This clip** is the clip double-clicked: which part of the sample it plays, where it stands, its gain and fades,
     ten plugin slots of its own, and its own automation lines.
-  - **Whole audio** is the sample: its file, length and cuts, ten plugin slots for all of it, and automation lines every
-    cut of it follows.
+  - **Source audio** is the sample: its file, length and clips, ten plugin slots for all of it, and automation lines every
+    clip of it follows.
+
+  Both tabs have a time ruler over the lines and the song position's line down them. It is where playback starts or is:
+  click or drag the ruler to place it, as on the Arranger's. Where the song position is not on this audio the ruler says
+  so.
 
   A line's points stand on the sample's own clock, so they stay with the audio when a clip is moved or trimmed. A line
-  of the whole audio moves every cut of the sample at the part of the sample it plays, and shows on each of them, on the
-  playlist as well. A cut with its own line for the same thing uses that one for the whole of the cut; every other cut,
-  and each thing the cut has no line for, goes on following the whole audio. Volume and pan always have a line to draw;
-  plugin parameters are added from the plugin's list, and a cut can also override a parameter of a whole-audio plugin
-  while it plays. The sound goes: the clip's fades and gain, its volume and pan lines, the cut's plugins, the whole
-  audio's plugins (one chain every cut shares), the channel's mixer track.
+  of the source audio moves every clip of the sample at the part of the sample it plays, and shows on each of them, in the
+  Arranger as well. A clip with its own line for the same thing uses that one for the whole of the clip; every other clip,
+  and each thing the clip has no line for, goes on following the source audio. Volume and pan always have a line to draw;
+  plugin parameters are added from the plugin's list, and a clip can also override a parameter of a source audio plugin
+  while it plays. The sound goes: the clip's fades and gain, its volume and pan lines, the clip's plugins, the source
+  audio's plugins (one chain every clip shares), the channel's mixer track.
 
   It is all stored in a chunk of its own after the project's events, so the events stay as they are and a project that
-  uses none of this is the same file as before. Up to 15 cuts of one sample with plugins of their own sound at once; past
+  uses none of this is the same file as before. Up to 15 clips of one sample with plugins of their own sound at once; past
   that the rest play without their own plugins while they overlap. Consolidate leaves hosted plugins out here as it does
   on mixer tracks.
 - Playlist stretch mode (Shift+M)

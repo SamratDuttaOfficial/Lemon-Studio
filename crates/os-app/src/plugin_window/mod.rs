@@ -184,7 +184,7 @@ pub struct ChannelInfo {
     /// The channel's Misc tab values (`None`: no channel behind the window, e.g. mixer effects: no Misc tab, and the
     /// strip's ON / PAN / VOL do nothing).
     pub misc: Option<crate::misc_page::MiscVals>,
-    /// A sample's channel: what its Cut part and Whole audio tabs show (`None`: the window has neither).
+    /// A sample's channel: what its This clip and Source audio tabs show (`None`: the window has neither).
     pub clip: Option<Box<crate::clip_page::PageVals>>,
 }
 
@@ -217,7 +217,7 @@ pub enum FrameEvent {
     Misc(crate::misc_page::M, f32),
     /// A Misc tab list (chord list, number box values) or knob menu: the app opens it at this screen point.
     MiscMenu(crate::misc_page::M, i32, i32),
-    /// Something done on the Cut part or Whole audio tab.
+    /// Something done on the This clip or Source audio tab.
     Clip(crate::clip_page::Event),
     /// A strip knob was right-clicked: the app opens its menu (Reset first) at this screen point.
     KnobMenu(Knob, i32, i32),
@@ -289,8 +289,19 @@ struct State {
     preset: Option<String>,
     /// Misc tab page state (tracking page, keyboard scroll, drag, hover).
     misc_ui: crate::misc_page::MiscUi,
-    /// The Cut part or Whole audio tab is showing instead of the plugin, and that page's state.
+    /// The This clip or Source audio tab is showing instead of the plugin, and that page's state.
     clip_tab: Option<crate::clip_page::Tab>,
+    /// The part of the frame under the mouse.
+    hover_part: Option<Part>,
+    /// What could show a tooltip now: where, what it says, and whether it is over a page the frame draws (else it stays in
+    /// the title bar and strip, which a plugin's own window does not cover).
+    tip_for: Option<(Rect, String, bool)>,
+    /// Since when `tip_for` is waiting.
+    tip_wait: Option<std::time::Instant>,
+    /// Showing it, since when.
+    tip: Option<std::time::Instant>,
+    /// It went away and the frame has not repainted yet.
+    tip_gone: bool,
     clip_ui: crate::clip_page::PageUi,
     /// Plugin editor size (logical px).
     editor: (f32, f32),
@@ -337,6 +348,11 @@ impl State {
             preset: None,
             misc_ui: Default::default(),
             clip_tab: None,
+            hover_part: None,
+            tip_for: None,
+            tip_wait: None,
+            tip: None,
+            tip_gone: false,
             clip_ui: Default::default(),
             editor,
             resize_min: None,
@@ -416,7 +432,7 @@ impl State {
         }
     }
     /// What the app says the channel holds now; whether the frame now shows something else. Nothing moves under a drag.
-    /// What only the Cut part and Whole audio tabs show (it changes all the time while the song plays) is kept without a
+    /// What only the This clip and Source audio tabs show (it changes all the time while the song plays) is kept without a
     /// repaint while neither shows, and edits on them the app has not had yet keep what they show.
     fn take_info(&mut self, mut info: ChannelInfo) -> bool {
         if self.drag.is_some() || self.misc_ui.drag.is_some() {
@@ -430,17 +446,70 @@ impl State {
         let tabs_change = old_clip.is_some() != new_clip.is_some();
         self.info = info;
         self.info.clip = if held && old_clip.is_some() && new_clip.is_some() { old_clip } else { new_clip };
-        !rest_same || tabs_change || (!clip_same && !held && self.clip_tab.is_some())
+        let tip = self.tip_tick(std::time::Instant::now());
+        !rest_same || tabs_change || (!clip_same && !held && self.clip_tab.is_some()) || tip
     }
 
-    /// Shows the Cut part or Whole audio tab (the strip with its tabs comes with it).
+    /// Runs each tick: whether the tooltip came or went.
+    fn tip_tick(&mut self, now: std::time::Instant) -> bool {
+        if self.tip.is_some_and(|t| now.duration_since(t) >= TIP_STAY) {
+            self.tip = None;
+            self.tip_for = None;
+            return true;
+        }
+        if self.tip_wait.is_some_and(|t| now.duration_since(t) >= crate::app::TIP_DELAY) && self.tip_for.is_some() {
+            self.tip_wait = None;
+            self.tip = Some(now);
+            return true;
+        }
+        std::mem::take(&mut self.tip_gone)
+    }
+
+    /// Takes the tooltip away (a press, the wheel): the next tick repaints.
+    fn hide_tip(&mut self) {
+        self.tip_gone |= self.tip.take().is_some();
+        self.tip_for = None;
+        self.tip_wait = None;
+    }
+
+    /// The mouse is at (x, y) with nothing being dragged: what can show a tooltip there. Whether what shows changed.
+    fn tip_at(&mut self, x: f32, y: f32) -> bool {
+        let part = part_at(self, x, y);
+        let lit = |p: Option<Part>| matches!(p, Some(Part::Tab(_) | Part::ClipTab(_)));
+        let tab_changed = part != self.hover_part && (lit(part) || lit(self.hover_part));
+        self.hover_part = part;
+        let at = part.and_then(|p| Some((part_rect(self, p)?, part_tip(self, p)?, false)));
+        let at = at.or_else(|| {
+            let mouse = Rect::new(x, y, 1.0, 14.0);
+            if self.misc {
+                return (!self.misc_ui.hint.is_empty()).then(|| (mouse, self.misc_ui.hint.clone(), true));
+            }
+            use crate::clip_page::Hit;
+            let over = self.clip_shown().is_some() && !matches!(self.clip_ui.hover, None | Some(Hit::Plot | Hit::Point(_) | Hit::Ruler));
+            (over && !self.clip_ui.hint.is_empty()).then(|| (mouse, self.clip_ui.hint.clone(), true))
+        });
+        let same = match (&at, &self.tip_for) {
+            (Some(a), Some(b)) => a.1 == b.1,
+            (None, None) => true,
+            _ => false,
+        };
+        if same {
+            return tab_changed;
+        }
+        let was = self.tip.take().is_some();
+        self.tip_wait = at.is_some().then(std::time::Instant::now);
+        self.tip_for = at;
+        tab_changed || was
+    }
+
+    /// Shows the This clip or Source audio tab (the strip with its tabs comes with it).
     fn open_clip_tab(&mut self, tab: crate::clip_page::Tab) {
         self.strip = true;
         self.misc = false;
         self.clip_tab = Some(tab);
         self.clip_ui.hint.clear();
     }
-    /// The Cut part or Whole audio tab showing, with what it shows.
+    /// The This clip or Source audio tab showing, with what it shows.
     fn clip_shown(&self) -> Option<(crate::clip_page::Tab, &crate::clip_page::PageVals)> {
         Some((self.clip_tab?, self.info.clip.as_deref()?))
     }
@@ -474,7 +543,7 @@ enum Part {
     PresetNext,
     /// Page tab `i`; `i == pages.len()` is the Misc tab.
     Tab(usize),
-    /// The Cut part and Whole audio tabs, after the Misc tab.
+    /// The This clip and Source audio tabs, after the Misc tab.
     ClipTab(crate::clip_page::Tab),
     On,
     Knob(u8),
@@ -533,6 +602,45 @@ fn strip_off(st: &State, w: f32) -> Vec<(Rect, &'static str)> {
     v
 }
 
+/// How long a tooltip stays: the frame hears nothing when the mouse leaves it.
+const TIP_STAY: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// What a part of the frame does.
+fn part_tip(st: &State, p: Part) -> Option<String> {
+    let page = |i: usize| match st.pages.get(i) {
+        Some(PageIcon::Plugin) => "The plugin's own controls",
+        Some(PageIcon::Sample) => "Sample settings of this channel",
+        Some(PageIcon::Envelope) => "Envelopes and modulation of this channel",
+        None => "Misc: polyphony, tracking, time and other channel settings",
+    };
+    let s: String = match p {
+        Part::Close => "Close this window".into(),
+        Part::Minimize => "Minimize this window".into(),
+        Part::Maximize => "Maximize or restore this window".into(),
+        Part::Gear => "Show or hide the controls under the title bar".into(),
+        Part::Menu => "This plugin's menu: presets, parameters and window options".into(),
+        Part::Presets => "List the plugin's presets".into(),
+        Part::PresetPrev => "Load the previous preset".into(),
+        Part::PresetNext => "Load the next preset".into(),
+        Part::Tab(i) => page(i).into(),
+        Part::ClipTab(t) => t.about().into(),
+        Part::On => "Turn this channel on or off".into(),
+        Part::Knob(0) => "Channel panning: drag to change, right-click for its menu".into(),
+        Part::Knob(1) => "Channel volume: drag to change, right-click for its menu".into(),
+        Part::Knob(_) => "Channel pitch: drag to change, right-click for its menu".into(),
+        Part::Range => "How many semitones the pitch knob and pitch bend reach".into(),
+        Part::Track => "The mixer track this channel plays into".into(),
+        Part::Off(name) => crate::app::off_text(name),
+        Part::Caption | Part::Edge { .. } => return None,
+    };
+    Some(s)
+}
+
+/// Where part `p` of the frame is.
+fn part_rect(st: &State, p: Part) -> Option<Rect> {
+    parts(st).into_iter().find(|(_, q)| *q == p).map(|(r, _)| r)
+}
+
 /// How far into a resizable frame's bottom-right corner it resizes both ways (logical px).
 const CORNER: f32 = 16.0;
 
@@ -564,8 +672,9 @@ fn parts(st: &State) -> Vec<(Rect, Part)> {
             v.push((tab_rect(i), Part::Tab(i)));
         }
         if st.info.clip.is_some() {
-            v.push((tab_rect(st.pages.len() + 1), Part::ClipTab(crate::clip_page::Tab::Cut)));
-            v.push((tab_rect(st.pages.len() + 2), Part::ClipTab(crate::clip_page::Tab::Whole)));
+            for tab in [crate::clip_page::Tab::Cut, crate::clip_page::Tab::Whole] {
+                v.push((clip_tab_rect(st, tab), Part::ClipTab(tab)));
+            }
         }
         v.extend(strip_off(st, w).into_iter().map(|(r, name)| (r, Part::Off(name))));
         if st.channel() {
@@ -602,6 +711,56 @@ const KNOBS: [Knob; 3] = [Knob::Pan, Knob::Vol, Knob::Pitch];
 /// Cell of strip tab `i` (45 px wide from x 7, inside the strip's outline; the Misc tab is the one after the pages).
 fn tab_rect(i: usize) -> Rect {
     Rect::new(7.0 + 45.0 * i as f32, TITLE_H + 1.0, 45.0, STRIP_H - 1.0)
+}
+
+/// Width of the This clip and Source audio tabs: a name beside an icon.
+const CLIP_TAB_W: f32 = 92.0;
+
+/// The cell of the clip tab `tab`, after the page tabs.
+fn clip_tab_rect(st: &State, tab: crate::clip_page::Tab) -> Rect {
+    let first = tab_rect(st.pages.len() + 1);
+    let k = if tab == crate::clip_page::Tab::Cut { 0.0 } else { 1.0 };
+    Rect::new(first.x + 3.0 + k * (CLIP_TAB_W + 2.0), first.y, CLIP_TAB_W, first.h)
+}
+
+/// How far below the strip's top a tab's shape starts: the room over it makes it read as a tab, not a button.
+const TAB_TOP: f32 = 8.0;
+
+/// A strip tab's shape in cell `cell`, rounded at its top only and standing on the strip's bottom edge: the open tab in the
+/// page's colour, so it runs into the page, with an accent along its top. The icon's colour comes back.
+fn tab_face(c: &mut Canvas, cell: Rect, active: bool, hovered: bool) -> Color {
+    let p = os_theme::current();
+    let radius = if os_ui::kit::lemon::on(&p) { 6.0 } else { 3.0 };
+    let shape = Rect::new(cell.x + 1.0, cell.y + TAB_TOP, cell.w - 2.0, cell.h - TAB_TOP);
+    let face = if active {
+        c_body()
+    } else if hovered {
+        c_strip().shade(0.07)
+    } else {
+        c_strip().shade(-0.09)
+    };
+    c.push_clip(shape);
+    c.fill_rrect(Rect::new(shape.x, shape.y, shape.w, shape.h + 2.0 * radius), radius, face);
+    if active {
+        c.fill_rect(Rect::new(shape.x, shape.y, shape.w, 2.0), p.a(0x49f1b1));
+    }
+    c.pop_clip();
+    if active {
+        p.a(0x49f1b1)
+    } else if hovered {
+        c_text()
+    } else {
+        c_icon()
+    }
+}
+
+/// The icon of the This clip tab: a clip as the Arranger draws it, a title strip over a bit of waveform.
+fn clip_icon(c: &mut Canvas, cx: f32, cy: f32, col: Color) {
+    let r = Rect::new(cx - 8.0, cy - 6.5, 16.0, 13.0);
+    c.stroke_rrect(r, 2.0, 1.4, col);
+    c.fill_rect(Rect::new(r.x + 1.0, r.y + 1.0, r.w - 2.0, 3.0), col);
+    let y = r.y + 8.5;
+    c.polyline(&[(r.x + 3.0, y), (r.x + 5.0, y - 2.0), (r.x + 7.0, y + 2.0), (r.x + 9.0, y - 2.0), (r.x + 11.0, y + 2.0), (r.x + 13.0, y)], 1.2, col);
 }
 
 /// The strip's right-hand controls (ON ... TRACK) are placed for a window this wide and move with its right edge.
@@ -664,6 +823,45 @@ fn paint(c: &mut Canvas, st: &State) {
     } else if let Some((tab, v)) = st.clip_shown() {
         crate::clip_page::paint(c, &os_theme::current(), a.x, a.y, v, &st.clip_ui, tab);
     }
+    // The open tab runs through the editor's outline into the page.
+    if st.strip {
+        let open = if st.misc {
+            Some(tab_rect(st.pages.len()))
+        } else if let Some(t) = st.clip_tab.filter(|_| st.info.clip.is_some()) {
+            Some(clip_tab_rect(st, t))
+        } else {
+            Some(tab_rect(st.page.min(st.pages.len())))
+        };
+        if let Some(r) = open {
+            c.fill_rect(Rect::new(r.x + 1.0, ay - 1.0, r.w - 2.0, 1.0), c_body());
+        }
+    }
+    if st.tip.is_some() {
+        frame_tip(c, st, w, h);
+    }
+}
+
+/// The tooltip. Over a page the frame draws it hangs under the mouse; else it stays in the title bar and strip, where a
+/// plugin's own window (which covers the editor area) cannot hide it.
+fn frame_tip(c: &mut Canvas, st: &State, w: f32, h: f32) {
+    let Some((at, text, page)) = &st.tip_for else { return };
+    let f = Font::new(13);
+    let tw = c.text_width(f, text).ceil().min(w - 24.0);
+    let (bw, bh) = (tw + 14.0, 21.0);
+    let y = if *page {
+        (at.bottom() + 6.0).min(h - bh - 2.0)
+    } else if st.strip && at.y < TITLE_H {
+        TITLE_H + 2.0
+    } else {
+        // A strip control's goes in the title bar over it, leaving the tabs and knobs to be seen.
+        4.0
+    };
+    let b = Rect::new(at.x.min(w - bw - 3.0).max(3.0), y, bw, bh);
+    let p = os_theme::current();
+    c.fill_rrect(b.outset(1.0), 6.0, Color::rgb(0).with_alpha(90));
+    c.fill_rrect(b, 5.0, p.s(0x0b0d0f).with_alpha(245));
+    let lh = c.line_height(f);
+    c.text_clip(f, b.x + 7.0, (b.cy() - lh / 2.0).round(), tw, p.tx(0xe6e6e6), text);
 }
 
 /// Title bar, left to right: menu arrow, gear (boxed while the strip is shown), channel name, "(mixer target)", the
@@ -730,31 +928,27 @@ fn strip(c: &mut Canvas, st: &State, w: f32) {
     for i in 0..=n {
         let cell = tab_rect(i);
         let active = if i == n { st.misc } else { !st.over_editor() && st.page == i };
-        if active && os_ui::kit::lemon::on(&os_theme::current()) {
-            c.fill_rrect(cell.inset(2.0), 6.0, c_body());
-        } else if active {
-            c.fill_rect(cell, c_body());
-        }
-        let col = if active { os_theme::current().a(0x49f1b1) } else { c_icon() };
+        let col = tab_face(c, cell, active, st.hover_part == Some(Part::Tab(i)));
         let t = if i == n { &tb::TOOL } else { page_tabler(st.pages[i]) };
-        icon_at(c, t, cell.cx(), cell.cy(), 26.0, col);
+        icon_at(c, t, cell.cx(), cell.y + TAB_TOP + (cell.h - TAB_TOP) / 2.0, 22.0, col);
     }
-    // A sample's channel: the piece and the whole audio, each named under its icon.
+    // A sample's channel: this clip and the source audio, each named beside its icon.
     if st.info.clip.is_some() {
         use crate::clip_page::Tab;
-        for (i, tab, t, label) in [(n + 1, Tab::Cut, &tb::CUT, "CUT"), (n + 2, Tab::Whole, &tb::WAVE_SINE, "WHOLE")] {
-            let cell = tab_rect(i);
+        for tab in [Tab::Cut, Tab::Whole] {
+            let cell = clip_tab_rect(st, tab);
             let active = !st.misc && st.clip_tab == Some(tab);
-            if active && os_ui::kit::lemon::on(&os_theme::current()) {
-                c.fill_rrect(cell.inset(2.0), 6.0, c_body());
-            } else if active {
-                c.fill_rect(cell, c_body());
+            let col = tab_face(c, cell, active, st.hover_part == Some(Part::ClipTab(tab)));
+            let cy = cell.y + TAB_TOP + (cell.h - TAB_TOP) / 2.0;
+            let ix = cell.x + 12.0;
+            if tab == Tab::Cut {
+                clip_icon(c, ix, cy, col);
+            } else {
+                icon_at(c, &tb::FILE_MUSIC, ix, cy, 18.0, col);
             }
-            let col = if active { os_theme::current().a(0x49f1b1) } else { c_icon() };
-            icon_at(c, t, cell.cx(), cell.cy() - 6.0, 21.0, col);
-            let f = Font::condensed(9, 4).bold();
-            let w = c.text_width(f, label);
-            c.text(f, (cell.cx() - w / 2.0).round(), cell.bottom() - 15.0, col, label);
+            let f = Font::new(13);
+            let lh = c.line_height(f);
+            c.text_clip(f, ix + 10.0, (cy - lh / 2.0).round(), cell.right() - ix - 11.0, if active { c_text() } else { col }, tab.name());
         }
     }
     // ON LED.
@@ -915,6 +1109,7 @@ impl State {
 
     /// Left button down at (x, y); `double` for the second press of a double click.
     fn left_down(&mut self, x: f32, y: f32, double: bool, screen: ToScreen) -> Reply {
+        self.hide_tip();
         let part = part_at(self, x, y);
         match part {
             Some(Part::Menu) => {
@@ -1031,6 +1226,7 @@ impl State {
 
     /// Right button down: the Misc page's lists, knob menus and root note; a strip knob's menu.
     fn right_down(&mut self, x: f32, y: f32, screen: ToScreen) -> Reply {
+        self.hide_tip();
         if let Some(r) = self.misc_button(x, y, Btn::Right, screen) {
             return r;
         }
@@ -1050,6 +1246,7 @@ impl State {
 
     /// Middle button down resets a knob (spec: ui/knobs.md, owner decision).
     fn middle_down(&mut self, x: f32, y: f32, screen: ToScreen) -> Reply {
+        self.hide_tip();
         if let Some(r) = self.misc_button(x, y, Btn::Middle, screen) {
             return r;
         }
@@ -1138,6 +1335,7 @@ impl State {
             self.set_knob(k, v);
             return Reply::Repaint;
         }
+        let tip_changed = self.tip_at(x, y);
         // Over a greyed-out control the title bar says it is not available yet; over a value box, its value.
         let part = part_at(self, x, y);
         let off = match part {
@@ -1154,7 +1352,7 @@ impl State {
             self.box_hint = boxed;
             return Reply::Repaint;
         }
-        if hover { Reply::Repaint } else { Reply::None }
+        if hover || tip_changed { Reply::Repaint } else { Reply::None }
     }
 
     /// The left button was released at (x, y): an armed title-bar button acts if the mouse is still over it, then
@@ -1198,6 +1396,7 @@ impl State {
 
     /// The wheel turned `notches` (up positive) over (x, y).
     fn wheel(&mut self, x: f32, y: f32, notches: f32) -> Reply {
+        self.hide_tip();
         let part = part_at(self, x, y);
         if part.is_none() {
             if let Some(r) = self.misc_wheel(x, y, notches) {
@@ -1231,7 +1430,7 @@ impl State {
         Reply::None
     }
 
-    /// Edits on the Cut part or Whole audio tab: the page shows them at once, and they go to the app.
+    /// Edits on the This clip or Source audio tab: the page shows them at once, and they go to the app.
     fn clip_events(&mut self, out: Vec<crate::clip_page::Event>) {
         if out.is_empty() {
             return;
@@ -1243,7 +1442,7 @@ impl State {
         os_clap::wake();
     }
 
-    /// A button press over the Cut part or Whole audio tab; `None` when that does not show.
+    /// A button press over the This clip or Source audio tab; `None` when that does not show.
     fn clip_button(&mut self, x: f32, y: f32, b: crate::clip_page::Button, screen: ToScreen) -> Option<Reply> {
         use crate::clip_page::{self as cp, Press};
         let (tab, vals) = self.clip_tab.zip(self.info.clip.as_deref())?;
@@ -1386,6 +1585,51 @@ fn misc_hint(st: &mut State, h: Option<crate::misc_page::Hit>) {
 mod tests {
     use super::*;
 
+    /// Every part of the frame that does something says what, in a tooltip that waits and goes.
+    #[test]
+    fn every_part_of_the_frame_says_what_it_does() {
+        use std::time::{Duration, Instant};
+        for mut st in [state(true, "Bus 1"), clip_state()] {
+            for (_, p) in parts(&st) {
+                if !matches!(p, Part::Caption | Part::Edge { .. }) {
+                    assert!(part_tip(&st, p).is_some_and(|t| !t.is_empty()), "{p:?}");
+                }
+            }
+            let r = part_rect(&st, Part::Close).unwrap();
+            let _ = st.motion(r.cx(), r.cy(), false);
+            assert!(st.tip.is_none() && st.tip_for.is_some(), "not at once");
+            assert!(!st.tip_tick(Instant::now()));
+            assert!(st.tip_tick(Instant::now() + crate::app::TIP_DELAY), "after resting there");
+            assert!(st.tip.is_some());
+            // Moved off the frame's controls: gone.
+            let _ = st.motion(r.cx() - 200.0, 2.0, false);
+            assert!(st.tip.is_none());
+            // Not forever when the mouse leaves the frame, which the frame does not hear.
+            let _ = st.motion(r.cx(), r.cy(), false);
+            st.tip_tick(Instant::now() + crate::app::TIP_DELAY);
+            assert!(st.tip_tick(Instant::now() + crate::app::TIP_DELAY + TIP_STAY + Duration::from_secs(1)));
+            assert!(st.tip.is_none());
+            // A press takes it away, and the next tick repaints.
+            let _ = st.motion(r.cx() - 60.0, r.cy(), false);
+            st.tip_tick(Instant::now() + crate::app::TIP_DELAY);
+            st.hide_tip();
+            assert!(st.tip.is_none());
+        }
+    }
+
+    /// The clip tabs are named, wide enough for their names, clear of the controls to their right at the smallest window.
+    #[test]
+    fn the_clip_tabs_fit_beside_the_strip_controls() {
+        use crate::clip_page::Tab;
+        let st = clip_state();
+        let last = clip_tab_rect(&st, Tab::Whole);
+        assert_eq!(part_at(&st, last.cx(), last.cy()), Some(Part::ClipTab(Tab::Whole)));
+        assert!(last.right() < 334.0, "{last:?} before the ON light of a {} px window", STRIP_RIGHT);
+        let first = clip_tab_rect(&st, Tab::Cut);
+        assert!(first.right() <= last.x && first.x >= tab_rect(st.pages.len()).right());
+        assert_ne!(Tab::Cut.name(), Tab::Whole.name());
+    }
+
     fn state(strip: bool, target: &str) -> State {
         let info = ChannelInfo { name: "Keys".into(), target: target.into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 0, max_track: 125, misc: Some(Default::default()), clip: None };
         State { strip, ..State::new(info, (480.0, 270.0), false) }
@@ -1415,7 +1659,7 @@ mod tests {
             ..Side::default()
         };
         let mut st = state(true, "Bus 1");
-        st.info.clip = Some(Box::new(PageVals { cut: side(), whole: side(), playhead: None }));
+        st.info.clip = Some(Box::new(PageVals { cut: side(), whole: side() }));
         st
     }
 
@@ -1429,7 +1673,7 @@ mod tests {
         let plain = state(true, "Bus 1");
         assert_eq!(part_at(&plain, tab_rect(2).cx(), tab_rect(2).cy()), None);
         let mut st = clip_state();
-        let (cut, whole) = (tab_rect(st.pages.len() + 1), tab_rect(st.pages.len() + 2));
+        let (cut, whole) = (clip_tab_rect(&st, Tab::Cut), clip_tab_rect(&st, Tab::Whole));
         assert_eq!(part_at(&st, cut.cx(), cut.cy()), Some(Part::ClipTab(Tab::Cut)));
         assert_eq!(part_at(&st, whole.cx(), whole.cy()), Some(Part::ClipTab(Tab::Whole)));
         assert_eq!(st.left_down(cut.cx(), cut.cy(), false, &screen), Reply::Relayout);
@@ -1474,7 +1718,7 @@ mod tests {
         assert!(st.events.is_empty(), "nothing goes out during the drag");
         // What the app sends during a drag does not move the page.
         let during = st.info.clone();
-        assert!(!st.take_info(ChannelInfo { clip: during.clip.clone().map(|mut c| { c.playhead = Some(1.0); c }), ..during }));
+        assert!(!st.take_info(ChannelInfo { clip: during.clip.clone().map(|mut c| { c.cut.pos = crate::clip_page::Pos::At(1.0); c }), ..during }));
         st.left_up(x + 20.0, y - 30.0);
         let [FrameEvent::Clip(Event::SetLane { tab: Tab::Cut, lane: Lane::Volume, points })] = &st.events[..] else { panic!("{:?}", st.events) };
         assert_eq!(points.len(), 1);
@@ -1495,7 +1739,8 @@ mod tests {
         let mut st = clip_state();
         let moved = |st: &State| {
             let mut i = st.info.clone();
-            i.clip.as_mut().unwrap().playhead = Some(st.info.clip.as_ref().unwrap().playhead.unwrap_or(0.0) + 1.0);
+            let next = if let crate::clip_page::Pos::At(s) = st.info.clip.as_ref().unwrap().cut.pos { s + 1.0 } else { 1.0 };
+            i.clip.as_mut().unwrap().cut.pos = crate::clip_page::Pos::At(next);
             i
         };
         assert!(!st.take_info(st.info.clone()), "nothing new");

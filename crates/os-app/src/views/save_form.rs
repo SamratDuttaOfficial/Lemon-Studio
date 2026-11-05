@@ -39,7 +39,7 @@ const BAND: f32 = 55.0;
 const ITEM_H: f32 = 20.0;
 
 /// The hints the spec does not give (Lemon Studio's).
-const INFO_HINTS: [&str; 4] = ["The project's title", "The project's author", "A web link for the project", "The project's genre"];
+const INFO_HINTS: [&str; 4] = ["Type the project's title", "Type the project's author", "Type a web link for the project", "Type the project's genre"];
 const TIME_HINTS: [&str; 3] = ["Timebase (PPQ): click to choose", "Numerator: click to choose", "Denominator: click to choose"];
 
 /// The Information group's top (from the form's top) and height.
@@ -178,7 +178,7 @@ fn fit_tail(ui: &mut Ui, font: Font, text: &str, w: f32) -> String {
 /// click anywhere else only closes it.
 fn list(ui: &mut Ui, s: &State, f: &SaveForm, k: u8, b: Rect) {
     let t = ui.t;
-    hit(ui, Rect::new(0.0, 0.0, s.screen.0, s.screen.1), DHit::Form(FHit::Shut), "");
+    hit(ui, Rect::new(0.0, 0.0, s.screen.0, s.screen.1), DHit::Form(FHit::Shut), "Click outside the list to close it");
     let (items, now) = f.list_items(k);
     let h = items.len() as f32 * ITEM_H + 6.0;
     let below = Rect::new(b.x, b.bottom() + 2.0, b.w.max(64.0), h);
@@ -195,7 +195,7 @@ fn list(ui: &mut Ui, s: &State, f: &SaveForm, k: u8, b: Rect) {
     let lh = ui.c.line_height(font);
     for (i, text) in items.iter().enumerate() {
         let row = Rect::new(p.x + 1.0, p.y + 3.0 + i as f32 * ITEM_H, p.w - 2.0, ITEM_H);
-        if hit(ui, row, DHit::Form(FHit::Item(i as u8)), "") {
+        if hit(ui, row, DHit::Form(FHit::Item(i as u8)), "Use this choice") {
             if lemon {
                 lk::row_highlight(ui.c, t, row);
             } else {

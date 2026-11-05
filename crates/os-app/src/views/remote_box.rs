@@ -35,7 +35,7 @@ pub fn paint(ui: &mut Ui, s: &State, b: &LinkBox) {
     // Title bar.
     ui.c.text(f.bold(), r.x + 10.0, r.y + 7.0, t.text, "Remote control settings");
     let x = Rect::new(r.right() - 24.0, r.y + 4.0, 20.0, 20.0);
-    let hov = hit(ui, x, RAct::Close, "Close (Esc)");
+    let hov = hit(ui, x, RAct::Close, "Close this box (Esc)");
     ui.c.icon(&os_ui::tabler::X, x.inset(3.0), if hov { t.glyph } else { t.text });
     // The target's name.
     let name = crate::typein::caption(s, b.target);
@@ -50,9 +50,9 @@ pub fn paint(ui: &mut Ui, s: &State, b: &LinkBox) {
     let ch = (b.ch + 1).to_string();
     let cc = b.cc.map_or_else(|| "---".into(), |c| c.to_string());
     for (i, (label, v, a, hint)) in [
-        ("Port", port, RAct::Port, "MIDI input port number (--- = any device)"),
-        ("Channel", ch, RAct::Channel, "MIDI channel number"),
-        ("Ctrl", cc, RAct::Ctrl, "Continuous Controller number"),
+        ("Port", port, RAct::Port, "The MIDI input port the link listens on (--- = any device)"),
+        ("Channel", ch, RAct::Channel, "The MIDI channel the link listens on"),
+        ("Ctrl", cc, RAct::Ctrl, "The Continuous Controller number the link listens to"),
     ]
     .into_iter()
     .enumerate()
@@ -62,7 +62,7 @@ pub fn paint(ui: &mut Ui, s: &State, b: &LinkBox) {
         hit(ui, bx, a, hint);
         value_red(ui, bx, &v);
     }
-    check(ui, r.x + 30.0, gy + 76.0, b.auto, RAct::Auto, "Auto detect", "Just move your MIDI controller");
+    check(ui, r.x + 30.0, gy + 76.0, b.auto, RAct::Auto, "Auto detect", "Detect the controller: just move your MIDI controller");
     let omni = crate::remote::omni_kind(b.target);
     check(ui, r.x + 150.0, gy + 76.0, b.omni && omni, RAct::Omni, "Omni", "Input goes to the selected channel");
     if !omni {

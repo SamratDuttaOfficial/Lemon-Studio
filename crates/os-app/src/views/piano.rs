@@ -326,7 +326,7 @@ fn arrow_button(ui: &mut Ui, b: Rect, dir: u8, target: Scroll) {
         _ => (Dir::Down, 1),
     };
     let act = Action::ScrollStep(target, step);
-    let hov = ui.hit(b, act.clone(), "Scroll");
+    let hov = ui.hit(b, act.clone(), "Scroll this view a step");
     let st = kit::State::new(hov, ui.down(b, &act), false);
     kit::scroll_arrow_button(ui.c, ui.t, b, d, st);
 }
@@ -349,12 +349,12 @@ fn toolbar(ui: &mut Ui, s: &State, r: Rect, shift: f32) {
     let ox = r.x - 209.0 + shift;
     let items: [(f32, Icon, &'static str, Option<Action>); 15] = [
         (222.0, Icon::ArrowRight, "Piano roll options", None),
-        (242.0, Icon::MidiControl, "Piano roll tools: quantize, chop, glue, strum, arpeggiate, randomize...", Some(Action::PianoToolsMenu)),
+        (242.0, Icon::MidiControl, "Open the tools menu: quantize, chop, glue, strum, arpeggiate, randomize...", Some(Action::PianoToolsMenu)),
         (263.0, Icon::Magnet, "", Some(Action::PianoSnapMenu)),
         (283.0, Icon::Note, "Note properties", None),
         (305.0, Icon::Blend, "Scale and chord helpers", None),
         (327.0, Icon::Undo, "Undo (Ctrl+Z)", Some(Action::PianoUndo)),
-        (360.0, Icon::Pencil, "Draw (P)", Some(Action::PianoTool(Tool::Draw))),
+        (360.0, Icon::Pencil, "Draw (P): click to add a note", Some(Action::PianoTool(Tool::Draw))),
         (380.0, Icon::Brush, "Paint (B): drag to paint notes along the row", Some(Action::PianoTool(Tool::Paint))),
         (402.0, Icon::Plus, "Paint and add", None),
         (422.0, Icon::Delete, "Delete (D): click or swipe to delete notes", Some(Action::PianoTool(Tool::Delete))),
@@ -477,7 +477,7 @@ fn ruler(ui: &mut Ui, l: &Layout, g: &Geom, range: Option<(f32, f32)>, marker: u
 fn keyboard(ui: &mut Ui, l: &Layout, g: &Geom, lit: &[i32]) {
     let t = ui.t;
     let k = l.keys;
-    ui.hit(k, Action::PianoKeys, "Keyboard");
+    ui.hit(k, Action::PianoKeys, "Keyboard: click a key to hear it");
     ui.c.push_clip(k);
     // White keys: a stepped horizontal gradient (§4), with a dark right edge. Lemon: flat keys.
     let lemon = super::lemon(ui);
@@ -775,7 +775,7 @@ fn lane_menu(ui: &mut Ui, s: &State, l: &Layout, k: f32) {
         } else {
             Rect::new(body.x + w0 + 2.0, body.y + HEAD + (i - Lane::NOTE_LANES) as f32 * ROW, w1, ROW)
         };
-        if ui.hit(rr, Action::PianoLanePick(i), lane.menu_name()) || *lane == s.piano.lane {
+        if ui.hit(rr, Action::PianoLanePick(i), format!("Edit {} in the event panel", lane.menu_name())) || *lane == s.piano.lane {
             ui.c.fill_rect(rr, t.menu_pop_hi);
         }
         ui.c.text(font, rr.x + 20.0, rr.y + 2.0, t.menu_pop_text, lane.menu_name());

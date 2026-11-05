@@ -106,10 +106,10 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     // Title-bar tools: ▸ options, snap magnet, then the nine tools (§1, §3).
     let ty = r.y + 2.0;
     let b = Rect::new(r.x + 13.0 - 9.0, ty, 18.0, 18.0);
-    let hov = ui.hit(b, Action::PlOptions, "Arranger options");
+    let hov = ui.hit(b, Action::PlOptions, "Open the Arranger's options menu");
     icons::draw(ui.c, Icon::ArrowRight, b, if hov { t.glyph } else { t.text });
     let b = Rect::new(r.x + 33.0 - 9.0, ty, 18.0, 18.0);
-    let hov = ui.hit(b, Action::PlSnap, format!("Snap: {}", s.playlist.snap.label()));
+    let hov = ui.hit(b, Action::PlSnap, format!("Clips snap to: {} (click to change)", s.playlist.snap.label()));
     icons::draw(ui.c, Icon::Magnet, b, if hov || pl::grid_snap(s) != pl::Snap::None { t.glyph } else { t.text });
     for ((tool, icon), cx) in PlTool::ALL.into_iter().zip(TOOL_ICONS).zip(TOOL_X) {
         let b = Rect::new(r.x + cx - 9.0, ty, 18.0, 18.0);
@@ -121,7 +121,7 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     // Stretch mode (Shift+M, §9b): |<->| after the tools, lit while on.
     {
         let b = Rect::new(r.x + 254.0 - 9.0, ty, 18.0, 18.0);
-        let hov = ui.hit(b, Action::PlStretch, if s.playlist.stretch { "Stretch mode: on (Shift+M)" } else { "Stretch mode: off (Shift+M)" });
+        let hov = ui.hit(b, Action::PlStretch, if s.playlist.stretch { "Stretch mode on: a clip's edge stretches its sound (Shift+M)" } else { "Stretch mode off: a clip's edge trims it (Shift+M)" });
         let on = s.playlist.stretch;
         let col = tool_face(ui, b, on, hov);
         let (cx, cy) = (b.cx(), b.cy());
@@ -147,8 +147,10 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
         ui.c.fill_rect_gradient(strip, t.track_header.shade(0.05), t.track_header.shade(-0.03), 0.0);
     }
     icons::draw(ui.c, Icon::Plus, Rect::new(strip.x + 6.0, client.y + 20.0, 16.0, 16.0), t.glyph);
-    for (i, (icon, label)) in [(Icon::Wave, "NOTE"), (Icon::Slide, "CHAN"), (Icon::PianoRoll, "PAT")].into_iter().enumerate() {
+    ui.off(Rect::new(strip.x + 4.0, client.y + 18.0, 20.0, 20.0), "Add a track");
+    for (i, (icon, label, name)) in [(Icon::Wave, "NOTE", "Show clips that hold notes"), (Icon::Slide, "CHAN", "Show clips of channels"), (Icon::PianoRoll, "PAT", "Show clips of patterns")].into_iter().enumerate() {
         let cx = strip.x + 45.0 + 26.0 * i as f32;
+        ui.off(Rect::new(cx - 13.0, client.y + 2.0, 26.0, 34.0), name);
         icons::draw(ui.c, icon, Rect::new(cx - 8.0, client.y + 3.0, 16.0, 16.0), if i == 2 { t.glyph } else { t.text_faint });
         ui.c.text_center(Font::condensed(8, 4).bold(), Rect::new(cx - 14.0, client.y + 25.0, 28.0, 10.0), if i == 2 { t.glyph } else { t.text_faint }, label);
     }
@@ -259,11 +261,9 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
         }
         None => {}
     }
-    // Playhead.
-    if f.playing && f.song {
-        let x = g.x_of(f.tick as f32);
-        ui.c.fill_rect(Rect::new(x, grid.y, 1.5, grid.h), t.playhead);
-    }
+    // The playhead while the song plays; otherwise it stands where the song will start from.
+    let head = if f.playing && f.song { f.tick as f32 } else { s.playlist.pos as f32 };
+    ui.c.fill_rect(Rect::new(g.x_of(head), grid.y, 1.5, grid.h), t.playhead);
     ui.c.pop_clip();
 
     // Track headers (§6, §6a).
@@ -351,7 +351,7 @@ fn kind_icon(kind: PickKind) -> Icon {
 fn picker(ui: &mut Ui, s: &State, p: Rect) {
     let t = ui.t;
     ui.c.fill_rect(p, t.picker);
-    for (i, (kind, hint)) in [(PickKind::Pattern, "Patterns"), (PickKind::Audio, "Audio clips"), (PickKind::Automation, "Automation clips")].into_iter().enumerate() {
+    for (i, (kind, hint)) in [(PickKind::Pattern, "List the project's patterns"), (PickKind::Audio, "List the project's audio clips"), (PickKind::Automation, "List the project's automation clips")].into_iter().enumerate() {
         let icon = kind_icon(kind);
         let cx = p.x + 23.0 + 47.0 * i as f32;
         let b = Rect::new(cx - 14.0, p.y + 11.0, 28.0, 28.0);
@@ -1439,7 +1439,7 @@ fn header(ui: &mut Ui, s: &State, g: &PGeom, row: u16, x: f32, w: f32) {
     }
     // The LED and "…" keep their distance from the row's bottom when the track height changes (Alt+wheel); short
     // rows drop the "…" and keep the name clear of the LED.
-    let short = g.rows.row_h < pl::ROW_H - 8.0;
+    let short = h < pl::ROW_H - 8.0;
     let led = Rect::new(hr.right() - 19.0, (h - gap - 15.0).max(1.0) + hr.y, 14.0, 14.0);
     ui.hit(led, Action::PlLed(row), "Mute track (right-click / Ctrl+click: solo)");
     let text = if colored.is_some() { ui.t.tx(0xdce8f0) } else { t.text_faint };
@@ -1478,7 +1478,16 @@ fn header(ui: &mut Ui, s: &State, g: &PGeom, row: u16, x: f32, w: f32) {
     } else {
         super::led(ui, led.cx(), led.cy(), on);
     }
+    // The bottom edge changes the track's height; it stays clear of the LED on a short row.
+    let edge = Rect::new(hr.x, y + h - TRACK_EDGE, if short { hr.w - 20.0 } else { hr.w }, TRACK_EDGE + 1.0);
+    let edge = edge.intersect(&Rect::new(edge.x, g.grid.y, edge.w, g.grid.h));
+    if ui.hit(edge, Action::PlTrackEdge(row), "Drag to change this track's height (double-click: normal height)") || ui.held(&Action::PlTrackEdge(row)) {
+        ui.c.fill_rect(Rect::new(hr.x, y + h - 2.0, hr.w, 2.0), t.glyph);
+    }
 }
+
+/// How far up from a track's bottom its edge takes the mouse.
+const TRACK_EDGE: f32 = 4.0;
 
 /// The face behind a title-bar tool icon; returns the icon colour. Lemon: the active tool is a lit rounded square.
 fn tool_face(ui: &mut Ui, b: Rect, on: bool, hov: bool) -> Color {

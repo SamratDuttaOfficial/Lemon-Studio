@@ -63,6 +63,13 @@ pub fn items(_: &State) -> Vec<PItem> {
     ]
 }
 
+/// Where the Arranger's window goes when it is first restored from maximized: all the width from the browser to the
+/// window's edge.
+pub fn panel_home(s: &State) -> Rect {
+    let w = s.work_rect();
+    Rect::new(w.x, w.y, w.w, (w.h * 0.66).round())
+}
+
 /// The saved custom layout: the three windows.
 fn saved() -> Option<[WinState; 3]> {
     let text = crate::prefs::text(KEY)?;

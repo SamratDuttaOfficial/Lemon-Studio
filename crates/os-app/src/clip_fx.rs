@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
-//! A cut's and a whole sample's plugins and automation in the app (`os_model::clip_fx`): what the plugin window's Cut part
-//! and Whole audio tabs show (`clip_page`), and what their edits do. A unit's chain is a track of its own number
+//! A cut's and a whole sample's plugins and automation in the app (`os_model::clip_fx`): what the plugin window's This clip
+//! and Source audio tabs show (`clip_page`), and what their edits do. A unit's chain is a track of its own number
 //! (`clip_fx::track_of`), so its plugins are hosted and opened as a mixer slot's are; the mixer itself never shows it.
 
 use std::cell::RefCell;
@@ -14,7 +14,7 @@ use os_model::clip_fx::{self as fx, Lane};
 use os_model::{AutoPoint, Clip, ClipSource};
 
 use crate::app::{App, State};
-use crate::clip_page::{Event, LaneVals, Mark, PageVals, Side, SlotVals, Tab, SLOTS};
+use crate::clip_page::{Event, LaneVals, Mark, PageVals, Pos, Side, SlotVals, Tab, SLOTS};
 use crate::control::command::Region;
 use crate::mixer::FxReq;
 use crate::playlist::{self as pl, Cmd, PItem, Popup};
@@ -158,7 +158,7 @@ fn lanes_of(s: &State, own: u32, whole: u32, tab: Tab) -> Vec<LaneVals> {
             continue;
         }
         let label = param_label(s, holder, slot, param);
-        let name = if tab == Tab::Cut && on_whole { format!("Whole: {label}") } else { label };
+        let name = if tab == Tab::Cut && on_whole { format!("Source: {label}") } else { label };
         v.push(LaneVals { lane, name, own: pts(own, lane), inherited: inherited(lane) });
     }
     v
@@ -237,7 +237,7 @@ fn cut_rows(s: &State, ch: &os_model::Channel, c: &Clip, from: f64, to: f64) -> 
     vec![
         row("File", ch.sample_path.as_deref().map_or("-".into(), file_name)),
         row("Part", format!("{} to {}  ({:.3} s)", crate::clip_page::time_text(from), crate::clip_page::time_text(to), to - from)),
-        row("On playlist", format!("Bar {} to {}, track {}", bar_text(s, c.position), bar_text(s, c.end()), c.track + 1)),
+        row("In Arranger", format!("Bar {} to {}, track {}", bar_text(s, c.position), bar_text(s, c.end()), c.track + 1)),
         row("Gain", db(f64::from(c.gain()))),
         row("Fades", fades),
         row("Pitch", pitch_text(ch)),
@@ -253,7 +253,7 @@ fn whole_rows(s: &State, ch: &os_model::Channel, wave: Option<&pl::Wave>) -> Vec
         v.push(line("Length", format!("{} ({:.3} s)", crate::clip_page::time_text(w.secs()), w.secs())));
         v.push(line("Rate", format!("{} Hz", w.rate)));
     }
-    v.push(line("Cuts", format!("{clips} on the playlist")));
+    v.push(line("Clips", format!("{clips} in the Arranger")));
     v.push(line("Pitch", pitch_text(ch)));
     v.push(line("Volume", format!("{:.0}%", ch.volume * 100.0)));
     v.push(line("Mixer", mixer_name(s, ch)));
@@ -283,8 +283,18 @@ pub fn page_vals(s: &State, row: usize) -> Option<PageVals> {
         .collect();
     let focus = |whole: bool| s.clip_fx.focus.get(&(row, whole)).copied().unwrap_or((Lane::Volume, 0));
     let (focus_whole, serial_whole) = focus(true);
+    // The song position, or the playhead while the song plays: what the tabs' line shows.
+    let t = s.clip_fx.play_tick.unwrap_or_else(|| f64::from(s.playlist.pos));
+    let inside = |c: &Clip| f64::from(c.position) <= t && t < f64::from(c.end());
+    let second = |c: &Clip| clip_span(s, c).0 + (t - f64::from(c.position)) * pl::to_src(s, c.source, 1.0) / 1000.0;
+    let piece = scope_of(s, row, Tab::Cut).and_then(|sc| match sc {
+        Scope::Cut(id) => s.project.arrangement()?.clips.get(clip_at(s, id)?).copied(),
+        Scope::Whole(_) => None,
+    });
     let whole = Side {
         available: true,
+        // In this clip if it is there, else in the first clip of this audio at the song position.
+        pos: piece.filter(inside).or_else(|| clips.iter().find(|c| inside(c)).copied()).map_or(Pos::Away, |c| Pos::At(second(&c))),
         rows: whole_rows(s, ch, wave.as_deref()),
         slots: slots_of(s, ch.whole_fx),
         lanes: lanes_of(s, ch.whole_fx, ch.whole_fx, Tab::Whole),
@@ -297,10 +307,6 @@ pub fn page_vals(s: &State, row: usize) -> Option<PageVals> {
     };
 
     // The piece.
-    let piece = scope_of(s, row, Tab::Cut).and_then(|sc| match sc {
-        Scope::Cut(id) => s.project.arrangement()?.clips.get(clip_at(s, id)?).copied(),
-        Scope::Whole(_) => None,
-    });
     let cut = match piece {
         Some(c) => {
             let (from_s, to_s) = clip_span(s, &c);
@@ -316,19 +322,46 @@ pub fn page_vals(s: &State, row: usize) -> Option<PageVals> {
                 marks: Vec::new(),
                 focus: focus_cut,
                 focus_serial: serial_cut,
+                pos: if inside(&c) {
+                    Pos::At(second(&c))
+                } else if t < f64::from(c.position) {
+                    Pos::Before
+                } else {
+                    Pos::After
+                },
             }
         }
         None => Side::default(),
     };
+    Some(PageVals { cut, whole })
+}
 
-    // Where playback is on the sample's clock: in the clip of this sample playing now, the piece's first.
-    let playhead = s.clip_fx.play_tick.and_then(|t| {
-        let mut playing = clips.iter().filter(|c| f64::from(c.position) <= t && t < f64::from(c.end()));
-        let c = piece.filter(|p| f64::from(p.position) <= t && t < f64::from(p.end())).or_else(|| playing.next().copied())?;
-        let (from, _) = clip_span(s, &c);
-        Some(from + (t - f64::from(c.position)) * pl::to_src(s, c.source, 1.0) / 1000.0)
+/// The song position for second `at` of rack row `row`'s sample, from `tab`: in this clip on its tab, clamped to it. On the
+/// source audio, in this clip if it plays that second, else in the first clip that does, else at the nearest end of a clip.
+/// `None`: no clip of it to place it in.
+pub fn pos_tick(s: &State, row: usize, tab: Tab, at: f64) -> Option<u32> {
+    let ch = s.project.channels.get(row)?;
+    let piece = scope_of(s, row, Tab::Cut).and_then(|sc| match sc {
+        Scope::Cut(id) => s.project.arrangement()?.clips.get(clip_at(s, id)?).copied(),
+        Scope::Whole(_) => None,
     });
-    Some(PageVals { cut, whole, playhead })
+    let tick_in = |c: &Clip| {
+        let (from, to) = clip_span(s, c);
+        let ticks = (at.clamp(from, to) - from) * 1000.0 / pl::to_src(s, c.source, 1.0).max(1e-9);
+        (f64::from(c.position) + ticks).round().min(f64::from(c.end().saturating_sub(1))).max(f64::from(c.position)) as u32
+    };
+    if tab == Tab::Cut {
+        return piece.map(|c| tick_in(&c));
+    }
+    let clips: Vec<Clip> = s.project.arrangement().map_or(Vec::new(), |a| a.clips.iter().filter(|c| c.source == ClipSource::Channel(ch.index)).copied().collect());
+    let distance = |c: &Clip| {
+        let (from, to) = clip_span(s, c);
+        if at < from { from - at } else if at >= to { at - to } else { 0.0 }
+    };
+    let holds = |c: &Clip| distance(c) == 0.0;
+    let chosen = piece.filter(holds).or_else(|| clips.iter().filter(|c| holds(c)).min_by_key(|c| c.position).copied());
+    let chosen = chosen.or_else(|| clips.iter().min_by(|a, b| distance(a).total_cmp(&distance(b))).copied())?;
+    Some(tick_in(&chosen))
 }
 
 /// A double-click on clip `c`, a clip of rack row `row`: it is the piece the window shows.
@@ -551,7 +584,7 @@ fn lane_menu(s: &State, scope: Scope, row: usize, x: f32, y: f32) -> Popup {
     let mut items = Vec::new();
     let whole = s.project.channels.get(row).map_or(0, |c| c.whole_fx);
     let chains: Vec<(u32, bool, &str)> = match scope {
-        Scope::Cut(_) => vec![(unit_of(s, scope).unwrap_or(0), false, ""), (whole, true, "Whole: ")],
+        Scope::Cut(_) => vec![(unit_of(s, scope).unwrap_or(0), false, ""), (whole, true, "Source: ")],
         Scope::Whole(_) => vec![(whole, true, "")],
     };
     for (h, on_whole, prefix) in chains {
@@ -581,7 +614,7 @@ fn lane_menu(s: &State, scope: Scope, row: usize, x: f32, y: f32) -> Popup {
 /// What the page asked for.
 pub fn event(app: &mut App, row: usize, e: Event) {
     let tab = match &e {
-        Event::Pick { tab, .. } | Event::SlotMenu { tab, .. } | Event::OpenSlot { tab, .. } | Event::ToggleSlot { tab, .. } | Event::SetMix { tab, .. } | Event::AddLane { tab, .. } | Event::SetLane { tab, .. } => *tab,
+        Event::Pick { tab, .. } | Event::SlotMenu { tab, .. } | Event::OpenSlot { tab, .. } | Event::ToggleSlot { tab, .. } | Event::SetPos { tab, .. } | Event::SetMix { tab, .. } | Event::AddLane { tab, .. } | Event::SetLane { tab, .. } => *tab,
     };
     let Some(scope) = scope_of(&app.state, row, tab) else { return };
     match e {
@@ -607,6 +640,10 @@ pub fn event(app: &mut App, row: usize, e: Event) {
         Event::ToggleSlot { slot, .. } => {
             toggle(app, scope, slot);
         }
+        Event::SetPos { at, .. } => match pos_tick(&app.state, row, tab, at) {
+            Some(t) => pl::place_song_pos(app, t),
+            None => app.state.message = Some("No clip of this audio in the Arranger yet".into()),
+        },
         Event::SetMix { slot, mix, .. } => set_mix(app, scope, slot, mix),
         Event::SetLane { lane, points, .. } => set_lane(app, scope, lane, points),
     }
@@ -640,9 +677,9 @@ pub fn settle(app: &mut App) {
     app.invalidate();
 }
 
-/// The window title's target for a chain's plugin: "Cut part" or "Whole audio".
+/// The window title's target for a chain's plugin: "This clip" or "Source audio".
 pub fn chain_name(p: &os_model::Project, handle: u32) -> &'static str {
-    if p.channels.iter().any(|c| c.whole_fx == handle) { "Whole audio" } else { "Cut part" }
+    if p.channels.iter().any(|c| c.whole_fx == handle) { Tab::Whole.name() } else { Tab::Cut.name() }
 }
 
 #[cfg(test)]
@@ -676,6 +713,61 @@ mod tests {
     fn lanes(a: &App, id: u32) -> Vec<AutoPoint> {
         let c = pl::clips(&a.state).iter().find(|c| c.id.0 == id).copied().unwrap();
         a.state.project.fx_unit(c.fx).map_or(Vec::new(), |u| u.volume.clone())
+    }
+
+    /// Both tabs show where the song position is, playing or not, and their rulers place it: on the clip's own tab in that
+    /// clip, on the source audio's in a clip that plays that second, else at the nearest clip.
+    #[test]
+    fn the_tabs_show_and_place_the_song_position() {
+        use crate::clip_page::Pos;
+        let (mut a, row, x, y) = app();
+        a.state.clip_fx.cut.insert(row, x);
+        a.state.clip_fx.play_tick = None;
+        let clip = |a: &App, id: u32| pl::clips(&a.state).iter().find(|c| c.id.0 == id).copied().unwrap();
+        let (cx, cy) = (clip(&a, x), clip(&a, y));
+        let (from, to) = clip_span(&a.state, &cx);
+        assert!(to > from);
+
+        // Stopped, in the clip: the line at the second it plays there, on both tabs.
+        a.state.playlist.pos = cx.position + cx.length / 2;
+        let v = page_vals(&a.state, row).unwrap();
+        let Pos::At(s) = v.cut.pos else { panic!("{:?}", v.cut.pos) };
+        assert!((s - (from + to) / 2.0).abs() < 0.01, "{s} in {from}..{to}");
+        assert_eq!(v.whole.pos, v.cut.pos);
+
+        // On the song's other clip of this audio: not this clip, but the source audio is there.
+        a.state.playlist.pos = cy.position;
+        let v = page_vals(&a.state, row).unwrap();
+        assert_eq!(v.cut.pos, Pos::After);
+        assert!(matches!(v.whole.pos, Pos::At(_)), "{:?}", v.whole.pos);
+        // Between them and before this clip.
+        a.state.playlist.pos = cx.end() + 10;
+        let v = page_vals(&a.state, row).unwrap();
+        assert_eq!((v.cut.pos, v.whole.pos), (Pos::After, Pos::Away));
+        if cx.position > 0 {
+            a.state.playlist.pos = cx.position - 1;
+            assert_eq!(page_vals(&a.state, row).unwrap().cut.pos, Pos::Before);
+        }
+
+        // Playing, the playhead counts, not the place it started from.
+        a.state.playlist.pos = 0;
+        a.state.clip_fx.play_tick = Some(f64::from(cx.position) + 1.0);
+        assert!(matches!(page_vals(&a.state, row).unwrap().cut.pos, Pos::At(_)));
+        a.state.clip_fx.play_tick = None;
+
+        // Placing: in this clip on its tab, at the second clicked; past its end it stops inside it.
+        a.state.song_mode = false;
+        event(&mut a, row, Event::SetPos { tab: Tab::Cut, at: (from + to) / 2.0 });
+        let at = a.state.playlist.pos;
+        assert!(at.abs_diff(cx.position + cx.length / 2) <= 1, "{at} in {} + {}", cx.position, cx.length);
+        assert!(a.state.song_mode, "as a click on the Arranger's ruler: SONG mode");
+        event(&mut a, row, Event::SetPos { tab: Tab::Cut, at: to + 100.0 });
+        assert_eq!(a.state.playlist.pos, cx.end() - 1);
+
+        // On the source audio: this clip when it plays that second; a second no clip plays goes to the nearest end.
+        event(&mut a, row, Event::SetPos { tab: Tab::Whole, at: from });
+        assert_eq!(a.state.playlist.pos, cx.position);
+        assert!(pos_tick(&a.state, row, Tab::Whole, 100_000.0).is_some(), "a far second lands on a clip");
     }
 
     #[test]
@@ -731,10 +823,10 @@ mod tests {
         let get = |k: &str| v.cut.rows.iter().find(|r| r.0 == k).map(|r| r.1.clone()).unwrap_or_default();
         assert!(get("File").contains("os-app-clipfx"), "{:?}", v.cut.rows);
         assert!(get("Part").starts_with("00:00.000"), "{:?}", v.cut.rows);
-        assert!(get("On playlist").contains("track 1"), "{:?}", v.cut.rows);
+        assert!(get("In Arranger").contains("track 1"), "{:?}", v.cut.rows);
         assert_eq!(get("Fades"), "None");
         assert_eq!(get("Gain"), "+0.0 dB");
-        assert!(v.whole.rows.iter().any(|r| r.0 == "Cuts" && r.1.starts_with("2 ")), "{:?}", v.whole.rows);
+        assert!(v.whole.rows.iter().any(|r| r.0 == "Clips" && r.1.starts_with("2 ")), "{:?}", v.whole.rows);
         assert!(v.whole.rows.iter().any(|r| r.0 == "Length" && r.1.contains("2.000")), "{:?}", v.whole.rows);
     }
 
@@ -826,7 +918,7 @@ mod tests {
         a.state.project.fx_unit_mut(whole).unwrap().track.slots[0] = Some(crate::plugins::new_slot("Fx"));
         let m = lane_menu(&a.state, Scope::Cut(x), row, 0.0, 0.0);
         assert_eq!(m.items.len(), 1);
-        assert!(m.items[0].label.starts_with("Whole: Fx"), "{}", m.items[0].label);
+        assert!(m.items[0].label.starts_with("Source: Fx"), "{}", m.items[0].label);
         assert!(!m.items[0].enabled);
     }
 
@@ -847,7 +939,7 @@ mod tests {
         // The cut's tab lists it as the whole audio's, to override.
         let on_cut = v.cut.lanes.iter().find(|l| l.lane == lane).expect("listed on the cut");
         assert!(on_cut.own.is_empty() && on_cut.inherited.len() == 1);
-        assert!(on_cut.name.starts_with("Whole: "), "{}", on_cut.name);
+        assert!(on_cut.name.starts_with("Source: "), "{}", on_cut.name);
     }
 
     #[test]
@@ -907,8 +999,8 @@ mod tests {
         assert_eq!(a.state.project.mixer.len(), before);
         let key = fx_key(fx::track_of(h), 0);
         assert_eq!(crate::params::target_of(&a.state, key, 3), None, "FL's target numbers have no place for it");
-        assert_eq!(chain_name(&a.state.project, h), "Whole audio");
-        assert_eq!(chain_name(&a.state.project, h + 77), "Cut part");
+        assert_eq!(chain_name(&a.state.project, h), "Source audio");
+        assert_eq!(chain_name(&a.state.project, h + 77), "This clip");
     }
 
     // ------------------------------------------------------------------------------------------------------------

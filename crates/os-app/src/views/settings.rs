@@ -19,6 +19,9 @@ use os_ui::{Color, Font, Rect};
 use crate::app::{Action, State, Ui};
 use crate::plugin_db::{self as db, Col, Prefer};
 
+#[path = "settings_tips.rs"]
+mod settings_tips;
+
 /// What a click in the settings window does (`Action::Settings`).
 #[derive(Debug, Clone, PartialEq)]
 pub enum SAct {
@@ -117,10 +120,10 @@ impl InfoField {
     fn hint(self) -> &'static str {
         match self {
             InfoField::Title => "Project title: the window caption shows it instead of the file name",
-            InfoField::Author => "Project author",
-            InfoField::Genre => "Project genre",
-            InfoField::Comments => "Project comments",
-            InfoField::Url => "Project web link",
+            InfoField::Author => "Project author: click to type it",
+            InfoField::Genre => "Project genre: click to type it",
+            InfoField::Comments => "Project comments: click to type them",
+            InfoField::Url => "Project web link: click to type it",
         }
     }
 }
@@ -1014,14 +1017,14 @@ pub fn paint(ui: &mut Ui, s: &State) {
     let (_, title, _) = TABS[st.tab.min(TABS.len() - 1)];
     ui.c.text(Font::new(13), r.x + 28.0, r.y + 7.0, t.text, &format!("Settings - {title}"));
     let x = Rect::new(r.right() - 26.0, r.y + 5.0, 20.0, 20.0);
-    let hov = ui.hit(x, Action::Settings(SAct::Close), "Close");
+    let hov = ui.hit(x, Action::Settings(SAct::Close), "Close the settings window");
     ui.c.icon(&os_ui::tabler::X, x.inset(3.0), if hov { t.glyph } else { t.text });
     // Tabs (spec §2): active text coloured by group.
     let font = Font::new(13);
     let rects = tab_rects(ui, r);
     for (i, &(label, _, grp)) in TABS.iter().enumerate() {
         let tr = rects[i];
-        let hov = ui.hit(tr, Action::Settings(SAct::Tab(i)), TABS[i].1);
+        let hov = ui.hit(tr, Action::Settings(SAct::Tab(i)), settings_tips::TAB_TIPS[i]);
         let on = i == st.tab;
         let body = if on { t.s(0x1d1e1f) } else { t.s(0x222425) };
         if lemon {
@@ -1120,9 +1123,14 @@ fn name_panel(ui: &mut Ui, s: &State, e: &crate::theme_library::NameEdit, win: R
     } else {
         ui.c.text_clip(Font::new(13), field.x, field.y + 4.0, field.w, t.text_dim, "The file goes from your themes folder.");
     }
+    let ok_hint = match e.target {
+        crate::theme_library::NameTarget::Save => "Save the theme under this name (Enter)",
+        crate::theme_library::NameTarget::Rename(_) => "Rename the theme (Enter)",
+        crate::theme_library::NameTarget::Delete(_) => "Delete the theme (Enter)",
+    };
     for (b, act, label, hint) in [
-        (ok, SAct::NameOk, e.target.ok(), "Enter"),
-        (cancel, SAct::NameCancel, "Cancel", "Esc"),
+        (ok, SAct::NameOk, e.target.ok(), ok_hint),
+        (cancel, SAct::NameCancel, "Cancel", "Close without changing anything (Esc)"),
     ] {
         let hov = ui.hit(b, Action::Settings(act), hint);
         if lemon {
@@ -1172,7 +1180,7 @@ fn picker(ui: &mut Ui, s: &State, p: &crate::theme_adjust::Picker, win: Rect) {
         _ => format!("{} colour", SWATCHES[p.swatch]),
     };
     ui.c.text(Font::new(13).bold(), rr.panel.x + 10.0, rr.panel.y + 9.0, t.text, &title);
-    let hov = ui.hit(rr.close, Action::Settings(SAct::PickClose), "Close (Esc)");
+    let hov = ui.hit(rr.close, Action::Settings(SAct::PickClose), "Close the colour picker (Esc)");
     ui.c.icon(&os_ui::tabler::X, rr.close.inset(3.0), if hov { t.glyph } else { t.text });
     for (k, (b, part)) in rr.chips.iter().zip(&parts).enumerate() {
         let hov = ui.hit(*b, Action::Settings(SAct::PickPart(k as u8)), "Pick this colour");
@@ -1208,7 +1216,7 @@ fn picker(ui: &mut Ui, s: &State, p: &crate::theme_adjust::Picker, win: Rect) {
             u32::from(c.r) << 16 | u32::from(c.g) << 8 | u32::from(c.b)
         })
         .collect();
-    ui.hit(rr.hue, Action::Settings(SAct::PickHue), "Hue");
+    ui.hit(rr.hue, Action::Settings(SAct::PickHue), "Hue: click or drag up and down");
     ui.c.image(rr.hue, 1, 64, &hue);
     let hy = (rr.hue.y + p.hsv[0] / 360.0 * rr.hue.h).round();
     ui.c.fill_rect(Rect::new(rr.hue.x - 2.0, hy - 2.0, rr.hue.w + 4.0, 4.0), Color::rgb(0));
@@ -1277,7 +1285,7 @@ fn paint_group(ui: &mut Ui, s: &State, gr: &Group, r: Rect, open: bool, clip: Re
         if gr.fold {
             let bar = Rect::new(r.x, r.y, r.w, 26.0);
             if clip.contains(bar.cx(), bar.cy()) {
-                ui.hit(bar, Action::Settings(SAct::Group(gr.title)), if open { "Fold" } else { "Unfold" });
+                ui.hit(bar, Action::Settings(SAct::Group(gr.title)), if open { "Fold this group" } else { "Unfold this group" });
             }
             kit::chevron(ui.c, r.right() - 10.0, r.y + 13.0, 4.0, if open { Dir::Up } else { Dir::Down }, t.text_dim);
         }
@@ -1302,7 +1310,7 @@ fn check(ui: &mut Ui, key: &'static str, on: bool, x: f32, cy: f32, enabled: boo
     let t = ui.t;
     let tw = ui.c.text_width(Font::new(13), key);
     let hr = Rect::new(x - 8.0, cy - 9.0, tw + 26.0, 18.0);
-    let hov = enabled && ui.hit(hr, Action::Settings(SAct::Check(key)), "");
+    let hov = enabled && ui.hit(hr, Action::Settings(SAct::Check(key)), settings_tips::tip(key));
     if !enabled {
         ui.off(hr, key);
     }
@@ -1425,7 +1433,7 @@ fn paint_row_at(ui: &mut Ui, s: &State, group: &'static str, row: &Row, g: Rect,
                 None => v,
             };
             let b = Rect::new(x0, y + 3.0, *w, 21.0);
-            let hov = ui.hit(b, Action::Settings(SAct::Combo(label, b.x, b.bottom())), "");
+            let hov = ui.hit(b, Action::Settings(SAct::Combo(label, b.x, b.bottom())), settings_tips::tip(label));
             kit::combo(ui.c, t, b, v, f, kit::State::hover(hov));
             // Project's "Set as" combo has no label beside it.
             if *label != SET_AS {
@@ -1444,7 +1452,7 @@ fn paint_row_at(ui: &mut Ui, s: &State, group: &'static str, row: &Row, g: Rect,
         // the value (`App::settings_number`).
         Row::Value(v, label) if number_range(label).is_some() => {
             let b = Rect::new(x0, y + 3.0, 38.0, 21.0);
-            let hov = ui.hit(b, Action::Settings(SAct::Number(label)), "");
+            let hov = ui.hit(b, Action::Settings(SAct::Number(label)), settings_tips::tip(label));
             value_red(ui, b, v);
             ui.c.text(f, b.right() + 8.0, ty, if hov { t.glyph } else { t.text }, label);
         }
@@ -1457,7 +1465,7 @@ fn paint_row_at(ui: &mut Ui, s: &State, group: &'static str, row: &Row, g: Rect,
         }
         Row::ValueR(label, v) if number_range(label).is_some() => {
             let b = Rect::new(g.right() - 52.0, y + 3.0, 42.0, 21.0);
-            let hov = ui.hit(b, Action::Settings(SAct::Number(label)), "");
+            let hov = ui.hit(b, Action::Settings(SAct::Number(label)), settings_tips::tip(label));
             value_red(ui, b, v);
             ui.c.text_right(f, b.x - 8.0, ty, if hov { t.glyph } else { t.text }, label);
         }
@@ -1480,7 +1488,7 @@ fn paint_row_at(ui: &mut Ui, s: &State, group: &'static str, row: &Row, g: Rect,
                 // Show ASIO panel works while an ASIO driver is open.
                 let waits = label == SHOW_ASIO_PANEL && !s.settings.asio_open;
                 let on = live(label) && !waits;
-                let hov = on && ui.hit(b, Action::Settings(SAct::Button(label)), "");
+                let hov = on && ui.hit(b, Action::Settings(SAct::Button(label)), settings_tips::tip(label));
                 if waits {
                     ui.hit(b, Action::Settings(SAct::Body), PANEL_WAITS);
                 } else if label == UPDATE_SCRIPTS {
@@ -1506,7 +1514,7 @@ fn paint_row_at(ui: &mut Ui, s: &State, group: &'static str, row: &Row, g: Rect,
             let Some(sl) = crate::prefs::find_slider(label) else { return };
             let v = f32::from(crate::prefs::slider(sl)) / f32::from(sl.max.max(1));
             let tr = Rect::new(x0, cy - 2.0, 150.0, 4.0);
-            let hov = ui.hit(Rect::span(tr.x - 9.0, tr.right() + 9.0, cy - 9.0, cy + 9.0), Action::Settings(SAct::Slider(label, tr.x, tr.w)), "");
+            let hov = ui.hit(Rect::span(tr.x - 9.0, tr.right() + 9.0, cy - 9.0, cy + 9.0), Action::Settings(SAct::Slider(label, tr.x, tr.w)), settings_tips::tip(label));
             slider_track(ui, tr, cy, v);
             ui.c.text(f, tr.right() + 12.0, ty, if hov { t.glyph } else { t.text }, label);
         }
@@ -1674,7 +1682,7 @@ fn paint_row_at(ui: &mut Ui, s: &State, group: &'static str, row: &Row, g: Rect,
             // The genre button (▸ at the box's right end) opens the genre menu (spec: ui/settings-choices.md "Info").
             if *field == InfoField::Genre {
                 let a = Rect::new(b.right() + 4.0, b.y, 22.0, b.h);
-                let hov = ui.hit(a, Action::Settings(SAct::Genres(a.x, a.bottom())), "MP3 music genres");
+                let hov = ui.hit(a, Action::Settings(SAct::Genres(a.x, a.bottom())), "Pick the genre from the MP3 music genres");
                 kit::combo(ui.c, t, a, "", f, kit::State::hover(hov));
             }
         }
@@ -1986,7 +1994,7 @@ fn table(ui: &mut Ui, s: &State, area: Rect) {
     let lh = ui.c.line_height(f);
     let b = Rect::new(area.x, area.y, area.w, 4.0 + 18.0 + TABLE_ROW_H * TABLE_ROWS as f32 + 2.0);
     list_frame(ui, b);
-    ui.hit(b, Action::Settings(SAct::Plug(Plug::Table)), "");
+    ui.hit(b, Action::Settings(SAct::Plug(Plug::Table)), "The wheel scrolls the plugin table");
     let x0 = b.x + 2.0;
     // Column titles.
     let hy = b.y + 2.0;
@@ -2090,7 +2098,7 @@ fn ppi_ruler(ui: &mut Ui, s: &State, x: f32, cy: f32) {
     let track = Rect::new(x, cy - 6.0, f32::from(crate::ppi::MAX) * px, 6.0);
     let a = Action::Settings(SAct::Ppi);
     let hit = Rect::new(track.x - 4.0, track.y - 4.0, track.w + 8.0, 18.0);
-    let hov = ui.hit(hit, a.clone(), "Display PPI: drag, or turn the mouse wheel");
+    let hov = ui.hit(hit, a.clone(), "Display PPI: drag until the bar is one inch long, or turn the mouse wheel");
     let active = hov || ui.held(&a);
     ui.c.fill_rrect(track, 3.0, t.s(0x161819));
     for i in 1..=4 {

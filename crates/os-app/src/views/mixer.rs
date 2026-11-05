@@ -126,7 +126,7 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
 
     let strips = Rect::new(r.x, client.y, r.w - panel_w - 7.0, client.h);
     ui.c.fill_rect(Rect::new(r.x, client.y, r.w - panel_w, client.h), ui.t.s(0x232527));
-    ui.hit(strips, Action::MixerArea, "Mixer");
+    ui.hit(strips, Action::MixerArea, "Mixer: the wheel scrolls the tracks");
     let inserts = mx::inserts(s);
     let bottom = r.bottom();
 
@@ -279,7 +279,7 @@ fn cables(ui: &mut Ui, s: &State, strips: Rect, area: Rect, bottom: f32) {
 fn title_tools(ui: &mut Ui, s: &State, r: Rect) {
     let y = r.y + 11.5;
     let ob = Rect::new(r.x + 3.0, y - 9.0, 16.0, 18.0);
-    let hov = ui.hit(ob, Action::Mix(MHit::Options), "Mixer options");
+    let hov = ui.hit(ob, Action::Mix(MHit::Options), "Open the mixer options menu");
     chevron(ui, r.x + 11.0, y, true, if hov { ui.t.tx(0xffffff) } else { ui.t.tx(0xc4ccd0) });
     // View buttons (multi-touch, waveforms, extra properties, track inspector): not available yet, greyed out (drawn
     // in their colours faded into the title bar, like `Ui::veil`; a veil would show over the bar's gradient). Lemon
@@ -308,7 +308,7 @@ fn title_tools(ui: &mut Ui, s: &State, r: Rect) {
     let hov = ui.hit(pb, Action::Mix(MHit::AddAfter), "Add a new track after the selected track");
     icons::draw(ui.c, Icon::Plus, Rect::new(r.x + 110.0 + px, y - 7.0, 14.0, 14.0), if hov { ui.t.tx(0xffffff) } else { ui.t.tx(0xc4ccd0) });
     let lb = Rect::new(r.x + 130.0 + px, r.y + 2.0, 50.0, 20.0);
-    let hov = ui.hit(lb, Action::Mix(MHit::Layout), "Mixer layout");
+    let hov = ui.hit(lb, Action::Mix(MHit::Layout), "Choose the mixer layout");
     let _ = s;
     ui.c.text(Font::new(17), r.x + 134.0 + px, r.y + 2.0, if hov { ui.t.tx(0xffffff) } else { ui.t.tx(0xb8c4cb) }, "Wide");
 }
@@ -473,7 +473,7 @@ fn strip(ui: &mut Ui, s: &State, n: u16, left: f32, bottom: f32, f: &FrameInfo, 
     ui.c.pop_clip();
 
     let enabled = track.is_none_or(|m| m.enabled);
-    ui.hit(Rect::new(kx - 7.0, ly.y(LED_Y) - 7.0, 14.0, 14.0), Action::Mix(MHit::Led(n)), "Mute / solo");
+    ui.hit(Rect::new(kx - 7.0, ly.y(LED_Y) - 7.0, 14.0, 14.0), Action::Mix(MHit::Led(n)), "Click: mute this track, right-click: solo it");
     led(ui, kx, ly.y(LED_Y), enabled);
     let pan = KnobId::MixPan(n);
     ui.hit(Rect::new(kx - 14.0, ly.y(PAN_Y) - 14.0, 28.0, 28.0), Action::Knob(pan), s.knob_text(pan));
@@ -681,7 +681,7 @@ fn slot_panel(ui: &mut Ui, s: &State, r: Rect) {
     let (text, any) = mx::input_label(s, n);
     let combo = Rect::new(r.x + 27.0, r.y + 28.0, 159.0, 23.0);
     if any {
-        let hov = ui.hit(combo, Action::Mix(MHit::Input), "Audio input source");
+        let hov = ui.hit(combo, Action::Mix(MHit::Input), "Choose the audio input this track takes in");
         os_ui::kit::combo(ui.c, ui.t, combo, &text, Font::new(17), os_ui::kit::State::hover(hov));
     } else {
         off_combo(ui, combo, "Audio input source", &text, input_bg);
@@ -699,9 +699,8 @@ fn slot_panel(ui: &mut Ui, s: &State, r: Rect) {
         let k = i as u8;
         let plugin = mx::slot_name(s, n, k);
         let fs = (18.0 * kp.max(0.62)).round() as u16;
-        let hint = format!("FX slot {} options", i + 1);
-        let ha = ui.hit(Rect::new(row.x, row.y, 19.0, row.h), Action::Mix(MHit::SlotArrow(k)), hint.clone());
-        let hn = ui.hit(Rect::new(row.x + 19.0, row.y, row.w - 64.0, row.h), Action::Mix(MHit::SlotName(k)), hint);
+        let ha = ui.hit(Rect::new(row.x, row.y, 19.0, row.h), Action::Mix(MHit::SlotArrow(k)), format!("Open FX slot {}'s menu", i + 1));
+        let hn = ui.hit(Rect::new(row.x + 19.0, row.y, row.w - 64.0, row.h), Action::Mix(MHit::SlotName(k)), format!("FX slot {}: open its plugin, or pick one (wheel moves it in the chain)", i + 1));
         let hov = ha || hn;
         if super::lemon(ui) {
             let face = if hov { ui.t.s(0x2f3335) } else { ui.t.s(0x2a2d2f) };
@@ -728,7 +727,7 @@ fn slot_panel(ui: &mut Ui, s: &State, r: Rect) {
         ui.hit(Rect::new(row.right() - 46.0, row.y, 26.0, row.h), Action::Knob(mix), s.knob_text(mix));
         mixer_knob(ui, row.right() - 33.0, row.cy(), 10.5 * q, 12.0 * q, s.knob(mix), Some(false));
         ui.c.stroke_circle(row.right() - 33.0, row.cy(), 11.8 * q, 1.5, ui.t.s(0x55595c));
-        ui.hit(Rect::new(row.right() - 18.0, row.y, 18.0, row.h), Action::Mix(MHit::SlotLed(k)), "Mute / solo  (ctrl)0..9");
+        ui.hit(Rect::new(row.right() - 18.0, row.y, 18.0, row.h), Action::Mix(MHit::SlotLed(k)), "Click: switch this slot on or off, right-click: solo it  (ctrl)0..9");
         led(ui, row.right() - 10.0, row.cy(), track.is_none_or(|m| m.slot_on[i]));
     }
     let sep = r.y + 61.0 + 330.0 * kp;
@@ -829,7 +828,7 @@ fn slot_panel(ui: &mut Ui, s: &State, r: Rect) {
     g.erase(false).polygon(&[(r.x + 11.0, b - 20.5), (r.x + 16.0, b - 20.5), (r.x + 21.0, b - 16.0), (r.x + 16.0, b - 11.5), (r.x + 11.0, b - 11.5)]);
     ui.c.glyph(ui.t.tx(0xc4ccd0), &g);
     let out = Rect::new(r.x + 26.0, b - 28.0, 189.0, 24.0);
-    let hov = ui.hit(out, Action::Mix(MHit::Output), "Audio output target");
+    let hov = ui.hit(out, Action::Mix(MHit::Output), "Choose where this track's audio goes");
     os_ui::kit::combo(ui.c, ui.t, out, &mx::output_label(s, n), Font::new(17), os_ui::kit::State::hover(hov));
 }
 

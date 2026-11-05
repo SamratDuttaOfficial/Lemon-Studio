@@ -715,7 +715,7 @@ mod tests {
         assert_eq!(app.state.project.info.genre.as_deref(), Some("Nu disco"));
     }
 
-    /// The painted genre button: hint "MP3 music genres"; a click accepts the box being edited and opens the menu under
+    /// The painted genre button: hint "Pick the genre from the MP3 music genres"; a click accepts the box being edited and opens the menu under
     /// the button; the picked genre is saved like a typed one (event 206; spec: flp/events/project-info.md).
     #[test]
     fn genre_button_opens_the_menu() {
@@ -732,7 +732,7 @@ mod tests {
         typed(&mut app, "x");
         app.paint(&mut c, None);
         let h = app.hits.iter().rev().find(|h| matches!(h.action, Action::Settings(SAct::Genres(..)))).expect("genre button");
-        assert_eq!(h.hint, "MP3 music genres");
+        assert_eq!(h.hint, "Pick the genre from the MP3 music genres");
         let r = h.rect;
         click_at(&mut app, r);
         assert!(!app.info_editing());

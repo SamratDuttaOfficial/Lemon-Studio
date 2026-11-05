@@ -105,17 +105,17 @@ pub fn paint(ui: &mut Ui, s: &State) {
         let mut x = r.x + 4.0;
         if named {
             let a = Rect::new(x, row, 18.0, 18.0);
-            let hov = ui.hit(a, Action::Pat(Hit::Suggestions), "Name suggestions");
+            let hov = ui.hit(a, Action::Pat(Hit::Suggestions), "Show name suggestions");
             ui.c.fill_rrect(a, rb, if hov { t.menu_pop_hi } else { t.menu_pop });
             crate::icons::draw(ui.c, crate::icons::Icon::ArrowRight, a.inset(3.0), t.glyph);
             x += 20.0;
         }
         let ok = Rect::new(x, row, 18.0, 18.0);
-        let hov = ui.hit(ok, Action::Pat(Hit::Accept), "Accept");
+        let hov = ui.hit(ok, Action::Pat(Hit::Accept), "Accept what you typed (Enter)");
         ui.c.fill_rrect(ok, rb, if hov { t.menu_pop_hi } else { t.menu_pop });
         tick(ui, ok, t.glyph);
         let no = Rect::new(x + 20.0, row, 18.0, 18.0);
-        let hov = ui.hit(no, Action::Pat(Hit::Cancel), "Cancel");
+        let hov = ui.hit(no, Action::Pat(Hit::Cancel), "Close without changing anything (Esc)");
         ui.c.fill_rrect(no, rb, if hov { t.menu_pop_hi } else { t.menu_pop });
         cross(ui, no, t.glyph);
         let caption = match b.target {
@@ -132,7 +132,7 @@ pub fn paint(ui: &mut Ui, s: &State) {
         };
         if let Some(col) = tab_col {
             let col = col.map_or(Color::rgb(0x925755), rgb);
-            let hint = if named { "Pattern colour" } else { "Channel colour" };
+            let hint = if named { "Choose the pattern's colour" } else { "Choose the channel's colour" };
             colour_tab(ui, r, col, hint);
         }
         if b.suggestions {
@@ -194,9 +194,9 @@ pub fn paint(ui: &mut Ui, s: &State) {
         ui.c.text_clip(font, r.x + 12.0, r.y + 40.0, r.w - 24.0, t.glyph, &msg);
         // spec: ui/settings-choices.md "Hints and warnings: Manage messages and Project data size warning (2026-10-16)"
         super::remember_check(ui, r.x + 12.0, r.bottom() - 22.0, s.pat_ui.remember, Action::Pat(Hit::ConfirmRemember));
-        for (i, (label, hit)) in [("Ok", Hit::ConfirmOk), ("Cancel", Hit::ConfirmCancel)].into_iter().enumerate() {
+        for (i, (label, hint, hit)) in [("Ok", "Go ahead and delete (Enter)", Hit::ConfirmOk), ("Cancel", "Delete nothing (Esc)", Hit::ConfirmCancel)].into_iter().enumerate() {
             let br = Rect::new(r.right() - 180.0 + i as f32 * 86.0, r.bottom() - 34.0, 80.0, 24.0);
-            let hov = ui.hit(br, Action::Pat(hit), label);
+            let hov = ui.hit(br, Action::Pat(hit), hint);
             ui.c.fill_rrect(br, rb, if hov { t.menu_pop_hi } else { t.menu_pop });
             let lw = ui.c.text_width(font, label);
             ui.c.text(font, br.x + (br.w - lw) / 2.0, br.y + 4.0, t.glyph, label);

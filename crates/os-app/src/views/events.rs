@@ -109,11 +109,11 @@ pub fn paint(ui: &mut Ui, s: &State, _f: &FrameInfo) {
     ui.hit(at(1.0, 1.0, SIZE.0 - 2.0, 29.0), Action::WinDrag(Win::Events), "");
     label(ui, Font::new(17), x0 + 9.0, y0 + 15.0, false, t.text, &title(s));
     let close = at(SIZE.0 - 20.0, 10.0, 10.0, 10.0);
-    let hov = ui.hit(close.outset(3.0), Action::CloseWin(Win::Events), "Close");
+    let hov = ui.hit(close.outset(3.0), Action::CloseWin(Win::Events), "Close this window");
     icons::draw(ui.c, Icon::Close, close.outset(1.0), if hov { t.tx(0xffffff) } else { t.glyph });
 
     // The toolbar: the menu, then the tools.
-    button(ui, at(8.0, 34.0, 60.0, 24.0), Action::Events(EvAct::Menu), "Event editor menu", Ok("Edit"), false);
+    button(ui, at(8.0, 34.0, 60.0, 24.0), Action::Events(EvAct::Menu), "Open the event editor menu", Ok("Edit"), false);
     let tools = [(Tool::Draw, "Draw", "Draw (left: freehand, right: line)"), (Tool::Erase, "Erase", "Erase events"), (Tool::Select, "Select", "Select a stretch of time")];
     for (i, (tool, text, hint)) in tools.into_iter().enumerate() {
         button(ui, at(80.0 + 64.0 * i as f32, 34.0, 60.0, 24.0), Action::Events(EvAct::Tool(tool)), hint, Ok(text), e.tool == tool);

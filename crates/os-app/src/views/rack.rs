@@ -234,7 +234,7 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) {
     let hv = crate::high_visibility::on();
     // The page (§1), running into the tab strip above it.
     ui.c.fill_rect(win, t.window_body);
-    ui.hit(win, Action::RackArea, "Instrument rack");
+    ui.hit(win, Action::RackArea, "Instrument rack: the wheel scrolls the channels");
     let bar = Rect::span(x + 1.0, x + w - 1.0, y + 1.0, y + 29.0);
     ui.hit(bar, Action::WinDrag(Win::ChannelRack), "Instrument rack - drag to move");
     title_bar(ui, s, win, c, f);
@@ -290,7 +290,7 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) {
         }
         // Mute LED, or the padlock of a locked channel (§10).
         let lr = Rect::new(x + 11.5, ry + 6.5, 12.0, 12.0);
-        ui.hit(lr, Action::ChannelEnable(i), "Mute / solo  (shift/ctrl+)0..9");
+        ui.hit(lr, Action::ChannelEnable(i), "Click: mute, Ctrl+click: solo, Shift+click: lock, right-click: menu  (shift/ctrl+)0..9");
         if s.rack.locked.contains(&i) {
             padlock(ui, x + 17.5, ry + 12.5, ch.enabled);
         } else {
@@ -354,7 +354,7 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) {
         // Activity / select slot (§8, §16).
         let slot = Rect::span(x + c.slot_x, x + c.slot_x + 6.0, ry + 2.0, ry + 24.0);
         let sel_hit = Rect::span(x + c.slot_x - 4.0, x + c.slot_x + 10.0, ry, ry + 26.0);
-        ui.hit(sel_hit, Action::RackSelect(i), "Select (Up/Down)");
+        ui.hit(sel_hit, Action::RackSelect(i), "Select this channel (Up/Down)");
         ui.live(Live::Sounding, slot);
         let sounding = f.playing && !f.paused && f.sounding.iter().any(|&(n, _)| n == ch.index) && ch.enabled;
         if lemon {
@@ -388,7 +388,7 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) {
             // end (Lemon Studio's design: a speaker, struck through while the channel is muted).
             if s.rack.opts.contains(rk::PREVIEW_MUTE) {
                 let mb = Rect::new(block.x + 4.0, block.cy() - 7.0, 14.0, 14.0);
-                let hov = ui.hit(mb.intersect(&rows_clip), Action::ChannelEnable(i), "Mute / solo  (shift/ctrl+)0..9");
+                let hov = ui.hit(mb.intersect(&rows_clip), Action::ChannelEnable(i), "Click: mute, Ctrl+click: solo, Shift+click: lock, right-click: menu  (shift/ctrl+)0..9");
                 let col = if hov { ui.t.tx(0xffffff) } else if ch.enabled { t.glyph } else { t.glyph.shade(-0.3) };
                 ui.c.icon(if ch.enabled { &os_ui::tabler::VOLUME } else { &os_ui::tabler::VOLUME_OFF }, mb, col);
             }
@@ -472,7 +472,7 @@ fn title_bar(ui: &mut Ui, s: &State, win: Rect, c: Cols, f: &FrameInfo) {
     let t = ui.t;
     let lemon = super::lemon(ui);
     let (x, y, r) = (win.x, win.y, win.right());
-    let ohov = ui.hit(Rect::new(x + 8.0, y + 6.0, 16.0, 17.0), Action::RackOptions, "Channel options");
+    let ohov = ui.hit(Rect::new(x + 8.0, y + 6.0, 16.0, 17.0), Action::RackOptions, "Open the Instrument rack options menu");
     ui.c.fill_polygon(&[(x + 14.0, y + 10.5), (x + 18.5, y + 14.0), (x + 14.0, y + 17.5)], if ohov { ui.t.tx(0xffffff) } else { ui.t.tx(0xc2c8cc) });
     // Loop starter: not available yet, greyed out.
     let sw = Rect::new(x + 34.0, y + 6.0, 16.0, 16.0);
@@ -480,7 +480,7 @@ fn title_bar(ui: &mut Ui, s: &State, win: Rect, c: Cols, f: &FrameInfo) {
     icons::draw(ui.c, Icon::Countdown, sw, os_ui::kit::ink(t, os_ui::kit::State::NORMAL.with_disabled(true)));
     // Display filter combo (§7, §21).
     let combo = Rect::span(x + c.name_x - 1.0, x + c.name_x + c.name_w, y + 4.0, y + 27.0);
-    let chov = ui.hit(combo, Action::RackFilter, "Channel display filter (PgUp/PgDn)");
+    let chov = ui.hit(combo, Action::RackFilter, "Choose which channels show (PgUp/PgDn)");
     if lemon {
         lk::well(ui.c, t, combo, if chov { t.sunken.mix(t.button_hi, 0.5) } else { t.sunken });
     } else {
@@ -532,7 +532,7 @@ fn title_bar(ui: &mut Ui, s: &State, win: Rect, c: Cols, f: &FrameInfo) {
     super::ball_knob(ui, kx, y + 14.5, 9.0, swing);
     // Pattern length box (§7): "···" = Auto, else the length in steps.
     let bx = Rect::span(r - 132.0, r - 100.0, y + 4.0, y + 26.0);
-    let bhov = ui.hit(bx, Action::RackLen, "Pattern length");
+    let bhov = ui.hit(bx, Action::RackLen, "Pattern length: drag or scroll to change it, right-click: menu");
     if lemon {
         lk::small_box(ui.c, t, bx, ui.t.s(0x35393b), bhov);
     } else {
@@ -551,7 +551,7 @@ fn title_bar(ui: &mut Ui, s: &State, win: Rect, c: Cols, f: &FrameInfo) {
     spin_mark(ui, r - 104.0, y + 15.0, ui.t.s(0x6f7476));
     // Loop mode (§7, §15): green outline when on.
     let lr = Rect::new(r - 90.5, y + 5.0, 19.0, 19.0);
-    let lhov = ui.hit(lr, Action::RackLoop, "Loop mode");
+    let lhov = ui.hit(lr, Action::RackLoop, "Loop each channel's own length across the pattern, right-click: options");
     let green = ui.t.a(0x8fd14a);
     if lemon {
         // Lemon: toggles are lit rounded squares with dark glyphs.
@@ -570,7 +570,7 @@ fn title_bar(ui: &mut Ui, s: &State, win: Rect, c: Cols, f: &FrameInfo) {
     // Graph editor (§7, §14): blue outline when on.
     let gx = r - 58.0;
     let gr = Rect::new(gx - 9.5, y + 5.0, 19.0, 19.0);
-    let ghov = ui.hit(gr, Action::RackGraph, "Step parameters (Ctrl+K)");
+    let ghov = ui.hit(gr, Action::RackGraph, "Show or hide the step parameters (Ctrl+K)");
     let blue = ui.t.a(0x40a8e0);
     let gc = if lemon {
         if s.rack.graph_open {
@@ -593,7 +593,7 @@ fn title_bar(ui: &mut Ui, s: &State, win: Rect, c: Cols, f: &FrameInfo) {
     let roll_view = s.rack_roll_view;
     let sxc = r - 35.0;
     let br = Rect::new(sxc - 10.0, y + 5.0, 20.0, 20.0);
-    let hov = ui.hit(br, Action::RackRollView, "Interactive step sequencer / piano roll overview");
+    let hov = ui.hit(br, Action::RackRollView, "Switch the rows between step buttons and a piano roll overview");
     // On (§6): orange outline with a dark orange fill; hover draws the outline. Off under High visibility: always the
     // hover look, in the Classic look the measured 2 px orange outline (spec: ui/settings-choices.md "Display: PPI
     // ruler, Force refreshes, Thick lines, High visibility").
@@ -696,7 +696,7 @@ fn graph_editor(ui: &mut Ui, s: &State, sx: f32, first: u32, shown: u32) {
     ui.c.pop_clip();
     let hint = match ch {
         Some(_) => format!("Step parameters: {} - click / drag to set (left or right button)", tab.label()),
-        None => "Step parameters".into(),
+        None => "Step parameters: select a channel to edit them".into(),
     };
     ui.hit(bars, Action::RackGraphArea, hint);
     // Tab row.
@@ -705,7 +705,7 @@ fn graph_editor(ui: &mut Ui, s: &State, sx: f32, first: u32, shown: u32) {
     let tw = (tr.w / Tab::ALL.len() as f32).floor();
     for (i, tb) in Tab::ALL.into_iter().enumerate() {
         let r = Rect::new(tr.x + i as f32 * tw, tr.y, tw, tr.h);
-        let hov = ui.hit(r, Action::RackGraphTab(i), tb.label());
+        let hov = ui.hit(r, Action::RackGraphTab(i), format!("Edit {} in this graph", tb.label()));
         let c = if tb == tab { ui.t.a(tb.color()) } else if hov { t.glyph } else { t.text_dim };
         ui.c.push_clip(r);
         ui.c.text_center(Font::new(12), r, c, tb.label());
@@ -816,7 +816,7 @@ pub fn paint_fill(ui: &mut Ui, s: &State) {
     ui.c.fill_rect(Rect::new(r.x + 1.0, r.y + 1.0, r.w - 2.0, 26.0), t.window_title_hi.shade(-0.05));
     ui.c.text(Font::new(15), r.x + 10.0, r.y + 5.0, t.text, "Advanced fill");
     let close = Rect::new(r.right() - 22.0, r.y + 6.0, 16.0, 16.0);
-    let hov = ui.hit(close, Action::RackFill(FillHit::Close), "Close");
+    let hov = ui.hit(close, Action::RackFill(FillHit::Close), "Close without writing the steps");
     icons::draw(ui.c, Icon::Close, close.inset(1.5), if hov { ui.t.tx(0xffffff) } else { t.glyph });
     // Preview row: the channel.
     let name = s.project.channels.get(fd.row).map(|c| c.name.clone().unwrap_or_else(|| format!("Channel {}", c.index + 1))).unwrap_or_default();
@@ -862,9 +862,9 @@ pub fn paint_fill(ui: &mut Ui, s: &State) {
     ui.c.text_center(Font::new(11), Rect::new(cx - 20.0, cy + 10.0, 40.0, 14.0), t.text_dim, &format!("{}", fd.rotate));
     // Buttons: random, reset.
     let by = r.y + 296.0;
-    for (i, (label, hit)) in [("Random", FillHit::Random), ("Reset", FillHit::Reset)].into_iter().enumerate() {
+    for (i, (label, hint, hit)) in [("Random", "Set the steps at random", FillHit::Random), ("Reset", "Clear every step", FillHit::Reset)].into_iter().enumerate() {
         let br = Rect::new(r.x + 12.0 + i as f32 * 84.0, by, 76.0, 22.0);
-        let hov = ui.hit(br, Action::RackFill(hit), label);
+        let hov = ui.hit(br, Action::RackFill(hit), hint);
         os_ui::kit::button(ui.c, t, br, os_ui::kit::State::hover(hov));
         ui.c.text_center(font, br, t.text, label);
     }
@@ -888,7 +888,7 @@ pub fn paint_fill(ui: &mut Ui, s: &State) {
         let vb = Rect::new(r.x + 140.0, ry, 90.0, 21.0);
         let hov = match click {
             Some(FillHit::Number(_)) => ui.hit(vb, Action::RackFill(click.unwrap_or(FillHit::Inside)), "Scroll to change, right-click: input a number"),
-            Some(h) => ui.hit(vb, Action::RackFill(h), "Click to change"),
+            Some(h) => ui.hit(vb, Action::RackFill(h), "Click for the next fill type"),
             None => false,
         };
         os_ui::kit::sunken(ui.c, t, vb, if hov { t.tempo_box.shade(0.08) } else { t.tempo_box });
@@ -896,7 +896,7 @@ pub fn paint_fill(ui: &mut Ui, s: &State) {
         if let Some((dn, up)) = arrows {
             for (j, h) in [dn, up].into_iter().enumerate() {
                 let ar = Rect::new(vb.right() + 4.0 + j as f32 * 18.0, ry + 2.0, 16.0, 17.0);
-                let hov = ui.hit(ar, Action::RackFill(h), if j == 0 { "Less" } else { "More" });
+                let hov = ui.hit(ar, Action::RackFill(h), if j == 0 { "Lower this value" } else { "Raise this value" });
                 let dir = if j == 0 { os_ui::kit::Dir::Left } else { os_ui::kit::Dir::Right };
                 os_ui::kit::arrow_button(ui.c, t, ar, dir, os_ui::kit::State::hover(hov));
             }

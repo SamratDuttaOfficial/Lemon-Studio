@@ -448,7 +448,7 @@ fn recording(ui: &mut Ui, c: &Ctx) -> bool {
     if m.right() > c.fit {
         return false;
     }
-    tool_button(ui, m, Icon::Metronome, crate::metronome::on(), Action::Metronome, "Metronome (Ctrl+M) - right-click for the sound and volume");
+    tool_button(ui, m, Icon::Metronome, crate::metronome::on(), Action::Metronome, "Metronome on or off (Ctrl+M) - right-click for the sound and volume");
     // Start on input, Recording precount, Blend, Loop record (spec: ui/recording.md §3-4).
     use crate::record::Opt;
     let opts = [(Icon::WaitInput, Opt::Wait), (Icon::Countdown, Opt::Precount), (Icon::Blend, Opt::Blend), (Icon::LoopRecord, Opt::Loop)];
@@ -619,7 +619,7 @@ fn cpu(ui: &mut Ui, c: &Ctx) {
     let (t, a, s) = (ui.t, c.a, c.s);
     let cpu = a.r(crate::app::CPU_RECT);
     sunken(ui, cpu, t.sunken_dark);
-    ui.hit(cpu, Action::CpuPanel, "");
+    ui.hit(cpu, Action::CpuPanel, "Audio load and memory (double-click: plugin performance; right-click: options)");
     let r = &s.cpu.now;
     let level = |load: u32| match load {
         0..75 => t.glyph,
@@ -667,11 +667,11 @@ fn utilities(ui: &mut Ui, c: &Ctx) -> bool {
     let utils = [
         (Icon::Undo, "Undo / Undo history (Ctrl+Z)"),
         (Icon::Cut, "Open audio editor / New audio editor"),
-        (Icon::Mic, "Quick record"),
+        (Icon::Mic, "Quick record: pick an input and record it into a new audio clip"),
         (Icon::Help, "Help index / About..."),
         (Icon::Save, "Save as... / Save new version (Shift+Ctrl+S)"),
         (Icon::SaveRender, "Export audio... (Ctrl+R)"),
-        (Icon::Info, "Project info (F11)"),
+        (Icon::Info, "Open the project info (F11)"),
     ];
     for (i, (icon, hint)) in utils.into_iter().enumerate() {
         let r = a.r(btn(1209.0 + 33.0 * i as f32, 4.0));
@@ -696,6 +696,18 @@ fn utilities(ui: &mut Ui, c: &Ctx) -> bool {
     true
 }
 
+/// The menu bar titles' hints, in `menus::MENUS` order.
+const MENU_HINTS: [&str; 8] = [
+    "FILE: new, open, save, import and export projects",
+    "EDIT: undo and redo",
+    "ADD: new channels, effects, plugins and patterns",
+    "PATTERNS: pick, make and change patterns",
+    "VIEW: show, close and arrange windows",
+    "OPTIONS: settings, MIDI switches and recording switches",
+    "TOOLS: capture, vocal timing and project clean-up",
+    "HELP: help pages and About",
+];
+
 /// Menu bar.
 fn menu_bar(ui: &mut Ui, c: &Ctx) {
     let (t, a, s) = (ui.t, c.a, c.s);
@@ -711,7 +723,7 @@ fn menu_bar(ui: &mut Ui, c: &Ctx) {
     for (i, (m, (x0, x1, width))) in menus::MENUS.iter().zip(layout).enumerate() {
         let title = m.title;
         let r = a.r(Rect::new(x0 - 3.0, 47.0, x1 - x0 + 6.0, 29.0));
-        let hov = ui.hit(r, Action::Menu(i), title);
+        let hov = ui.hit(r, Action::Menu(i), MENU_HINTS[i]);
         let open = s.menu_open == Some(i) && !c.preview;
         if lemon && open {
             os_ui::kit::lemon::lit_in(ui.c, ui.t, r.inset(1.0), 4.0, false);
@@ -799,11 +811,11 @@ fn song_pos(ui: &mut Ui, c: &Ctx) {
 fn modes(ui: &mut Ui, c: &Ctx) -> bool {
     let (a, s) = (c.a, c.s);
     for (i, (icon, hint)) in [
-        (Icon::TypingKeyboard, "Typing keyboard to piano keyboard (Ctrl+T)"),
-        (Icon::AutoScroll, "Auto scrolling - right-click for continuous scrolling"),
-        (Icon::StepEdit, "Step editing (Ctrl+E)"),
-        (Icon::Link, "Enable groups (Shift+Alt+G)"),
-        (Icon::MidiControl, "Multilink to controllers (Ctrl+J)"),
+        (Icon::TypingKeyboard, "Play notes with the computer keyboard (Ctrl+T)"),
+        (Icon::AutoScroll, "Auto scrolling: views follow the playhead - right-click for continuous scrolling"),
+        (Icon::StepEdit, "Step editing: while stopped, played notes are written at the song position (Ctrl+E)"),
+        (Icon::Link, "Grouped clips select and move together (Shift+Alt+G)"),
+        (Icon::MidiControl, "Multi MIDI learn: change knobs, then move a controller for each (Ctrl+J)"),
     ]
     .into_iter()
     .enumerate()
@@ -859,7 +871,7 @@ fn pattern(ui: &mut Ui, c: &Ctx) {
     let (t, a, s) = (ui.t, c.a, c.s);
     let lemon = super::lemon(ui);
     let prev = a.span(838.0, 851.0, 47.0, 76.0);
-    ui.hit(prev, Action::PatternPrev, "Pattern options"); // spec: ui/pattern-menu.md §1
+    ui.hit(prev, Action::PatternPrev, "Open the pattern menu"); // spec: ui/pattern-menu.md §1
     ui.c.fill_rrect(prev, if lemon { 4.0 } else { 2.0 }, t.button);
     icons::draw(ui.c, Icon::ArrowRight, prev.inset(2.0), t.glyph);
     let pb = a.span(855.0, 948.0, 47.0, 76.0);
@@ -897,15 +909,15 @@ fn pattern(ui: &mut Ui, c: &Ctx) {
 fn window_buttons(ui: &mut Ui, c: &Ctx, which: Range<usize>) -> bool {
     let a = c.a;
     let wins = [
-        (Icon::Playlist, Action::ToggleWin(Win::Playlist), "Arranger / Maximize arranger (F5)"),
-        (Icon::PianoRoll, Action::ToggleWin(Win::PianoRoll), "Piano roll / Maximize Piano roll (F7)"),
-        (Icon::ChannelRack, Action::ToggleWin(Win::ChannelRack), "Instrument rack / Maximize instrument rack (F6)"),
-        (Icon::Mixer, Action::ToggleWin(Win::Mixer), "Mixer (F9)"),
-        (Icon::Browser, Action::ToggleWin(Win::Browser), "Browser / Plugin palette (Alt+F8)"),
-        (Icon::Project, Action::ProjectPicker, "Clip palette / Plugin palette (Ctrl+F8)"),
-        (Icon::Plug, Action::PickerOpen, "Plugin palette (F8)"),
-        (Icon::Kick, Action::ToggleWin(Win::Tapper), "Tap tempo (Ctrl+F5)"),
-        (Icon::Touch, Action::ToggleWin(Win::Touch), "Touch controller (Alt+F7)"),
+        (Icon::Playlist, Action::ToggleWin(Win::Playlist), "Show or hide the Arranger, right-click: maximize it (F5)"),
+        (Icon::PianoRoll, Action::ToggleWin(Win::PianoRoll), "Show or hide the Piano roll, right-click: maximize it (F7)"),
+        (Icon::ChannelRack, Action::ToggleWin(Win::ChannelRack), "Show or hide the Instrument rack, right-click: maximize it (F6)"),
+        (Icon::Mixer, Action::ToggleWin(Win::Mixer), "Show or hide the Mixer (F9)"),
+        (Icon::Browser, Action::ToggleWin(Win::Browser), "Show or hide the Browser, right-click: Plugin palette (Alt+F8)"),
+        (Icon::Project, Action::ProjectPicker, "Open the Clip palette, right-click: Plugin palette (Ctrl+F8)"),
+        (Icon::Plug, Action::PickerOpen, "Open the Plugin palette (F8)"),
+        (Icon::Kick, Action::ToggleWin(Win::Tapper), "Show or hide Tap tempo (Ctrl+F5)"),
+        (Icon::Touch, Action::ToggleWin(Win::Touch), "Show or hide the Touch controller (Alt+F7)"),
         // FL's store button is hidden: its stand-in, a repository of free and open-source plugins (spec:
         // ui/main-window.md §3), had the plugin picker's icon. It is to come back with a shop icon.
     ];
@@ -1077,7 +1089,7 @@ pub fn paint_palette(ui: &mut Ui, s: &State, f: &FrameInfo, width: f32) {
     let x = PAD + ui.c.text_width(font, text) + 24.0;
     let name = format!("Preset: {}", s.bar.name());
     let pr = Rect::new(x, b.y + 4.0, ui.c.text_width(font, &name) + 30.0, BAR_H - 8.0);
-    let hov = ui.hit(pr, Action::Bar(BarHit::Presets), "The toolbar presets, Save preset as... and Delete preset");
+    let hov = ui.hit(pr, Action::Bar(BarHit::Presets), "Pick a toolbar preset, save this layout as one, or delete one");
     os_ui::kit::combo(ui.c, t, pr, &name, font, os_ui::kit::State::hover(hov));
     let done = Rect::new(width - PAD - 70.0, b.y + 4.0, 70.0, BAR_H - 8.0);
     let hov = ui.hit(done, Action::Bar(BarHit::Done), "Done: the toolbar keeps this layout");
@@ -1086,7 +1098,7 @@ pub fn paint_palette(ui: &mut Ui, s: &State, f: &FrameInfo, width: f32) {
     let rows = s.bar.layout.rows.len();
     for (i, label) in ["1 row", "2 rows"].into_iter().enumerate() {
         let r = Rect::new(done.x - 24.0 - 64.0 * (2 - i) as f32, b.y + 5.0, 60.0, BAR_H - 10.0);
-        let hov = ui.hit(r, Action::Bar(BarHit::Rows(i + 1)), format!("The toolbar in {label}"));
+        let hov = ui.hit(r, Action::Bar(BarHit::Rows(i + 1)), format!("Lay the toolbar out in {label}"));
         os_ui::kit::pill(ui.c, t, r, label, Font::new(12), os_ui::kit::State::new(hov, false, rows == i + 1));
     }
 
@@ -1327,6 +1339,6 @@ mod tests {
         let (r, _) = more(&app).expect("the arrow");
         assert_eq!(r, Rect::new(1300.0 - MORE_W, 0.0, MORE_W, 81.0));
         assert!(has(&app, &Action::CpuPanel) && has(&app, &Action::PatternPrev));
-        assert!(!app.hits.iter().any(|h| h.hint == "About Lemon Studio" || h.hint == "Project info (F11)"));
+        assert!(!app.hits.iter().any(|h| h.hint == "About Lemon Studio" || h.hint == "Open the project info (F11)"));
     }
 }

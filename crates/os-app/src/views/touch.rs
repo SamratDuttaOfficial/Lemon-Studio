@@ -65,10 +65,10 @@ pub fn paint(ui: &mut Ui, s: &State, _f: &FrameInfo) {
     ui.hit(win, Action::Swallow, "");
     ui.hit(at(1.0, 1.0, SIZE.0 - 2.0, 29.0), Action::WinDrag(Win::Touch), "");
     label(ui, Font::new(17), x0 + 9.0, y0 + 15.0, false, t.text, "Touch controller");
-    button(ui, at(250.0, 5.0, 60.0, 21.0), Action::Touch(TouchAct::Mode(false)), "Keyboard", Ok("Keys"), !tc.pads);
-    button(ui, at(314.0, 5.0, 60.0, 21.0), Action::Touch(TouchAct::Mode(true)), "Pads", Ok("Pads"), tc.pads);
+    button(ui, at(250.0, 5.0, 60.0, 21.0), Action::Touch(TouchAct::Mode(false)), "Show a piano keyboard", Ok("Keys"), !tc.pads);
+    button(ui, at(314.0, 5.0, 60.0, 21.0), Action::Touch(TouchAct::Mode(true)), "Show pads", Ok("Pads"), tc.pads);
     let close = at(400.0, 10.0, 10.0, 10.0);
-    let hov = ui.hit(close.outset(3.0), Action::CloseWin(Win::Touch), "Close");
+    let hov = ui.hit(close.outset(3.0), Action::CloseWin(Win::Touch), "Close this window");
     icons::draw(ui.c, Icon::Close, close.outset(1.0), if hov { t.tx(0xffffff) } else { t.glyph });
 
     // The octave bar: ◀ range ▶.

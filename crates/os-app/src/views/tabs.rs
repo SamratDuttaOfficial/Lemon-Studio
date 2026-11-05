@@ -34,10 +34,10 @@ pub fn tab_rect(r: Rect, i: usize) -> Rect {
     Rect::new(r.x + 3.0 + i as f32 * (TAB_W + TAB_GAP), r.y + 2.0, TAB_W, r.h - 2.0)
 }
 
-/// What a hovered tab says, on the hint panel and in its bubble.
+/// What a hovered tab says, on the hint panel and in its tooltip.
 pub fn tab_hint(w: Win) -> String {
     let (_, name, _, key) = TABS.iter().find(|t| t.0 == w).copied().unwrap_or(TABS[0]);
-    format!("{name}: {key}  -  switch tabs: {FLIP_KEY}")
+    format!("Show the {name}: {key}  -  switch tabs: {FLIP_KEY}")
 }
 
 /// The window: the shown tab's page, then the strip over the frame's title area.
@@ -73,8 +73,11 @@ fn strip(ui: &mut Ui, s: &State, win: Win, outer: Rect) {
             t.window_title
         };
         let radius = if lemon { lk::r_btn(t) } else { 2.0 };
-        // The lit tab runs into the page under it.
+        // Rounded at the top only: the shape runs on under the strip's edge, which cuts it, so it never covers the
+        // page's icons under the strip. The lit tab runs into the page.
+        ui.c.push_clip(Rect::new(tab.x, tab.y, tab.w, tab.h));
         ui.c.fill_rrect(Rect::new(tab.x, tab.y, tab.w, tab.h + radius), radius, face);
+        ui.c.pop_clip();
         ui.c.fill_rect(Rect::new(tab.x, r.bottom() - 1.0, tab.w, 1.0), if on { face } else { t.splitter_dark });
         if on {
             ui.c.fill_rect(Rect::new(tab.x + 1.0, tab.y, tab.w - 2.0, 2.0), t.accent);
@@ -86,30 +89,4 @@ fn strip(ui: &mut Ui, s: &State, win: Win, outer: Rect) {
         ui.c.text_clip(f, tab.x + 26.0, (tab.cy() - lh / 2.0).round(), tab.w - 30.0, ink, name);
     }
     window_buttons(ui, win, r.right() - 64.0, r.y, t.text_dim, t.glyph);
-}
-
-/// The shortcut bubble of the tab under the mouse (painted after the windows; it takes no clicks).
-pub fn paint_tip(ui: &mut Ui, s: &State) {
-    let Some(&Action::PanelTab(w)) = ui.hovered() else { return };
-    // Something being carried: the tab opens by itself, and the bubble would be in the way.
-    if s.browser_drag.is_some() {
-        return;
-    }
-    let shown = TABS.iter().map(|t| t.0).find(|&o| s.shown(o));
-    let Some(shown) = shown else { return };
-    let strip = strip_rect(s, s.win_rect(shown));
-    let i = TABS.iter().position(|t| t.0 == w).unwrap_or(0);
-    let tab = tab_rect(strip, i);
-    let (_, name, _, key) = TABS[i];
-    let f = Font::new(13);
-    let lines = [format!("{name}: {key}"), format!("Switch tabs: {FLIP_KEY}")];
-    let width = lines.iter().map(|l| ui.c.text_width(f, l)).fold(0.0f32, f32::max).ceil() + 16.0;
-    let (lh, h) = (16.0, 2.0 * 16.0 + 10.0);
-    let (sw, sh) = ui.c.size();
-    let b = Rect::new(tab.x.min(sw - width - 2.0).max(0.0), (tab.bottom() + 3.0).min(sh - h - 2.0), width, h);
-    ui.c.fill_rrect(b.outset(1.0), 6.0, os_ui::Color::rgb(0).with_alpha(90));
-    ui.c.fill_rrect(b, 5.0, ui.t.s(0x0b0d0f).with_alpha(245));
-    for (k, l) in lines.iter().enumerate() {
-        ui.c.text(f, b.x + 8.0, b.y + 5.0 + k as f32 * lh, ui.t.tx(0xe6e6e6), l);
-    }
 }

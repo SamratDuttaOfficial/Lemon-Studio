@@ -192,7 +192,7 @@ pub enum Request {
     Misc(usize, crate::misc_page::M, f32),
     /// A Misc tab list asks for its menu at this screen point.
     MiscMenu(usize, crate::misc_page::M, i32, i32),
-    /// Something done on the window's Cut part or Whole audio tab (`clip_page`).
+    /// Something done on the window's This clip or Source audio tab (`clip_page`).
     Clip(usize, crate::clip_page::Event),
     /// A strip knob of channel row `.0` asks for its menu at this screen point.
     KnobMenu(usize, crate::knobs::Control, i32, i32),
@@ -1082,7 +1082,7 @@ impl Plugins {
         self.hosted.get(&row).and_then(|h| h.window.as_ref()).map(|w| (w.hwnd(), w.detached()))
     }
 
-    /// Row `row`'s window shows its Cut part or Whole audio tab.
+    /// Row `row`'s window shows its This clip or Source audio tab.
     #[cfg(plugin_windows)]
     pub fn show_clip_tab(&self, row: usize, tab: crate::clip_page::Tab) {
         if let Some(w) = self.hosted.get(&row).and_then(|h| h.window.as_ref()) {
@@ -1247,6 +1247,8 @@ impl Plugins {
             if let Some(w) = &h.window {
                 if let Some(i) = info(row) {
                     w.set_info(i);
+                } else {
+                    w.tick_tip();
                 }
                 if let Some(l) = &mut h.link {
                     w.set_page(l.page());
@@ -2167,7 +2169,7 @@ mod tests {
         }
     }
 
-    /// The Cut part and Whole audio tabs in a real window, drawn and captured with a project's values
+    /// The This clip and Source audio tabs in a real window, drawn and captured with a project's values
     /// (`OS_SHOT_DIR=<dir> cargo test -p os-app --bin lemonstudio clip_tab_shots -- --ignored`).
     #[test]
     #[ignore]
@@ -2186,7 +2188,7 @@ mod tests {
         slots[1] = SlotVals { name: Some("Lemon Delay".into()), on: false, mix: 1.0 };
         let cut = Side {
             available: true,
-            rows: rows(&[("File", "lead vocal take 3.wav"), ("Part", "00:12.340 to 00:15.120  (2.780 s)"), ("On playlist", "Bar 9.1 to 10.3, track 2"), ("Gain", "-1.5 dB"), ("Fades", "in 40 ms, out 120 ms"), ("Pitch", "As recorded"), ("Mixer", "Vocals")]),
+            rows: rows(&[("File", "lead vocal take 3.wav"), ("Part", "00:12.340 to 00:15.120  (2.780 s)"), ("In Arranger", "Bar 9.1 to 10.3, track 2"), ("Gain", "-1.5 dB"), ("Fades", "in 40 ms, out 120 ms"), ("Pitch", "As recorded"), ("Mixer", "Vocals")]),
             slots: slots.clone(),
             lanes: vec![
                 LaneVals { lane: Lane::Volume, name: "Volume".into(), own: vec![point(12.34, 0.8), point(13.2, 0.55), point(14.1, 0.72), point(15.12, 0.2)], inherited: vec![point(11.0, 0.5), point(16.0, 0.75)] },
@@ -2199,9 +2201,10 @@ mod tests {
             marks: Vec::new(),
             focus: Lane::Volume,
             focus_serial: 0,
+            pos: Default::default(),
         };
         let whole = Side {
-            rows: rows(&[("File", "lead vocal take 3.wav"), ("Length", "03:12.000 (192.000 s)"), ("Rate", "48000 Hz"), ("Cuts", "5 on the playlist"), ("Pitch", "As recorded"), ("Volume", "78%"), ("Mixer", "Vocals")]),
+            rows: rows(&[("File", "lead vocal take 3.wav"), ("Length", "03:12.000 (192.000 s)"), ("Rate", "48000 Hz"), ("Clips", "5 in the Arranger"), ("Pitch", "As recorded"), ("Volume", "78%"), ("Mixer", "Vocals")]),
             slots: { let mut s = vec![SlotVals::default(); 10]; s[0] = SlotVals { name: Some("Lemon Parametric EQ".into()), on: true, mix: 1.0 }; s },
             lanes: vec![
                 LaneVals { lane: Lane::Volume, name: "Volume".into(), own: vec![point(0.0, 0.6), point(40.0, 0.8), point(120.0, 0.72), point(192.0, 0.3)], inherited: Vec::new() },
@@ -2218,7 +2221,9 @@ mod tests {
             ],
             ..cut.clone()
         };
-        let page = PageVals { cut, whole, playhead: Some(13.6) };
+        let mut page = PageVals { cut, whole };
+        page.cut.pos = crate::clip_page::Pos::At(13.6);
+        page.whole.pos = crate::clip_page::Pos::At(13.6);
         let mut pl = Plugins { available: builtin(), scale: 1.0, rate: 48000, ..Plugins::default() };
         let index = pl.index_of(LEMON_SAMPLER).expect("built-in Lemon Sampler");
         pl.create_with(0, index, None).unwrap();
@@ -2226,14 +2231,15 @@ mod tests {
         pl.open_window(0, info).unwrap();
         pump(&mut pl, 400);
         let w = pl.hosted[&0].window.as_ref().unwrap().hwnd();
-        // The tabs after the plugin's own pages and the Misc wrench: 45 px cells from x 7.
+        // The plugin's own pages and the Misc wrench are 45 px cells from x 7; the two named tabs follow them.
         let pages = 2;
         let tab_x = |i: i32| 7 + 45 * i + 22;
+        let clip_x = |i: i32| 7 + 45 * (pages + 1) + 3 + 94 * i + 46;
         capture(w, &dir.join("clip-tab-0-existing.bmp"));
-        click(w, tab_x(pages + 1), 50);
+        click(w, clip_x(0), 50);
         pump(&mut pl, 300);
         capture(w, &dir.join("clip-tab-1-cut.bmp"));
-        click(w, tab_x(pages + 2), 50);
+        click(w, clip_x(1), 50);
         pump(&mut pl, 300);
         capture(w, &dir.join("clip-tab-2-whole.bmp"));
         click(w, tab_x(0), 50);

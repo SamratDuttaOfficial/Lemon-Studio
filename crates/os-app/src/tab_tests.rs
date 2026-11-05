@@ -222,8 +222,15 @@ fn hovering_a_tab_shows_its_shortcuts() {
     let before = pixels(&a, under);
     let _ = app.take_damage();
 
-    // Onto the tab: the bubble shows under it.
+    // Onto the tab: nothing covers the icons under it yet, only the hint panel knows.
     app.mouse_move(t.cx(), t.cy());
+    let _ = app.take_damage();
+    assert!(app.state.tip.is_none(), "not at once");
+    app.tip_tick(std::time::Instant::now());
+    assert!(app.state.tip.is_none(), "not before the delay");
+    // Rested on it: the bubble shows under it.
+    app.tip_tick(std::time::Instant::now() + crate::app::TIP_DELAY);
+    assert!(app.state.tip.as_ref().is_some_and(|(_, text)| text.contains("F6") && text.contains("Ctrl+Tab")), "{:?}", app.state.tip);
     let d = app.take_damage();
     match d {
         Some(Some(rects)) => app.paint_region(&mut a, Some(&rects)),
@@ -525,6 +532,408 @@ fn a_browser_item_carried_over_a_tab_opens_it() {
     app.mouse_up();
     assert_eq!(pl::clips(&app.state).len(), n0 + 1, "dropped on the Arranger");
     assert_eq!(pl::clips(&app.state).last().unwrap().source, ClipSource::Pattern(1));
+}
+
+/// The tabs paint nothing under the strip: the icons there stay whole, hovered or not.
+#[test]
+fn the_tabs_cover_none_of_the_icons_under_them() {
+    let Some(mut c) = canvas() else { return };
+    let mut app = app();
+    app.paint(&mut c, None);
+    let t = hit(&app, &tab(Win::ChannelRack));
+    let under = Rect::new(t.x, t.bottom(), t.w, 8.0);
+    let before = pixels(&c, under);
+    app.mouse_move(t.cx(), t.cy());
+    app.paint(&mut c, None);
+    assert_eq!(pixels(&c, under), before, "the hovered tab's face stops at the strip");
+    // The tool icons under the lit tab are drawn as they would be with no tab there: its face ends at the same row.
+    let lit = hit(&app, &tab(Win::Playlist));
+    let pencil = hit(&app, &Action::PlTool(pl::PlTool::Draw));
+    assert!(pencil.y >= lit.bottom(), "{pencil:?} under {lit:?}");
+}
+
+/// A track's own height: its bottom edge drags, the rows under it follow, one undo step; a click changes nothing and a
+/// double-click puts it back.
+#[test]
+fn a_tracks_bottom_edge_changes_its_height() {
+    let Some(mut c) = canvas() else { return };
+    let mut app = app();
+    app.state.playlist.source = Some(ClipSource::Pattern(1));
+    let placed = pl::place(&mut app.state, 2, 0);
+    app.paint(&mut c, None);
+    let (row, h0) = (pl::Rows::new(&app.state).row_h, pl::Rows::new(&app.state).height(2));
+    assert_eq!(h0, row);
+    let top3 = pl::Rows::new(&app.state).top(3);
+    let edge = hit(&app, &Action::PlTrackEdge(2));
+    assert!(!hint(&app, &Action::PlTrackEdge(2)).is_empty());
+
+    // The cursor says so.
+    app.mouse_move(edge.cx(), edge.cy());
+    assert_eq!(app.cursor(), crate::app::Cursor::NsResize);
+
+    // A click: no change and no undo step.
+    let steps = app.state.history.len();
+    app.mouse_down();
+    app.mouse_up();
+    assert_eq!(pl::Rows::new(&app.state).height(2), h0);
+    assert_eq!(app.state.history.len(), steps, "a click leaves no undo step");
+    app.state.playlist.last_edge = None;
+
+    // A drag: this track only, and those under it move down.
+    app.mouse_move(edge.cx(), edge.cy());
+    app.mouse_down();
+    assert_eq!(app.cursor(), crate::app::Cursor::NsResize, "kept while dragging");
+    app.mouse_move(edge.cx(), edge.cy() + 40.0);
+    app.mouse_up();
+    app.paint(&mut c, None);
+    let rows = pl::Rows::new(&app.state);
+    assert_eq!(rows.height(2), h0 + 40.0);
+    assert_eq!((rows.height(1), rows.height(3)), (h0, h0), "the others stay");
+    assert_eq!(rows.top(3), top3 + 40.0);
+    assert_eq!(app.state.history.len(), steps + 1, "one undo step");
+    // Moving away leaves no light where the edge went: a repaint draws what a whole paint does.
+    let Some(mut whole) = canvas() else { return };
+    let _ = app.take_damage();
+    let moved = app.state.win_rect(Win::Playlist);
+    app.mouse_move(moved.x + 900.0, moved.y + 500.0);
+    match app.take_damage() {
+        Some(Some(rects)) => app.paint_region(&mut c, Some(&rects)),
+        Some(None) => app.paint(&mut c, None),
+        None => {}
+    }
+    app.paint(&mut whole, None);
+    same(&c, &whole, "the edge's light gone");
+    // Its clip fills the row, and the grid finds the taller row all the way down.
+    let g = pl::PGeom::new(&app.state, app.pl_grid().unwrap());
+    let clip = pl::clips(&app.state)[placed];
+    assert_eq!(g.clip_rect(&clip).h, h0 + 40.0 - 3.0);
+    assert_eq!(g.track_at(g.y_of(2) + h0 + 30.0), 2);
+    assert_eq!(g.track_at(g.y_of(3) + 1.0), 3);
+    assert!(!rows.strip(2));
+
+    // Undo.
+    crate::history::undo(&mut app.state);
+    assert_eq!(pl::Rows::new(&app.state).height(2), h0);
+    crate::history::redo(&mut app.state);
+    assert_eq!(pl::Rows::new(&app.state).height(2), h0 + 40.0);
+
+    // As small and as big as the Arranger allows, and the track-height zoom moves it with the others.
+    app.state.playlist.last_edge = None;
+    app.paint(&mut c, None);
+    let edge = hit(&app, &Action::PlTrackEdge(2));
+    app.mouse_move(edge.cx(), edge.cy());
+    app.mouse_down();
+    app.mouse_move(edge.cx(), edge.cy() - 2000.0);
+    assert_eq!(pl::Rows::new(&app.state).height(2), pl::ROW_MIN);
+    assert!(!pl::Rows::new(&app.state).strip(2), "the smallest track is still a track");
+    app.mouse_move(edge.cx(), edge.cy() + 2000.0);
+    assert_eq!(pl::Rows::new(&app.state).height(2), pl::ROW_MAX);
+    app.mouse_move(edge.cx(), edge.cy() + 48.0);
+    app.mouse_up();
+    let was = pl::Rows::new(&app.state).height(2);
+    let k = was / row;
+    app.state.playlist.row_h = row * 2.0;
+    let rows = pl::Rows::new(&app.state);
+    assert!((rows.height(2) - (row * 2.0 * k).min(pl::ROW_MAX)).abs() < 0.01 && rows.height(1) == row * 2.0, "{} {}", rows.height(2), rows.height(1));
+    app.state.playlist.row_h = row;
+
+    // A double-click: as tall as the others again.
+    app.state.playlist.last_edge = None;
+    app.paint(&mut c, None);
+    let edge = hit(&app, &Action::PlTrackEdge(2));
+    app.mouse_move(edge.cx(), edge.cy());
+    app.mouse_down();
+    app.mouse_up();
+    app.paint(&mut c, None);
+    let edge = hit(&app, &Action::PlTrackEdge(2));
+    app.mouse_move(edge.cx(), edge.cy());
+    app.mouse_down();
+    app.mouse_up();
+    assert_eq!(pl::Rows::new(&app.state).height(2), row);
+}
+
+/// The track menu sizes a track, and puts them all back; a tall track collapsed into a group is still a strip.
+#[test]
+fn the_track_menu_has_the_height() {
+    let Some(mut c) = canvas() else { return };
+    let mut app = app();
+    app.paint(&mut c, None);
+    let menu = pl::track_menu(&app.state, 4, 0.0, 0.0);
+    let sub = menu.items.iter().find(|i| i.label == "Track height").expect("the submenu");
+    let large = sub.children.iter().find(|i| i.label == "Extra large").expect("a size");
+    assert!(sub.children.iter().find(|i| i.label == "Reset all tracks").is_some_and(|i| !i.enabled), "nothing to reset yet");
+    pl::run(&mut app, large.cmd.clone());
+    let row = pl::Rows::new(&app.state).row_h;
+    assert_eq!(pl::Rows::new(&app.state).height(4), row * 2.0);
+    // The next track grouped under the fourth, collapsed: a strip whatever its own height.
+    {
+        let arr = pl::arr_mut(&mut app.state);
+        arr.tracks[3].collapsed = true;
+        arr.tracks[4].grouped = true;
+    }
+    assert!(pl::Rows::new(&app.state).strip(4));
+    {
+        let arr = pl::arr_mut(&mut app.state);
+        arr.tracks[3].collapsed = false;
+        arr.tracks[4].grouped = false;
+    }
+    let menu = pl::track_menu(&app.state, 4, 0.0, 0.0);
+    let sub = menu.items.iter().find(|i| i.label == "Track height").unwrap();
+    let reset = sub.children.iter().find(|i| i.label == "Reset all tracks").unwrap();
+    assert!(reset.enabled);
+    pl::run(&mut app, reset.cmd.clone());
+    assert_eq!(pl::Rows::new(&app.state).height(4), row);
+    // Moved tracks take their height along.
+    pl::run(&mut app, pl::Cmd::TrackHeight(1, 3.0));
+    pl::run(&mut app, pl::Cmd::TrackDown(1));
+    let rows = pl::Rows::new(&app.state);
+    assert_eq!((rows.height(1), rows.height(2)), (row, row * 3.0));
+    app.paint(&mut c, None);
+}
+
+/// The stick the song plays along stands where the top bar was clicked and stays there, as a partial repaint and a full one
+/// draw it alike; while the song plays it runs, and on stopping it is back.
+#[test]
+fn the_line_stays_where_the_song_position_is() {
+    let Some(mut a) = canvas() else { return };
+    let Some(mut b) = canvas() else { return };
+    let mut app = app();
+    app.paint(&mut a, None);
+    let g = app.pl_grid().unwrap();
+    let column = |x: f32| Rect::new(x.floor() - 1.0, g.y + 200.0, 4.0, 40.0);
+    let ruler = hit(&app, &Action::PlRuler);
+    let x = g.x + 300.0;
+    let empty = pixels(&a, column(x));
+    app.mouse_move(x, ruler.cy());
+    app.paint(&mut a, None);
+    app.mouse_down();
+    app.mouse_up();
+    assert!(app.state.playlist.pos > 0);
+    let at = pl::PGeom::new(&app.state, g).x_of(app.state.playlist.pos as f32);
+    let d = app.take_damage();
+    match d {
+        Some(Some(rects)) => app.paint_region(&mut a, Some(&rects)),
+        Some(None) => app.paint(&mut a, None),
+        None => panic!("nothing repainted"),
+    }
+    assert_ne!(pixels(&a, column(at)), empty, "the line stands in the grid, not just the flag on the ruler");
+    app.paint(&mut b, None);
+    same(&a, &b, "the line placed");
+    // It stays: nothing makes it go away but moving it.
+    app.mouse_move(g.x + 900.0, g.y + 400.0);
+    app.paint(&mut a, None);
+    assert_ne!(pixels(&a, column(at)), empty, "still there");
+
+    // Anything else that moves the position (a marker, a key, a clip window's ruler) moves the line at the next tick.
+    let _ = app.take_damage();
+    let (ppq, old) = (u32::from(app.state.project.ppq.max(4)), at);
+    app.state.playlist.pos += ppq * 16;
+    app.line_tick();
+    let d = app.take_damage().expect("repainted");
+    match d {
+        Some(rects) => app.paint_region(&mut a, Some(&rects)),
+        None => app.paint(&mut a, None),
+    }
+    let at2 = pl::PGeom::new(&app.state, g).x_of(app.state.playlist.pos as f32);
+    assert_ne!(pixels(&a, column(at2)), pixels(&a, Rect::new(column(at2).x + 7.0, column(at2).y, 4.0, 40.0)), "at its new place");
+    assert_eq!(pixels(&a, column(old)), empty, "and gone from the old one");
+    app.paint(&mut b, None);
+    same(&a, &b, "the line moved");
+}
+
+/// A control's tooltip waits for the mouse to rest, then shows what the control does; moving on, clicking, the wheel and a
+/// key take it away. Backgrounds have none, and none shows over a menu.
+#[test]
+fn a_tooltip_waits_and_goes() {
+    use std::time::{Duration, Instant};
+    let Some(mut a) = canvas() else { return };
+    let Some(mut b) = canvas() else { return };
+    let mut app = app();
+    app.paint(&mut a, None);
+    let tool = hit(&app, &Action::PlTool(pl::PlTool::Paint));
+    let rest = |app: &mut App| app.tip_tick(Instant::now() + Duration::from_secs(5));
+
+    app.mouse_move(tool.cx(), tool.cy());
+    app.tip_tick(Instant::now());
+    assert!(app.state.tip.is_none(), "not at once");
+    rest(&mut app);
+    let (at, text) = app.state.tip.clone().expect("the tooltip");
+    assert_eq!(at, tool);
+    assert_eq!(text, app.hint);
+    assert!(!text.is_empty());
+    let under = Rect::new(tool.x, tool.bottom() + 6.0, 40.0, 16.0);
+    app.paint(&mut b, None);
+    let clear = {
+        let mut other = app_like();
+        other.paint(&mut a, None);
+        pixels(&a, under)
+    };
+    assert_ne!(pixels(&b, under), clear, "drawn under the control");
+
+    // Moved off: gone, with nothing left behind.
+    let _ = app.take_damage();
+    app.mouse_move(tool.cx() + 900.0, tool.cy() + 500.0);
+    assert!(app.state.tip.is_none());
+    let d = app.take_damage().expect("repainted");
+    match d {
+        Some(rects) => app.paint_region(&mut b, Some(&rects)),
+        None => app.paint(&mut b, None),
+    }
+    app.paint(&mut a, None);
+    same(&b, &a, "the tooltip gone");
+
+    // The grid has none.
+    rest(&mut app);
+    assert!(app.state.tip.is_none(), "not over the grid: {}", app.hint);
+
+    // A click, the wheel and a key take it away, and it does not come back until the mouse moves to another control.
+    app.mouse_move(tool.cx(), tool.cy());
+    rest(&mut app);
+    assert!(app.state.tip.is_some());
+    app.mouse_down();
+    assert!(app.state.tip.is_none());
+    app.mouse_up();
+    rest(&mut app);
+    assert!(app.state.tip.is_none(), "not after a click");
+    app.paint(&mut a, None);
+    let other = hit(&app, &Action::PlTool(pl::PlTool::Delete));
+    app.mouse_move(other.cx(), other.cy());
+    rest(&mut app);
+    assert!(app.state.tip.is_some(), "on the next control");
+    app.wheel(0.0, 1.0, false, false);
+    assert!(app.state.tip.is_none());
+    app.mouse_move(tool.cx(), tool.cy());
+    rest(&mut app);
+    assert!(app.state.tip.is_some());
+    press(&mut app, Key::Named(NamedKey::F5), false);
+    assert!(app.state.tip.is_none());
+
+    // Over an open menu: its own tips, not this one.
+    app.paint(&mut a, None);
+    app.mouse_move(tool.cx(), tool.cy());
+    app.state.playlist.popup = Some(pl::track_menu(&app.state, 0, 300.0, 300.0));
+    rest(&mut app);
+    assert!(app.state.tip.is_none());
+}
+
+fn app_like() -> App {
+    app()
+}
+
+/// What a click says shows on the hint panel at once, though the control clicked has a hint of its own.
+#[test]
+fn a_clicks_message_shows_over_the_controls_hint() {
+    let Some(mut c) = canvas() else { return };
+    let mut app = app();
+    app.paint(&mut c, None);
+    let tool = hit(&app, &Action::PlTool(pl::PlTool::Paint));
+    app.mouse_move(tool.cx(), tool.cy());
+    assert!(!app.hint.is_empty());
+    let own = app.hint.to_string();
+    app.state.message = None;
+    app.show_new_message(None);
+    assert_eq!(app.hint, own, "nothing new said");
+    app.state.message = Some("Said".into());
+    app.show_new_message(None);
+    assert_eq!(app.hint, "Said");
+    // The mouse moving on brings hints back.
+    let other = hit(&app, &Action::PlTool(pl::PlTool::Delete));
+    app.mouse_move(other.cx(), other.cy());
+    assert_ne!(app.hint, "Said");
+}
+
+/// Dumps every hint of every window, for reading through (`OS_HINTS=<file>`).
+#[test]
+#[ignore]
+fn hint_dump() {
+    let Ok(out) = std::env::var("OS_HINTS") else { return };
+    let Some(mut c) = canvas() else { return };
+    let mut app = app();
+    let mut seen = std::collections::BTreeSet::new();
+    let mut take = |app: &App| {
+        for h in &app.hits {
+            if crate::app::has_tip(&h.action, h.rect) && h.rect.w > 0.0 {
+                seen.insert(h.hint.to_string());
+            }
+        }
+    };
+    app.paint(&mut c, None);
+    take(&app);
+    for w in [Win::ChannelRack, Win::Mixer, Win::PianoRoll, Win::Plugin, Win::Perf, Win::Tapper, Win::Touch, Win::Strum, Win::Arp, Win::PianoDlg, Win::Events] {
+        app.state.raise(w);
+        app.paint(&mut c, None);
+        take(&app);
+    }
+    let text: Vec<String> = seen.into_iter().collect();
+    std::fs::write(out, text.join("\n")).unwrap();
+}
+
+/// Every control has something to say in its tooltip, in every window.
+#[test]
+fn every_control_says_what_it_does() {
+    use crate::app::has_tip;
+    let Some(mut c) = canvas() else { return };
+    let check = |app: &App, what: &str| {
+        let silent: Vec<String> = app
+            .hits
+            .iter()
+            .filter(|h| h.hint.is_empty() && has_tip(&h.action, h.rect) && h.rect.w > 0.0 && h.rect.h > 0.0)
+            .filter(|h| !quiet(&h.action))
+            .map(|h| format!("{:?}", h.action))
+            .collect();
+        assert!(silent.is_empty(), "{what}: no tooltip on {silent:?}");
+    };
+    let mut app = app();
+    app.paint(&mut c, None);
+    check(&app, "Arranger");
+    for w in [Win::ChannelRack, Win::Mixer, Win::PianoRoll, Win::Plugin, Win::Perf, Win::Tapper, Win::Touch, Win::Strum, Win::Arp, Win::PianoDlg, Win::Events] {
+        app.state.raise(w);
+        app.paint(&mut c, None);
+        check(&app, &format!("{w:?}"));
+    }
+    // Each page of the settings window.
+    app.state.settings.open = true;
+    for tab in 0..8 {
+        app.state.settings.tab = tab;
+        app.paint(&mut c, None);
+        check(&app, &format!("settings page {tab}"));
+    }
+}
+
+/// What takes clicks without being a control: a window's or a box's background, a list's empty part.
+fn quiet(a: &Action) -> bool {
+    matches!(a, Action::BrowserList | Action::Bar(crate::toolbar::BarHit::Palette) | Action::PlPickList | Action::PianoVelocity | Action::Perf(crate::perf::PerfAct::List))
+        || matches!(a, Action::Settings(SAct::Body | SAct::NameBody | SAct::PickBody | SAct::Plug(crate::views::settings::Plug::Table)))
+        || matches!(a, Action::Pat(crate::patterns::Hit::Inside))
+        || matches!(a, Action::RackFill(crate::rack::FillHit::Inside))
+}
+
+/// The tabbed window takes all the width up to the browser: maximized by default, and on its first restore too.
+#[test]
+fn the_tabbed_window_reaches_the_browser() {
+    let Some(mut c) = canvas() else { return };
+    let mut app = app();
+    app.paint(&mut c, None);
+    let browser = crate::views::browser_w(&app.state);
+    let r = app.state.win_rect(Win::Playlist);
+    assert!(app.state.wins[0].maxed, "maximized by default");
+    assert_eq!((r.x, r.right()), (browser, app.state.screen.0));
+    let (x, y) = (app.state.screen.0 - 44.0, r.y + 11.0);
+    let max = hit(&app, &Action::MaxWin(Win::Playlist));
+    assert!(max.contains(x, y) || max.x > 0.0);
+    click(&mut app, &mut c, max);
+    assert!(!app.state.wins[0].maxed);
+    let r = app.state.win_rect(Win::Playlist);
+    assert_eq!((r.x, r.right()), (browser, app.state.screen.0), "restored: still from the browser to the edge");
+    assert!(r.h < app.state.work_rect().h, "shorter than the workspace, so it is a window");
+    // Back and forth keeps what it has.
+    app.state.wins[0].rect.w -= 100.0;
+    let kept = app.state.wins[0].rect;
+    let max = hit(&app, &Action::MaxWin(Win::Playlist));
+    click(&mut app, &mut c, max);
+    let max = hit(&app, &Action::MaxWin(Win::Playlist));
+    click(&mut app, &mut c, max);
+    assert_eq!(app.state.wins[0].rect, kept);
 }
 
 /// Carrying with Shift or Ctrl held keeps those clicks' meanings: no drag starts.

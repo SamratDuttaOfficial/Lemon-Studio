@@ -89,7 +89,7 @@ pub(super) fn frame(ui: &mut Ui, r: Rect, title: &str) {
     ui.c.text_clip(f, r.x + if lemon { 11.0 } else { 7.0 }, (r.y + 1.0 + (CAP_H - lh) / 2.0).round(), r.w - 40.0, t.text, title);
     hit(ui, Rect::new(r.x, r.y, r.w - 30.0, CAP_H), DHit::Caption, "Drag to move");
     let x = Rect::new(r.right() - 26.0, r.y + 3.0, 21.0, 21.0);
-    let hov = hit(ui, x, DHit::Close, "Close (Esc)");
+    let hov = hit(ui, x, DHit::Close, "Close this dialog (Esc)");
     if hov && lemon {
         lk::window_button_hover(ui.c, t, x, true);
     }
@@ -314,7 +314,7 @@ fn sig_box(ui: &mut Ui, s: &State, m: &Modal, f: &SigForm) {
     let b = Rect::new(r.right() - 12.0 - bw, r.y + 105.0, bw, BTN_H);
     let act = Action::Dlg(DHit::Accept);
     let down = ui.down(b, &act);
-    let hov = ui.hit(b, act, "Enter");
+    let hov = ui.hit(b, act, "Apply this time signature (Enter)");
     button(ui, b, "Accept", true, hov, down, false);
 }
 
@@ -362,7 +362,7 @@ fn file_box(ui: &mut Ui, s: &State, m: &Modal, f: &FileDlg) {
     tool(ui, l.back, Icon::Back, DHit::Back, "Back (Alt+Left)", f.can_go_back());
     tool(ui, l.up, Icon::ArrowUp, DHit::Up, "Up to the folder above (Alt+Up)", f.can_go_up());
     if let Some(n) = l.new_folder {
-        tool(ui, n, Icon::FolderPlus, DHit::NewFolder, "New folder", true);
+        tool(ui, n, Icon::FolderPlus, DHit::NewFolder, "Make a new folder here", true);
     }
     field(ui, l.path, &f.path, f.focus == Focus::Path, DHit::PathField, "The folder shown: type a path and press Enter to go there");
     places(ui, f, l.places);
@@ -373,7 +373,7 @@ fn file_box(ui: &mut Ui, s: &State, m: &Modal, f: &FileDlg) {
     ui.c.text(font, l.panel.x + 10.0, (l.name_y + 13.0 - lh / 2.0).round(), t.text, label);
     field(ui, l.name, &f.name, f.focus == Focus::Name, DHit::NameField, "");
     if let Some(c) = l.combo {
-        let hov = hit(ui, c, DHit::Filter, "The type of file listed");
+        let hov = hit(ui, c, DHit::Filter, "Choose the type of file listed");
         let label = f.chosen().map(fd::Filter::label).unwrap_or_default();
         kit::combo(ui.c, t, c, &label, font, kit::State::new(hov, f.filter_open, false));
     }
@@ -389,10 +389,15 @@ fn file_box(ui: &mut Ui, s: &State, m: &Modal, f: &FileDlg) {
     let ok = Rect::new(cancel.x - 6.0 - mw, cancel.y, mw, 30.0);
     let col = if f.status.is_some() { t.h(0xff9e00) } else { t.text_dim };
     ui.c.text_clip(font, r.x + 14.0, (cancel.cy() - lh / 2.0).round(), ok.x - r.x - 26.0, col, &f.status_text());
+    let main_hint = match f.mode {
+        Mode::Open => "Open the chosen file (Enter)",
+        Mode::Save => "Save under this name (Enter)",
+        Mode::Folder => "Use this folder (Enter)",
+    };
     for (b, label, h, is_main) in [(ok, main, DHit::Accept, true), (cancel, "Cancel", DHit::Cancel, false)] {
         let act = Action::Dlg(h);
         let down = ui.down(b, &act);
-        let hov = ui.hit(b, act, if is_main { "Enter" } else { "Esc" });
+        let hov = ui.hit(b, act, if is_main { main_hint } else { "Close without choosing (Esc)" });
         button(ui, b, label, is_main, hov, down, false);
     }
     if let (Some(c), true) = (l.combo, f.filter_open) {
@@ -432,7 +437,7 @@ fn shortcuts_box(ui: &mut Ui, s: &State, m: &Modal, f: &crate::shortcuts::Form) 
         for k in 0..n {
             let b = Rect::new(p.x + 10.0, p.y + 30.0 + k as f32 * SC_ROW, SC_BOX.0, SC_BOX.1);
             let open = f.open == Some(row);
-            let hov = hit(ui, b, DHit::Shortcut(row), ROWS[row].label);
+            let hov = ui.hit(b, Action::Dlg(DHit::Shortcut(row)), format!("Choose the keys for: {}", ROWS[row].label));
             kit::combo(ui.c, t, b, f.text(row), font, kit::State::new(hov, open, false));
             ui.c.text(font, b.right() + 10.0, (b.cy() - lh / 2.0).round(), t.text, ROWS[row].label);
             if open {
@@ -480,7 +485,7 @@ fn shortcut_list(ui: &mut Ui, f: &crate::shortcuts::Form, row: usize, b: Rect, d
     let lh = ui.c.line_height(font);
     for (i, ch) in choices.iter().enumerate() {
         let rr = Rect::new(p.x + 1.0, p.y + 3.0 + i as f32 * SC_ITEM_H, p.w - 2.0, SC_ITEM_H);
-        let hov = hit(ui, rr, DHit::ShortcutChoice(i), "");
+        let hov = hit(ui, rr, DHit::ShortcutChoice(i), "Use these keys");
         if hov {
             if lemon(ui) {
                 lk::row_highlight(ui.c, t, rr);
@@ -656,7 +661,7 @@ fn list(ui: &mut Ui, f: &FileDlg, r: Rect) {
     let t = ui.t;
     let lemon = lemon(ui);
     well(ui, r, None);
-    hit(ui, r, DHit::List, "");
+    hit(ui, r, DHit::List, "Click an empty place to clear the selection");
     let font = Font::new(13);
     let lh = ui.c.line_height(font);
     let head = Rect::new(r.x + 1.0, r.y + 1.0, r.w - 2.0, HEAD_H);
@@ -699,7 +704,7 @@ fn list(ui: &mut Ui, f: &FileDlg, r: Rect) {
     for i in first..(first + shown).min(f.entries.len()) {
         let e = &f.entries[i];
         let row = Rect::new(body.x, (body.y + i as f32 * ROW_H - scroll).round(), body.w, ROW_H);
-        let hov = ui.hit(row.intersect(&body), Action::Dlg(DHit::Row(i)), "");
+        let hov = ui.hit(row.intersect(&body), Action::Dlg(DHit::Row(i)), "Click to select, double-click to open or choose it");
         let sel = f.sel == Some(i);
         row_bg(ui, row, sel, hov);
         let ink = row_ink(ui, sel, hov);
@@ -729,7 +734,7 @@ fn list(ui: &mut Ui, f: &FileDlg, r: Rect) {
         let track = Rect::new(body.right() + 1.0, rows.y + 1.0, 9.0, rows.h - 2.0);
         let act = Action::Dlg(DHit::Bar);
         let down = ui.down(track, &act);
-        let hov = ui.hit(track, act, "");
+        let hov = ui.hit(track, act, "Drag to scroll the list");
         kit::scrollbar(ui.c, t, track, true, scroll, rows.h, total, kit::State::new(hov, down, false));
     }
 }
@@ -751,7 +756,7 @@ fn filter_list(ui: &mut Ui, f: &FileDlg, c: Rect, dlg: Rect) {
     let lh = ui.c.line_height(font);
     for (i, flt) in f.filters.iter().enumerate() {
         let row = Rect::new(p.x + 1.0, p.y + 3.0 + i as f32 * 22.0, p.w - 2.0, 22.0);
-        let hov = hit(ui, row, DHit::FilterItem(i), "");
+        let hov = hit(ui, row, DHit::FilterItem(i), "List the files of this type");
         if hov {
             if lemon(ui) {
                 lk::row_highlight(ui.c, t, row);
