@@ -489,8 +489,8 @@ impl FrameWindow {
 
     /// Shows the This clip or Source audio tab.
     /// The This clip or Source audio plugins and automation page it shows, if one.
-    pub fn clip_page(&self) -> Option<crate::clip_page::Tab> {
-        self.f.state.borrow().clip_shown().map(|(t, _)| t)
+    pub fn clip_page(&self) -> Option<(crate::clip_page::Tab, crate::clip_page::Page)> {
+        self.f.state.borrow().clip_shown_page()
     }
 
     pub fn show_clip_tab(&self, tab: crate::clip_page::Tab) {
@@ -790,8 +790,10 @@ impl Frame {
                     }
                     2 => self.state.borrow_mut().middle_down(x, y, &screen),
                     3 => self.state.borrow_mut().right_down(x, y, &screen),
-                    4 => self.state.borrow_mut().wheel(x, y, 1.0),
-                    5 => self.state.borrow_mut().wheel(x, y, -1.0),
+                    4 | 5 => {
+                        let ctrl = u16::from(e.state) & u16::from(KeyButMask::CONTROL) != 0;
+                        self.state.borrow_mut().wheel(x, y, if e.detail == 4 { 1.0 } else { -1.0 }, ctrl)
+                    }
                     _ => Reply::None,
                 };
                 self.reply(r, (e.root_x, e.root_y));

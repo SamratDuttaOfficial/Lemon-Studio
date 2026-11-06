@@ -1085,8 +1085,8 @@ impl Plugins {
     /// The This clip or Source audio page in front: of the windows showing one, the docked one highest in `z`, else a
     /// detached one (the one opened last).
     #[cfg(plugin_windows)]
-    pub fn clip_page(&self, z: &[crate::app::Win]) -> Option<(usize, crate::clip_page::Tab)> {
-        let shows = |r: usize| self.hosted.get(&r).and_then(|h| h.window.as_ref()).and_then(|w| w.clip_page()).map(|t| (r, t));
+    pub fn clip_page(&self, z: &[crate::app::Win]) -> Option<(usize, crate::clip_page::Tab, crate::clip_page::Page)> {
+        let shows = |r: usize| self.hosted.get(&r).and_then(|h| h.window.as_ref()).and_then(|w| w.clip_page()).map(|(t, pg)| (r, t, pg));
         let docked = z.iter().rev().find_map(|w| match w {
             crate::app::Win::Hosted(r) => shows(*r),
             _ => None,
@@ -2211,11 +2211,14 @@ mod tests {
             ],
             from_s: 12.34,
             to_s: 15.12,
+            view: None,
             wave: std::sync::Arc::new(wave.clone()),
+            wave_span: (12.34, 15.12),
             marks: Vec::new(),
             focus: Lane::Volume,
             focus_serial: 0,
             pos: Default::default(),
+            sounds: Default::default(),
         };
         let whole = Side {
             rows: rows(&[("File", "lead vocal take 3.wav"), ("Length", "03:12.000 (192.000 s)"), ("Rate", "48000 Hz"), ("Clips", "5 in the Arranger"), ("Pitch", "As recorded"), ("Volume", "78%"), ("Mixer", "Vocals")]),
@@ -2226,6 +2229,7 @@ mod tests {
             ],
             from_s: 0.0,
             to_s: 192.0,
+            wave_span: (0.0, 192.0),
             marks: vec![
                 Mark { from_s: 12.0, to_s: 15.0, own: vec![Lane::Volume] },
                 Mark { from_s: 30.0, to_s: 42.0, own: Vec::new() },
@@ -2236,6 +2240,8 @@ mod tests {
             ..cut.clone()
         };
         let mut page = PageVals { cut, whole, looping: true };
+        // This clip zoomed in, its view bar showing where.
+        page.cut.view = Some((12.9, 14.6));
         page.cut.pos = crate::clip_page::Pos::At(13.6);
         page.whole.pos = crate::clip_page::Pos::At(13.6);
         let mut pl = Plugins { available: builtin(), scale: 1.0, rate: 48000, ..Plugins::default() };
@@ -2265,6 +2271,72 @@ mod tests {
         click(w, 50, sub_y);
         pump(&mut pl, 300);
         capture(w, &dir.join("clip-tab-5-back.bmp"));
+        pl.drop_key(0);
+        pump(&mut pl, 50);
+    }
+
+    /// The S sounds pages in a real window, with what the app makes of a take: a real recording with `OS_PROBE=<file.wav>`
+    /// (else a made-up one), looked through, zoomed in on a few of its S sounds and one chosen
+    /// (`OS_SHOT_DIR=<dir> cargo test -p os-app --bin lemonstudio s_sounds_shots -- --ignored`).
+    #[test]
+    #[ignore]
+    fn s_sounds_shots() {
+        use crate::clip_page::{Event, Page, Tab};
+        let dir = std::path::PathBuf::from(std::env::var("OS_SHOT_DIR").expect("OS_SHOT_DIR"));
+        let (mut a, row, id) = match std::env::var("OS_PROBE") {
+            Ok(p) => {
+                let mut a = crate::app::App::new(None);
+                crate::playlist::add_audio_clip(&mut a.state, &p, 0, 0).expect("an audio clip");
+                let s = &mut a.state;
+                s.control.settle(&mut s.project);
+                let row = a.state.project.channels.len() - 1;
+                let id = crate::playlist::clips(&a.state).last().unwrap().id.0;
+                a.state.clip_fx.cut.insert(row, id);
+                (a, row, id)
+            }
+            Err(_) => {
+                let (a, row, id, _) = crate::s_sounds::tests::app();
+                (a, row, id)
+            }
+        };
+        let _ = id;
+        crate::s_sounds::tests::looked(&mut a, row, Tab::Whole);
+        // A few seconds around the fifth S sound found, and that one chosen.
+        let v = crate::clip_fx::page_vals(&a.state, row).unwrap();
+        let found = v.whole.sounds.found.clone();
+        let pick = found.get(4).or(found.first()).copied().expect("an S sound");
+        let mid = (pick.from_s + pick.to_s) / 2.0;
+        let total = v.whole.to_s;
+        let (v0, v1) = ((mid - 1.5).max(0.0), (mid + 1.5).min(total));
+        crate::clip_fx::event(&mut a, row, Event::View { tab: Tab::Whole, view: Some((v0, v1)) });
+        crate::clip_fx::event(&mut a, row, Event::Select { tab: Tab::Whole, sel: Some((mid, mid)) });
+        let mut page = crate::clip_fx::page_vals(&a.state, row).unwrap();
+        // This clip's page as it shows in front.
+        a.state.clip_fx.shown = Some((row, Tab::Cut));
+        crate::clip_fx::event(&mut a, row, Event::View { tab: Tab::Cut, view: Some((v0, v1)) });
+        page.cut = crate::clip_fx::page_vals(&a.state, row).unwrap().cut;
+        let _ = Page::Sounds;
+        let mut pl = Plugins { available: builtin(), scale: 1.0, rate: 48000, ..Plugins::default() };
+        let index = pl.index_of(LEMON_SAMPLER).expect("built-in Lemon Sampler");
+        pl.create_with(0, index, None).unwrap();
+        let info = ChannelInfo { name: "vocal take".into(), target: "Vocals".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: Some(Default::default()), clip: Some(Box::new(page)) };
+        pl.open_window(0, info).unwrap();
+        pump(&mut pl, 400);
+        let w = pl.hosted[&0].window.as_ref().unwrap().hwnd();
+        let top_x = |i: i32| 7 + 118 * i + 58;
+        let sub_y = 88;
+        // Source audio: its sub-tabs are Sample, Envelopes, Misc, Plugins & automation, S sounds.
+        click(w, top_x(1), 50);
+        pump(&mut pl, 300);
+        click(w, 463, sub_y);
+        pump(&mut pl, 400);
+        capture(w, &dir.join("s-sounds-1-whole.bmp"));
+        // This clip: Plugins & automation, S sounds.
+        click(w, top_x(0), 50);
+        pump(&mut pl, 300);
+        click(w, 228, sub_y);
+        pump(&mut pl, 400);
+        capture(w, &dir.join("s-sounds-2-cut.bmp"));
         pl.drop_key(0);
         pump(&mut pl, 50);
     }

@@ -176,19 +176,25 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
 - Plugins and automation on a piece of audio. A sample's channel window has two tabs in its strip, and a row of
   sub-tabs under them holds each tab's pages, so it is clear what each page is heard on. Double-clicking an audio clip
   opens the window (Alt+double-click opens straight on This clip; General ▸ Input ▸ Manage shortcuts):
-  - **This clip** is the clip double-clicked. Its one sub-tab, Plugins & automation: which part of the sample it plays,
-    where it stands, its gain and fades, ten plugin slots of its own, and its own automation lines.
-  - **Source audio** is the sample, heard on every clip of it. Its sub-tabs: the sampler's own pages, Misc, and Plugins &
+  - **This clip** is the clip double-clicked. Its sub-tabs, Plugins & automation (which part of the sample it plays,
+    where it stands, its gain and fades, ten plugin slots of its own, and its own automation lines) and S sounds.
+  - **Source audio** is the sample, heard on every clip of it. Its sub-tabs: the sampler's own pages, Misc, Plugins &
     automation (its file, length and clips, ten plugin slots for all of it, and automation lines every clip of it
-    follows). It opens on the sub-tab it was left on.
+    follows) and S sounds. It opens on the sub-tab it was left on.
 
   Both Plugins & automation pages have a time ruler over the lines and the song position's line down them. It is where
   playback starts or is: click or drag the ruler to place it, as on the Arranger's. Where the song position is not on
-  this audio the ruler says so.
+  this audio the ruler says so. Each says what the sound plays through ("Plays through"), and a plugin switched off is
+  marked so (a hollow amber dot, OFF, and "1 OFF, NOT HEARD" over the slots), as it is not heard.
+
+  The lines zoom: Ctrl+wheel zooms at the mouse, the wheel scrolls along, and the view bar under them shows the part in
+  view (drag it along; its buttons zoom out, in, and back to all of it). The waveform under the lines follows the zoom.
 
   Volume and pan show their baseline before anything is drawn: a dashed line labelled "Baseline: 0 dB (as recorded)" or
-  "centre", over a scale of dB steps (or left and right). A reset button for the line shown puts it back to its baseline
-  (on This clip, back to following the source audio's line), and "Reset volume & pan" does both in one undo step.
+  "centre", over a scale of dB steps (or left and right). The values of the scale sit just above their lines, see-through
+  and under the line drawn and its points, so they never hide a line or a point and a click there adds or takes a point
+  as anywhere. A reset button for the line shown puts it back to its baseline (on This clip, back to following the source
+  audio's line), and "Reset volume & pan" does both in one undo step.
 
   While a Plugins & automation page is in front, Play plays just that audio, looped: This clip alone where it is, the
   source audio as the whole file from its start (or where its ruler was clicked). Playing the song when the page comes
@@ -207,6 +213,23 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
   uses none of this is the same file as before. Up to 15 clips of one sample with plugins of their own sound at once; past
   that the rest play without their own plugins while they overlap. Consolidate leaves hosted plugins out here as it does
   on mixer tracks.
+- S sounds: each sample tab's S sounds page finds the hissy consonants in the audio (S, SH and the voiced Z and ZH),
+  tells an S from an SH, and turns one into the other or makes one softer. Nothing to download: classic speech analysis
+  light enough for any computer (`os_dsp::sibilant`).
+  - The page is a picture of the sound's frequencies over time (louder brighter, the mel scale up to 16 kHz), with the
+    waveform under it and the S sounds found marked over it (S green, SH amber), zoomed as the lines are. The audio is
+    looked through on a thread of its own when the page first shows (a 52 s take in about a tenth of a second); Look
+    again looks once more.
+  - S or SH goes by the hiss's centre of gravity (spectral moments: an S's sits higher). Where the two part is learned
+    from the audio itself, so it fits the voice; the picture marks where this voice's S and SH sit.
+  - Drag across the picture to choose a part (a click on a mark chooses that sound; S sound before and after step through
+    them); the page says what the part sounds like. Make it an S, an SH, or softer, by How far (0 to 100%): the part's
+    spectrum is turned into the voice's own S's (or SH's) where the audio has some, else moved up or down to where the
+    other sits; the noise itself stays, nothing below 1.2 kHz changes and nothing outside the part moves. Play the part
+    loops it (so does Space while it is chosen).
+  - A change writes a new copy of the channel's audio to the data folder's Edited folder and gives the channel that
+    copy: one undo step, heard on every clip of the file. On This clip the message says when other clips play the same
+    part (they change with it).
 - Playlist stretch mode (Shift+M)
 - One open-source stretcher (Signalsmith Stretch) plays every method, so the sound differs from the
   original stretchers

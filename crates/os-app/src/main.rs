@@ -35,6 +35,8 @@ mod score_log;
 mod clip_colors;
 mod clip_fx;
 mod clip_page;
+mod s_page;
+mod s_sounds;
 mod clock;
 mod control;
 mod cpu;

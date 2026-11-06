@@ -19,6 +19,7 @@
 //! - [`flow`]: Fit to tempo, a take's syllables moved onto the beat grid as its flow reads.
 //! - [`syllables`]: where a voice's syllables, attacks, silences and voiced stretches are, from the sound alone.
 //! - [`retime`]: a voice's time map from anchors, the time taken where it is least heard.
+//! - [`sibilant`]: S sounds in a voice: found, told apart (S, SH), changed one into the other.
 //! - [`warp`]: audio played through a time map (WSOLA), for the retiming tools.
 //! - [`num`]: the plugin pages' arithmetic (`single( )`, Round, flushes) and a little-endian state reader.
 //!
@@ -37,6 +38,7 @@ pub mod mixer;
 pub mod num;
 pub mod resample;
 pub mod retime;
+pub mod sibilant;
 pub mod stretch;
 pub mod syllables;
 pub mod tone;

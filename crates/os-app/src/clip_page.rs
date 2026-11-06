@@ -5,7 +5,10 @@
 //! The plugin window's This clip and Source audio tabs on a sample's channel (`os_model::clip_fx`): what the piece or the
 //! whole sample is, its plugins, and its automation lanes over its waveform. The frame draws the page in place of the
 //! plugin's editor, as it does the Misc tab; values come from the app (`crate::clip_fx::page_vals`), edits go back to it as
-//! [`Event`]s. A lane being dragged is kept here until the button is let go: one edit, one undo step.
+//! [`Event`]s. A lane being dragged is kept here until the button is let go: one edit, one undo step. Each tab has a
+//! second page, its S sounds (`crate::s_page`), which this module hands its input and drawing to while it shows. Both
+//! pages zoom: Ctrl+wheel at the mouse, the wheel scrolls, the view bar under the picture shows the part in view and
+//! drags it, its buttons zoom out, in and back to all of it.
 
 use std::sync::Arc;
 
@@ -41,6 +44,14 @@ impl Tab {
             Tab::Whole => "Source audio: the sampler, Misc, plugins and automation of the whole file, heard on every clip of it",
         }
     }
+}
+
+/// Which page of a tab shows: its plugins and automation, or its S sounds (`crate::s_page`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Page {
+    #[default]
+    Fx,
+    Sounds,
 }
 
 /// Where the song position stands on a tab.
@@ -98,14 +109,19 @@ pub struct Side {
     /// The part of the sample the lane editor spans, in seconds.
     pub from_s: f64,
     pub to_s: f64,
-    /// Peaks (min, max) of that part, one per column of the lane editor.
+    /// The part shown when zoomed in (seconds of the sample, inside `from_s..to_s`); `None`: all of it.
+    pub view: Option<(f64, f64)>,
+    /// Peaks (min, max) of `wave_span`, one per column of the lane editor.
     pub wave: Arc<Vec<(f32, f32)>>,
+    pub wave_span: (f64, f64),
     pub marks: Vec<Mark>,
     /// The lane the app wants shown (a lane just added): a newer `focus_serial` takes over from the user's last choice.
     pub focus: Lane,
     pub focus_serial: u32,
     /// Where the song position is here.
     pub pos: Pos,
+    /// The S sounds page's values.
+    pub sounds: crate::s_page::Sounds,
 }
 
 impl Default for Side {
@@ -117,11 +133,14 @@ impl Default for Side {
             lanes: Vec::new(),
             from_s: 0.0,
             to_s: 1.0,
+            view: None,
             wave: Arc::default(),
+            wave_span: (0.0, 1.0),
             marks: Vec::new(),
             focus: Lane::Volume,
             focus_serial: 0,
             pos: Pos::Away,
+            sounds: crate::s_page::Sounds::default(),
         }
     }
 }
@@ -143,7 +162,7 @@ impl PageVals {
         }
     }
 
-    fn side_mut(&mut self, t: Tab) -> &mut Side {
+    pub(crate) fn side_mut(&mut self, t: Tab) -> &mut Side {
         match t {
             Tab::Cut => &mut self.cut,
             Tab::Whole => &mut self.whole,
@@ -174,6 +193,16 @@ impl PageVals {
                     l.own.clear();
                 }
             }
+            Event::View { tab, view } => self.side_mut(*tab).view = *view,
+            Event::Select { tab, sel } => {
+                let s = &mut self.side_mut(*tab).sounds;
+                s.sel = *sel;
+                s.heard = None;
+            }
+            Event::Strength { k, .. } => {
+                self.cut.sounds.strength = *k;
+                self.whole.sounds.strength = *k;
+            }
             _ => {}
         }
     }
@@ -202,6 +231,18 @@ pub enum Event {
     ResetLanes { tab: Tab, lanes: Vec<Lane> },
     /// The loop switch: whether Play plays just this audio, looped, while the page shows.
     Loop { tab: Tab, on: bool },
+    /// Zoomed or scrolled: the part of the sample in view (`None`: all of it).
+    View { tab: Tab, view: Option<(f64, f64)> },
+    /// The S sounds page: the part chosen, seconds of the sample (`None`: none).
+    Select { tab: Tab, sel: Option<(f64, f64)> },
+    /// The part chosen made an S, an SH, or softer.
+    ChangeS { tab: Tab, from: f64, to: f64, into: os_dsp::sibilant::Change },
+    /// How far a change goes, 0..1.
+    Strength { tab: Tab, k: f32 },
+    /// Look through the audio for its S sounds again.
+    FindS { tab: Tab },
+    /// Play the part chosen, looped (or stop).
+    PlayPart { tab: Tab },
 }
 
 /// Mouse buttons the page takes.
@@ -224,21 +265,29 @@ pub enum Press {
 
 /// A drag in progress.
 #[derive(Clone, Debug, PartialEq)]
-enum Drag {
+pub(crate) enum Drag {
     Point { lane: Lane, i: usize, moved: bool },
     Mix { slot: u8, mix: f32 },
     /// The time ruler: where the song position is being put.
     Pos { at: f64 },
+    /// The view bar's handle, held this many seconds after the view's start.
+    View { grab: f64 },
+    /// A part being chosen on the S sounds page: from `anchor` to `at`.
+    Sel { anchor: f64, at: f64, moved: bool },
+    /// The S sounds page's strength bar.
+    Strength { k: f32 },
 }
 
-/// The page's own state: per tab the lane shown, what is being dragged, the hint.
+/// The page's own state: per tab the page and lane shown, what is being dragged, the hint.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct PageUi {
+    /// The page each tab shows.
+    pages: [Page; 2],
     /// The lane the user chose per tab, with the `focus_serial` it was chosen under.
     chosen: [Option<(Lane, u32)>; 2],
     /// Rows of the lane list scrolled away, per tab.
     scroll: [usize; 2],
-    drag: Option<Drag>,
+    pub(crate) drag: Option<Drag>,
     /// The lane being edited, while the drag lasts.
     preview: Option<Vec<AutoPoint>>,
     /// Under the mouse.
@@ -250,6 +299,19 @@ pub struct PageUi {
 impl PageUi {
     pub fn dragging(&self) -> bool {
         self.drag.is_some()
+    }
+
+    /// The page tab `t` shows.
+    pub fn page(&self, t: Tab) -> Page {
+        self.pages[tab_at(t)]
+    }
+
+    pub fn set_page(&mut self, t: Tab, p: Page) {
+        self.pages[tab_at(t)] = p;
+        self.drag = None;
+        self.preview = None;
+        self.hover = None;
+        self.hint.clear();
     }
 }
 
@@ -274,6 +336,20 @@ pub enum Hit {
     Plot,
     /// The time ruler over the lane editor: it places the song position.
     Ruler,
+    /// The view bar under the picture, and its zoom buttons (0 out, 1 in, 2 all of it).
+    ViewBar,
+    Zoom(u8),
+    /// The S sounds page: its picture (the spectrum over time), the strip of sounds found over it, a found sound there.
+    Picture,
+    Found(usize),
+    /// Its buttons: make the part an S, an SH, softer; the strength bar; play the part; look again; the sound found
+    /// before or after.
+    Make(os_dsp::sibilant::Change),
+    Strength,
+    PlayPart,
+    Look,
+    Prev,
+    Next,
 }
 
 fn tab_at(t: Tab) -> usize {
@@ -295,6 +371,12 @@ const BOTTOM: f32 = PAGE_H - 8.0;
 const AXIS_H: f32 = 16.0;
 const RULER_H: f32 = 16.0;
 const PLOT_Y: f32 = INFO_H + 32.0;
+
+/// The view bar's height and a zoom button's width.
+const BAR_H: f32 = 12.0;
+const ZOOM_W: f32 = 22.0;
+/// The shortest part a view shows, seconds.
+const MIN_VIEW: f64 = 0.04;
 
 fn rows_shown() -> usize {
     ((BOTTOM - LANES_Y) / ROW_H) as usize
@@ -347,6 +429,11 @@ fn vol_pan_own(side: &Side) -> Vec<Lane> {
     side.lanes.iter().filter(|l| matches!(l.lane, Lane::Volume | Lane::Pan) && !l.own.is_empty()).map(|l| l.lane).collect()
 }
 
+/// Where the view bar is, under the plot.
+fn bar_y() -> f32 {
+    plot_rect().bottom() + 3.0
+}
+
 /// The time ruler over the lane editor's plot.
 pub fn ruler_rect() -> Rect {
     Rect::new(RIGHT_X, PLOT_Y, plot_rect().w, RULER_H)
@@ -380,15 +467,168 @@ fn points<'a>(ui: &'a PageUi, lane: &'a LaneVals) -> &'a [AutoPoint] {
     }
 }
 
-/// Seconds of the sample at plot x, and the x of a time.
-fn x_to_s(side: &Side, plot: Rect, x: f32) -> f64 {
-    let f = f64::from(((x - plot.x) / plot.w.max(1.0)).clamp(0.0, 1.0));
-    side.from_s + f * (side.to_s - side.from_s)
+/// The part of the sample in view: the zoomed part, kept inside the sample, or all of it.
+pub fn view_of(side: &Side) -> (f64, f64) {
+    let (a, b) = (side.from_s, side.to_s.max(side.from_s + 1e-6));
+    match side.view {
+        Some((x, y)) if y > x => {
+            let w = (y - x).min(b - a);
+            let x = x.clamp(a, b - w);
+            (x, x + w)
+        }
+        _ => (a, b),
+    }
 }
 
-fn s_to_x(side: &Side, plot: Rect, s: f64) -> f32 {
+/// The view zoomed by `k` (under 1: in) around second `at`, which stays where it is on screen; `None` when that is all
+/// of the sample.
+pub(crate) fn zoomed(side: &Side, k: f64, at: f64) -> Option<(f64, f64)> {
+    let (a, b) = view_of(side);
+    let full = (side.to_s - side.from_s).max(1e-6);
+    let w = ((b - a) * k).clamp(MIN_VIEW.min(full), full);
+    if w >= full * 0.999 {
+        return None;
+    }
+    let f = ((at - a) / (b - a).max(1e-9)).clamp(0.0, 1.0);
+    let x = (at - f * w).clamp(side.from_s, side.to_s - w);
+    Some((x, x + w))
+}
+
+/// The view moved by `by` of its width (negative: back); `None` while all of the sample shows.
+pub(crate) fn scrolled(side: &Side, by: f64) -> Option<(f64, f64)> {
+    side.view?;
+    let (a, b) = view_of(side);
+    let w = b - a;
+    let x = (a + by * w).clamp(side.from_s, side.to_s - w);
+    Some((x, x + w))
+}
+
+/// Seconds of the sample at x on a plot `plot` wide, and the x of a time: through the view.
+pub(crate) fn x_to_s(side: &Side, plot: Rect, x: f32) -> f64 {
+    let (a, b) = view_of(side);
+    let f = f64::from(((x - plot.x) / plot.w.max(1.0)).clamp(0.0, 1.0));
+    a + f * (b - a)
+}
+
+pub(crate) fn s_to_x(side: &Side, plot: Rect, s: f64) -> f32 {
+    let (a, b) = view_of(side);
+    plot.x + ((s - a) / (b - a).max(1e-9)) as f32 * plot.w
+}
+
+/// The view bar under a plot `plot` wide, at `y`: the whole sample, the part in view its handle.
+pub(crate) fn bar_rect(plot: Rect, y: f32) -> Rect {
+    Rect::new(plot.x, y, plot.w - 3.0 * ZOOM_W - 6.0, BAR_H)
+}
+
+/// Its zoom buttons: out, in, all of it.
+pub(crate) fn zoom_rect(plot: Rect, y: f32, i: u8) -> Rect {
+    Rect::new(plot.right() - f32::from(3 - i) * ZOOM_W + 2.0, y - 2.0, ZOOM_W - 2.0, BAR_H + 4.0)
+}
+
+/// The handle: the view's part of the bar, at least 10 px.
+fn thumb(side: &Side, bar: Rect) -> Rect {
+    let (a, b) = view_of(side);
     let span = (side.to_s - side.from_s).max(1e-9);
-    plot.x + ((s - side.from_s) / span) as f32 * plot.w
+    let x0 = bar.x + ((a - side.from_s) / span) as f32 * bar.w;
+    let w = (((b - a) / span) as f32 * bar.w).max(10.0).min(bar.w);
+    Rect::new(x0.min(bar.right() - w), bar.y, w, bar.h)
+}
+
+/// A press on the view bar at x: on the handle it is held; beside it the view jumps there.
+pub(crate) fn bar_press(ui: &mut PageUi, side: &Side, tab: Tab, bar: Rect, x: f32, out: &mut Vec<Event>) -> Press {
+    let (a, b) = view_of(side);
+    let th = thumb(side, bar);
+    let span = side.to_s - side.from_s;
+    let at = side.from_s + f64::from(((x - bar.x) / bar.w.max(1.0)).clamp(0.0, 1.0)) * span;
+    if side.view.is_none() {
+        return Press::Nothing;
+    }
+    if !th.contains(x, th.cy()) {
+        let w = b - a;
+        let x0 = (at - w / 2.0).clamp(side.from_s, side.to_s - w);
+        out.push(Event::View { tab, view: Some((x0, x0 + w)) });
+        ui.drag = Some(Drag::View { grab: w / 2.0 });
+        return Press::Capture;
+    }
+    ui.drag = Some(Drag::View { grab: at - a });
+    Press::Capture
+}
+
+/// The held handle at x: the view there.
+pub(crate) fn bar_drag(side: &Side, tab: Tab, bar: Rect, grab: f64, x: f32, out: &mut Vec<Event>) {
+    let (a, b) = view_of(side);
+    let w = b - a;
+    let span = side.to_s - side.from_s;
+    let at = side.from_s + f64::from(((x - bar.x) / bar.w.max(1.0)).clamp(0.0, 1.0)) * span;
+    let x0 = (at - grab).clamp(side.from_s, side.to_s - w);
+    if (x0 - a).abs() > 1e-9 {
+        out.push(Event::View { tab, view: Some((x0, x0 + w)) });
+    }
+}
+
+/// Zoom button `i`: out, in (around the middle), all of it.
+pub(crate) fn zoom_press(side: &Side, tab: Tab, i: u8, out: &mut Vec<Event>) -> Press {
+    let (a, b) = view_of(side);
+    let view = match i {
+        0 => zoomed(side, 2.0, (a + b) / 2.0),
+        1 => zoomed(side, 0.5, (a + b) / 2.0),
+        _ => None,
+    };
+    if view == side.view {
+        return Press::Nothing;
+    }
+    out.push(Event::View { tab, view });
+    Press::Repaint
+}
+
+/// The wheel over a plot `plot` wide at x: Ctrl zooms at the mouse (up: in), else it scrolls the view (up: back).
+pub(crate) fn view_wheel(side: &Side, tab: Tab, plot: Rect, x: f32, notches: f32, ctrl: bool, out: &mut Vec<Event>) -> bool {
+    if notches == 0.0 {
+        return false;
+    }
+    let view = if ctrl { zoomed(side, 0.8f64.powf(f64::from(notches)), x_to_s(side, plot, x)) } else { scrolled(side, -0.15 * f64::from(notches)) };
+    if view == side.view || (!ctrl && view.is_none()) {
+        return false;
+    }
+    out.push(Event::View { tab, view });
+    true
+}
+
+/// The view bar and its zoom buttons.
+pub(crate) fn paint_bar(c: &mut Canvas, p: &Palette, ox: f32, oy: f32, side: &Side, bar: Rect, plot: Rect, hover: Option<Hit>) {
+    let at = |r: Rect| Rect::new(r.x + ox, r.y + oy, r.w, r.h);
+    let b = at(bar);
+    c.fill_rrect(b, 3.0, p.s(0x1b1f21));
+    let th = at(thumb(side, bar));
+    let zoomed_in = side.view.is_some();
+    let face = if !zoomed_in { p.s(0x2b3134) } else if hover == Some(Hit::ViewBar) { p.a(0x49f1b1).with_alpha(150) } else { p.a(0x49f1b1).with_alpha(95) };
+    c.fill_rrect(th, 3.0, face);
+    if !zoomed_in {
+        c.text_center(Font::new(10), b, p.tx(0x8c9296), "All of it in view: Ctrl+wheel or + to zoom in");
+    }
+    let icons = [&os_ui::tabler::MINUS, &os_ui::tabler::PLUS, &os_ui::tabler::MAXIMIZE];
+    for (i, icon) in icons.into_iter().enumerate() {
+        let r = at(zoom_rect(plot, bar.y, i as u8));
+        let on = match i {
+            0 | 2 => zoomed_in,
+            _ => (view_of(side).1 - view_of(side).0) > MIN_VIEW * 1.01,
+        };
+        let hov = hover == Some(Hit::Zoom(i as u8));
+        c.fill_rrect(r, 3.0, if on && hov { p.s(0x3a4043) } else { p.s(0x2b2f31) });
+        c.icon(icon, Rect::new(r.cx() - 6.0, r.cy() - 6.0, 12.0, 12.0), if on { p.tx(0xd4dade) } else { p.tx(0x5a6064) });
+    }
+}
+
+/// What a zoom button or the view bar says.
+pub(crate) fn view_hint(side: &Side, h: Hit) -> String {
+    let (a, b) = view_of(side);
+    match h {
+        Hit::Zoom(0) => "Zoom out".into(),
+        Hit::Zoom(1) => "Zoom in (Ctrl+wheel over the picture zooms where the mouse is)".into(),
+        Hit::Zoom(_) => "Show all of it".into(),
+        _ if side.view.is_none() => "All of it is in view: zoom in with Ctrl+wheel or the + button".into(),
+        _ => format!("In view: {} to {} ({:.3} s). Drag to move along; the wheel scrolls", time_text(a), time_text(b), b - a),
+    }
 }
 
 /// A lane's value at plot y (the top is 1), and the y of a value.
@@ -420,6 +660,9 @@ pub fn hit(ui: &PageUi, vals: &PageVals, tab: Tab, x: f32, y: f32) -> Option<Hit
     let side = vals.side(tab);
     if !side.available {
         return None;
+    }
+    if ui.page(tab) == Page::Sounds {
+        return crate::s_page::hit(ui, vals, tab, x, y);
     }
     if loop_rect().contains(x, y) {
         return Some(Hit::Loop);
@@ -453,6 +696,16 @@ pub fn hit(ui: &PageUi, vals: &PageVals, tab: Tab, x: f32, y: f32) -> Option<Hit
     if ruler_rect().contains(x, y) {
         return Some(Hit::Ruler);
     }
+    let by = bar_y();
+    for i in 0..3u8 {
+        if zoom_rect(plot_rect(), by, i).contains(x, y) {
+            return Some(Hit::Zoom(i));
+        }
+    }
+    let bar = bar_rect(plot_rect(), by);
+    if Rect::new(bar.x, bar.y - 2.0, bar.w, bar.h + 4.0).contains(x, y) {
+        return Some(Hit::ViewBar);
+    }
     let lane = shown(ui, side, tab)?;
     if clear_rect().contains(x, y) {
         return Some(Hit::Clear);
@@ -467,6 +720,9 @@ pub fn hit(ui: &PageUi, vals: &PageVals, tab: Tab, x: f32, y: f32) -> Option<Hit
 /// A press at page point (x, y). `screen` gives the screen point of a page point, for the app's menus.
 pub fn press(ui: &mut PageUi, vals: &PageVals, tab: Tab, x: f32, y: f32, b: Button, screen: &dyn Fn(f32, f32) -> (i32, i32), out: &mut Vec<Event>) -> Press {
     let side = vals.side(tab);
+    if side.available && ui.page(tab) == Page::Sounds {
+        return crate::s_page::press(ui, vals, tab, x, y, b, out);
+    }
     let Some(h) = hit(ui, vals, tab, x, y) else { return Press::Nothing };
     let (sx, sy) = screen(x, y);
     match (b, h) {
@@ -521,6 +777,8 @@ pub fn press(ui: &mut PageUi, vals: &PageVals, tab: Tab, x: f32, y: f32, b: Butt
             out.push(Event::SetPos { tab, at });
             Press::Capture
         }
+        (Button::Left, Hit::ViewBar) => bar_press(ui, side, tab, bar_rect(plot_rect(), bar_y()), x, out),
+        (Button::Left, Hit::Zoom(i)) => zoom_press(side, tab, i, out),
         (Button::Left, Hit::Point(i)) => {
             let Some(l) = shown(ui, side, tab) else { return Press::Nothing };
             ui.preview = Some(l.own.clone());
@@ -556,9 +814,12 @@ fn mix_at(k: u8, x: f32) -> f32 {
     ((x - r.x) / r.w).clamp(0.0, 1.0)
 }
 
-/// The mouse moved while a drag lasts (or not): whether the page changed.
-pub fn motion(ui: &mut PageUi, vals: &PageVals, tab: Tab, x: f32, y: f32) -> bool {
+/// The mouse moved while a drag lasts (or not): whether the page changed. A drag of the view sends where it is now.
+pub fn motion(ui: &mut PageUi, vals: &PageVals, tab: Tab, x: f32, y: f32, out: &mut Vec<Event>) -> bool {
     let side = vals.side(tab);
+    if side.available && ui.page(tab) == Page::Sounds {
+        return crate::s_page::motion(ui, vals, tab, x, y, out);
+    }
     match ui.drag.clone() {
         Some(Drag::Point { lane, i, .. }) => {
             let plot = plot_rect();
@@ -581,6 +842,12 @@ pub fn motion(ui: &mut PageUi, vals: &PageVals, tab: Tab, x: f32, y: f32) -> boo
             ui.hint = format!("Song position: {}", time_text(at));
             true
         }
+        Some(Drag::View { grab }) => {
+            bar_drag(side, tab, bar_rect(plot_rect(), bar_y()), grab, x, out);
+            ui.hint = view_hint(side, Hit::ViewBar);
+            true
+        }
+        Some(Drag::Sel { .. } | Drag::Strength { .. }) => false,
         None => {
             let h = hit(ui, vals, tab, x, y);
             let changed = h != ui.hover;
@@ -595,6 +862,9 @@ pub fn motion(ui: &mut PageUi, vals: &PageVals, tab: Tab, x: f32, y: f32) -> boo
 
 /// The button was let go: a drag's result goes to the app.
 pub fn release(ui: &mut PageUi, tab: Tab, out: &mut Vec<Event>) {
+    if ui.page(tab) == Page::Sounds {
+        return crate::s_page::release(ui, tab, out);
+    }
     match ui.drag.take() {
         Some(Drag::Point { lane, moved: true, .. }) => {
             if let Some(points) = ui.preview.take() {
@@ -608,9 +878,21 @@ pub fn release(ui: &mut PageUi, tab: Tab, out: &mut Vec<Event>) {
     ui.preview = None;
 }
 
-/// The wheel over the page: it scrolls the lane list. Whether anything moved.
-pub fn wheel(ui: &mut PageUi, vals: &PageVals, tab: Tab, y: f32, notches: f32) -> bool {
-    if y < LANES_Y || notches == 0.0 {
+/// The wheel over the page at (x, y): over the lane list it scrolls the list; over the plot it scrolls the view, or with
+/// Ctrl zooms it at the mouse. Whether anything moved.
+#[allow(clippy::too_many_arguments)]
+pub fn wheel(ui: &mut PageUi, vals: &PageVals, tab: Tab, x: f32, y: f32, notches: f32, ctrl: bool, out: &mut Vec<Event>) -> bool {
+    let side = vals.side(tab);
+    if !side.available || notches == 0.0 {
+        return false;
+    }
+    if ui.page(tab) == Page::Sounds {
+        return crate::s_page::wheel(vals, tab, x, y, notches, ctrl, out);
+    }
+    if x >= RIGHT_X && y >= PLOT_Y {
+        return view_wheel(side, tab, plot_rect(), x, notches, ctrl, out);
+    }
+    if y < LANES_Y || x >= RIGHT_X {
         return false;
     }
     let rows = vals.side(tab).lanes.len() + 1;
@@ -653,14 +935,19 @@ fn hint_of(ui: &PageUi, vals: &PageVals, tab: Tab, h: Option<Hit>, x: f32, y: f3
     let side = vals.side(tab);
     let Some(h) = h else { return String::new() };
     match h {
-        Hit::SlotName(k) => match side.slots.get(usize::from(k)).and_then(|s| s.name.as_ref()) {
-            Some(n) => format!("{n}: click to open, right-click for its menu"),
-            None => match tab {
+        Hit::SlotName(k) => match side.slots.get(usize::from(k)) {
+            Some(SlotVals { name: Some(n), on: false, .. }) => format!("{n} is off, so it is not heard: click the dot to turn it on; click to open, right-click for its menu"),
+            Some(SlotVals { name: Some(n), .. }) => format!("{n}: click to open, right-click for its menu"),
+            _ => match tab {
                 Tab::Cut => "Add a plugin to this clip only".into(),
                 Tab::Whole => "Add a plugin to the source audio, heard on every clip of it".into(),
             },
         },
-        Hit::SlotLed(_) => "Plugin on / off".into(),
+        Hit::SlotLed(k) => match side.slots.get(usize::from(k)) {
+            Some(SlotVals { name: Some(n), on: true, .. }) => format!("{n} is on: click to turn it off (it is then not heard)"),
+            Some(SlotVals { name: Some(n), .. }) => format!("{n} is off, so it is not heard: click to turn it on"),
+            _ => "Plugin on / off".into(),
+        },
         Hit::SlotMix(k) => format!("Mix: {:.0}%", side.slots.get(usize::from(k)).map_or(100.0, |s| s.mix * 100.0)),
         Hit::LaneRow(i) => side.lanes.get(i).map_or(String::new(), |l| format!("Show the {} line", l.name)),
         Hit::AddLane => "Automate a parameter of a plugin here".into(),
@@ -698,6 +985,8 @@ fn hint_of(ui: &PageUi, vals: &PageVals, tab: Tab, h: Option<Hit>, x: f32, y: f3
             let Some(l) = shown(ui, side, tab) else { return String::new() };
             format!("Click to add a point: {}  at {}", value_text(l.lane, y_to_v(plot, y)), time_text(x_to_s(side, plot, x)))
         }
+        Hit::ViewBar | Hit::Zoom(_) => view_hint(side, h),
+        Hit::Picture | Hit::Found(_) | Hit::Make(_) | Hit::Strength | Hit::PlayPart | Hit::Look | Hit::Prev | Hit::Next => String::new(),
     }
 }
 
@@ -737,6 +1026,9 @@ pub fn paint(c: &mut Canvas, p: &Palette, ox: f32, oy: f32, vals: &PageVals, ui:
     let side = vals.side(tab);
     let at = |r: Rect| Rect::new(r.x + ox, r.y + oy, r.w, r.h);
     let (text, dim, line) = (p.tx(0xd4dade), p.tx(0x8c9296), p.s(0x13191d));
+    if side.available && ui.page(tab) == Page::Sounds {
+        return crate::s_page::paint(c, p, ox, oy, vals, ui, tab);
+    }
     if !side.available {
         let msg = "Double-click a clip of this audio in the Arranger to see it here.";
         c.text_center(Font::new(15), at(Rect::new(0.0, 0.0, PAGE_W, PAGE_H)), dim, msg);
@@ -751,6 +1043,17 @@ pub fn paint(c: &mut Canvas, p: &Palette, ox: f32, oy: f32, vals: &PageVals, ui:
         Tab::Cut => "PLUGINS ON THIS CLIP",
         Tab::Whole => "PLUGINS ON THE SOURCE AUDIO",
     });
+    // A plugin switched off is not heard: the heading says so, as the row does.
+    let off = side.slots.iter().filter(|s| s.name.is_some() && !s.on).count();
+    if off > 0 {
+        let h = match tab {
+            Tab::Cut => "PLUGINS ON THIS CLIP",
+            Tab::Whole => "PLUGINS ON THE SOURCE AUDIO",
+        };
+        let x = ox + LEFT_X + c.text_width(Font::condensed(11, 4).bold(), h) + 8.0;
+        let note = if off == 1 { "1 OFF, NOT HEARD".to_string() } else { format!("{off} OFF, NOT HEARD") };
+        c.text(Font::condensed(11, 4).bold(), x, oy + SLOTS_Y - 17.0, p.a(0xffb454), &note);
+    }
     for (k, s) in side.slots.iter().enumerate().take(SLOTS) {
         slot_row(c, p, at(slot_rect(k)), k, s, ui, ox, oy);
     }
@@ -788,6 +1091,7 @@ pub fn paint(c: &mut Canvas, p: &Palette, ox: f32, oy: f32, vals: &PageVals, ui:
         };
         plot(c, p, ox, oy, side, l, pts, tab, pos);
         ruler(c, p, ox, oy, side, tab, pos);
+        paint_bar(c, p, ox, oy, side, bar_rect(plot_rect(), bar_y()), plot_rect(), ui.hover);
     }
 }
 
@@ -795,18 +1099,23 @@ pub fn paint(c: &mut Canvas, p: &Palette, ox: f32, oy: f32, vals: &PageVals, ui:
 /// this audio it says so, so the missing line explains itself.
 #[allow(clippy::too_many_arguments)]
 fn ruler(c: &mut Canvas, p: &Palette, ox: f32, oy: f32, side: &Side, tab: Tab, pos: Pos) {
-    let plot = plot_rect();
-    let r0 = ruler_rect();
+    ruler_in(c, p, ox, oy, side, tab, pos, plot_rect(), ruler_rect());
+}
+
+/// A time ruler at `r0` over a plot `plot` wide (page coordinates).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn ruler_in(c: &mut Canvas, p: &Palette, ox: f32, oy: f32, side: &Side, tab: Tab, pos: Pos, plot: Rect, r0: Rect) {
     let r = Rect::new(r0.x + ox, r0.y + oy, r0.w, r0.h);
+    let (from_s, to_s) = view_of(side);
     c.fill_rect(r, p.ruler);
     c.push_clip(r);
     let f = Font::new(11);
-    let span = (side.to_s - side.from_s).max(1e-6);
+    let span = (to_s - from_s).max(1e-6);
     // A label about every 90 px.
     let want = span * 90.0 / f64::from(r.w.max(1.0));
-    let step = [0.01, 0.02, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 15.0, 30.0, 60.0, 120.0, 300.0, 600.0].into_iter().find(|&k| k >= want).unwrap_or(1200.0);
-    let mut k = (side.from_s / step).ceil();
-    while k * step <= side.to_s {
+    let step = [0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 15.0, 30.0, 60.0, 120.0, 300.0, 600.0].into_iter().find(|&k| k >= want).unwrap_or(1200.0);
+    let mut k = (from_s / step).ceil();
+    while k * step <= to_s {
         let s = k * step;
         let x = s_to_x(side, plot, s) + ox;
         c.fill_rect(Rect::new(x.round(), r.bottom() - 4.0, 1.0, 4.0), p.ruler_text.with_alpha(150));
@@ -814,8 +1123,9 @@ fn ruler(c: &mut Canvas, p: &Palette, ox: f32, oy: f32, side: &Side, tab: Tab, p
         k += 1.0;
     }
     match pos {
+        Pos::At(s) if !(from_s..=to_s).contains(&s) => {}
         Pos::At(s) => {
-            let x = s_to_x(side, plot, s.clamp(side.from_s, side.to_s)) + ox;
+            let x = s_to_x(side, plot, s) + ox;
             let (y0, k) = (r.y + 0.5, 9.0);
             c.fill_polygon(&[(x - 0.5, y0 - 0.5), (x + k + 1.0, y0 - 0.5), (x - 0.5, y0 + k + 1.0)], p.s(0x0b1114));
             c.fill_polygon(&[(x, y0), (x + k, y0), (x, y0 + k)], p.playhead);
@@ -843,8 +1153,10 @@ fn short_time(s: f64, step: f64) -> String {
         format!("{m:.0}:{rest:02.0}")
     } else if step >= 0.1 {
         format!("{m:.0}:{rest:04.1}")
-    } else {
+    } else if step >= 0.01 {
         format!("{m:.0}:{rest:05.2}")
+    } else {
+        format!("{m:.0}:{rest:06.3}")
     }
 }
 
@@ -871,9 +1183,20 @@ fn slot_row(c: &mut Canvas, p: &Palette, r: Rect, k: usize, s: &SlotVals, ui: &P
     let f = Font::new(13);
     match &s.name {
         Some(name) => {
-            let led = if s.on { p.a(0x47f49a) } else { p.s(0x3a3f42) };
-            c.fill_circle(r.x + 10.0, r.y + r.h / 2.0, 4.0, led);
-            c.text_clip(f, r.x + 22.0, r.y + 1.0, r.w - 74.0, if s.on { text } else { dim }, name);
+            if s.on {
+                c.fill_circle(r.x + 10.0, r.y + r.h / 2.0, 4.0, p.a(0x47f49a));
+                c.text_clip(f, r.x + 22.0, r.y + 1.0, r.w - 74.0, text, name);
+            } else {
+                // Off: a hollow amber dot and the word, so a plugin that is not heard is never mistaken for one that is.
+                c.stroke_circle(r.x + 10.0, r.y + r.h / 2.0, 4.0, 1.5, p.a(0xffb454));
+                let tag = Font::condensed(10, 3).bold();
+                let tw = c.text_width(tag, "OFF") + 8.0;
+                let name_w = c.text_width(f, name).min(r.w - 74.0 - tw - 6.0);
+                c.text_clip(f, r.x + 22.0, r.y + 1.0, name_w, dim, name);
+                let b = Rect::new(r.x + 22.0 + name_w + 6.0, r.y + 4.0, tw, r.h - 8.0);
+                c.fill_rrect(b, 2.0, p.a(0xffb454).with_alpha(50));
+                c.text_center(tag, b, p.a(0xffb454), "OFF");
+            }
             let m = mix_rect(k);
             let m = Rect::new(m.x + ox, m.y + oy, m.w, m.h);
             c.fill_rect(m, p.s(0x2b2f31));
@@ -916,6 +1239,33 @@ fn lane_line(side: &Side, r: Rect, pts: &[AutoPoint], plot: Rect) -> Vec<(f32, f
     v
 }
 
+/// The waveform of `side` (its `wave`, over `wave_span`) across `r`, a plot `plot` wide (page coordinates) drawn at
+/// `r` (screen), in colour `col`.
+pub(crate) fn wave_shape(c: &mut Canvas, side: &Side, plot: Rect, r: Rect, col: Color) {
+    if side.wave.is_empty() {
+        return;
+    }
+    let (mid, amp) = (r.y + r.h / 2.0, r.h / 2.0 - 2.0);
+    let n = side.wave.len();
+    let (w0, w1) = side.wave_span;
+    let per = (w1 - w0) / n as f64;
+    let mut top = Vec::with_capacity(n);
+    let mut bottom = Vec::with_capacity(n);
+    for (i, &(lo, hi)) in side.wave.iter().enumerate() {
+        let x = s_to_x(side, plot, w0 + (i as f64 + 0.5) * per) - plot.x + r.x;
+        if x < r.x - 2.0 || x > r.right() + 2.0 {
+            continue;
+        }
+        top.push((x, mid - hi.clamp(-1.0, 1.0) * amp));
+        bottom.push((x, mid - lo.clamp(-1.0, 1.0) * amp));
+    }
+    if top.len() < 2 {
+        return;
+    }
+    top.extend(bottom.into_iter().rev());
+    c.fill_polygon(&top, col);
+}
+
 #[allow(clippy::too_many_arguments)]
 fn plot(c: &mut Canvas, p: &Palette, ox: f32, oy: f32, side: &Side, l: &LaneVals, pts: &[AutoPoint], tab: Tab, pos: Pos) {
     let plot = plot_rect();
@@ -923,19 +1273,7 @@ fn plot(c: &mut Canvas, p: &Palette, ox: f32, oy: f32, side: &Side, l: &LaneVals
     c.fill_rect(r, p.s(0x171a1c));
     c.push_clip(r);
     // The waveform behind everything.
-    if !side.wave.is_empty() {
-        let (mid, amp) = (r.y + r.h / 2.0, r.h / 2.0 - 4.0);
-        let n = side.wave.len() as f32;
-        let mut top = Vec::with_capacity(side.wave.len());
-        let mut bottom = Vec::with_capacity(side.wave.len());
-        for (i, &(lo, hi)) in side.wave.iter().enumerate() {
-            let x = r.x + r.w * (i as f32 + 0.5) / n;
-            top.push((x, mid - hi.clamp(-1.0, 1.0) * amp));
-            bottom.push((x, mid - lo.clamp(-1.0, 1.0) * amp));
-        }
-        top.extend(bottom.into_iter().rev());
-        c.fill_polygon(&top, p.s(0x33393d));
-    }
+    wave_shape(c, side, plot, r, p.s(0x33393d));
     // The scale's lines (dB for volume, left and right for pan), then the baseline: where the lane stands with no line of
     // its own, so a line drawn starts from a value that can be read.
     let marks = scale_marks(l.lane);
@@ -951,6 +1289,31 @@ fn plot(c: &mut Canvas, p: &Palette, ox: f32, oy: f32, side: &Side, l: &LaneVals
             c.fill_rect(Rect::new(x, neutral.round() - 0.5, (r.right() - x).min(7.0), 1.5), col);
             x += 11.0;
         }
+    }
+    // The scale's values sit just above their lines, see-through and under the lane's own line and points: they never
+    // cover a line, and a point under one is drawn over it and taken by the mouse as anywhere else.
+    let f = Font::new(11);
+    let lh = c.line_height(f);
+    let above = |y: f32| (y - lh - 1.0).clamp(r.y + 1.0, r.bottom() - lh - 1.0);
+    let faint = p.tx(0x8c9296).with_alpha(130);
+    for &(v, ref label) in &marks {
+        let y = r.y + (1.0 - v as f32) * r.h;
+        if !base || (y - neutral).abs() > 3.0 {
+            c.text(f, r.x + 4.0, above(y), faint, label);
+        }
+    }
+    if base {
+        // The baseline's own values: its value at the left, what it is at the right.
+        let col = p.tx(0xc4ccd0).with_alpha(150);
+        let at = if l.lane == Lane::Volume { "0 dB" } else { "Centre" };
+        c.text(f, r.x + 4.0, above(neutral), col, at);
+        let label = match l.lane {
+            Lane::Volume => "Baseline: 0 dB (as recorded)".to_string(),
+            _ => "Baseline: centre".to_string(),
+        };
+        let label = if tab == Tab::Cut && !l.inherited.is_empty() { format!("{label}, under the source audio's line") } else { label };
+        let w = c.text_width(f, &label);
+        c.text(f, r.right() - w - 6.0, above(neutral), col, &label);
     }
 
     // The whole audio's tab shows the cuts along the top, those with a line of their own marked.
@@ -981,42 +1344,12 @@ fn plot(c: &mut Canvas, p: &Palette, ox: f32, oy: f32, side: &Side, l: &LaneVals
     }
     // The song position, playing or not: the line playback runs along.
     if let Pos::At(s) = pos {
-        c.fill_rect(Rect::new(s_to_x(side, plot, s.clamp(side.from_s, side.to_s)) + ox, r.y, 1.5, r.h), p.playhead);
-    }
-    c.pop_clip();
-    // The time axis under the plot: its two ends. The value scale inside it: its top, its plain value and its bottom.
-    let dim: Color = p.tx(0x8c9296);
-    let f = Font::new(11);
-    let y = r.bottom() + 1.0;
-    c.text(f, r.x, y, dim, &time_text(side.from_s));
-    let end = time_text(side.to_s);
-    let end_w = c.text_width(f, &end);
-    c.text(f, r.right() - end_w, y, dim, &end);
-    let scale_x = r.x + 4.0;
-    let lh = c.line_height(f);
-    // The scale's values beside their lines (clear of the marks along the top of the Source audio tab).
-    for &(v, ref label) in &marks {
-        let y = r.y + (1.0 - v as f32) * r.h;
-        let ty = (y - lh / 2.0).clamp(r.y + 6.0, r.bottom() - lh - 2.0);
-        if (y - neutral).abs() > 3.0 || !base {
-            c.text(f, scale_x, ty, dim, label);
+        let (a, b) = view_of(side);
+        if (a..=b).contains(&s) {
+            c.fill_rect(Rect::new(s_to_x(side, plot, s) + ox, r.y, 1.5, r.h), p.playhead);
         }
     }
-    // The baseline's own label, at its right end: what the lane is with no line.
-    if base {
-        let label = match l.lane {
-            Lane::Volume => "Baseline: 0 dB (as recorded)".to_string(),
-            _ => "Baseline: centre".to_string(),
-        };
-        let label = if tab == Tab::Cut && !l.inherited.is_empty() { format!("{label}, under the source audio's line") } else { label };
-        let lf = Font::new(11);
-        let w = c.text_width(lf, &label) + 10.0;
-        let b = Rect::new(r.right() - w - 4.0, (neutral - lh / 2.0 - 1.0).clamp(r.y + 2.0, r.bottom() - lh - 4.0), w, lh + 2.0);
-        c.fill_rrect(b, 3.0, p.s(0x0f1214).with_alpha(220));
-        c.text(lf, b.x + 5.0, b.y + 1.0, p.tx(0xc4ccd0), &label);
-        let at = if l.lane == Lane::Volume { "0 dB" } else { "Centre" };
-        c.text(f, scale_x, (neutral - lh / 2.0).clamp(r.y + 6.0, r.bottom() - lh - 2.0), p.tx(0xc4ccd0), at);
-    }
+    c.pop_clip();
 }
 
 /// The lines of a lane's scale and what they read: dB steps for volume, left and right for pan, quarters for a parameter.
@@ -1057,7 +1390,7 @@ fn button(c: &mut Canvas, p: &Palette, b: Rect, label: &str, on: bool, hov: bool
 }
 
 /// The loop switch: lit while Play loops just this audio.
-fn loop_switch(c: &mut Canvas, p: &Palette, b: Rect, on: bool, tab: Tab, hov: bool) {
+pub(crate) fn loop_switch(c: &mut Canvas, p: &Palette, b: Rect, on: bool, tab: Tab, hov: bool) {
     let face = if on { p.a(0x49f1b1).with_alpha(if hov { 70 } else { 45 }) } else if hov { p.s(0x3a4043) } else { p.s(0x2b2f31) };
     c.fill_rrect(b, 4.0, face);
     let ink = if on { p.a(0x49f1b1) } else { p.tx(0x9aa2a6) };
@@ -1127,11 +1460,11 @@ mod tests {
         assert_eq!(hit(&ui, &v, Tab::Cut, x, y), Some(Hit::Point(1)));
         assert_eq!(press(&mut ui, &v, Tab::Cut, x, y, Button::Left, NO_SCREEN, &mut out), Press::Capture);
         let (mx, my) = at(16.0, 0.7);
-        assert!(motion(&mut ui, &v, Tab::Cut, mx, my));
+        assert!(motion(&mut ui, &v, Tab::Cut, mx, my, &mut Vec::new()));
         assert!(ui.hint.contains("Volume"), "{}", ui.hint);
         // Past its neighbour it stops there.
         let (mx, my) = at(19.5, 0.9);
-        motion(&mut ui, &v, Tab::Cut, mx, my);
+        motion(&mut ui, &v, Tab::Cut, mx, my, &mut Vec::new());
         assert!(out.is_empty());
         release(&mut ui, Tab::Cut, &mut out);
         let [Event::SetLane { points, .. }] = &out[..] else { panic!("{out:?}") };
@@ -1311,8 +1644,8 @@ mod tests {
         let mut out = Vec::new();
         let m = mix_rect(2);
         assert_eq!(press(&mut ui, &v, Tab::Whole, m.x + m.w * 0.25, m.cy(), Button::Left, NO_SCREEN, &mut out), Press::Capture);
-        assert!(motion(&mut ui, &v, Tab::Whole, m.x + m.w * 0.5, m.cy()));
-        motion(&mut ui, &v, Tab::Whole, m.x + m.w * 9.0, m.cy());
+        assert!(motion(&mut ui, &v, Tab::Whole, m.x + m.w * 0.5, m.cy(), &mut Vec::new()));
+        motion(&mut ui, &v, Tab::Whole, m.x + m.w * 9.0, m.cy(), &mut Vec::new());
         assert!(out.is_empty());
         release(&mut ui, Tab::Whole, &mut out);
         assert_eq!(out, vec![Event::SetMix { tab: Tab::Whole, slot: 2, mix: 1.0 }]);
@@ -1343,17 +1676,17 @@ mod tests {
         let mut ui = PageUi::default();
         let r0 = lane_row_rect(0);
         assert_eq!(hit(&ui, &v, Tab::Cut, r0.cx(), r0.cy()), Some(Hit::LaneRow(0)));
-        assert!(!wheel(&mut ui, &v, Tab::Cut, r0.cy(), 1.0), "already at the top");
-        assert!(wheel(&mut ui, &v, Tab::Cut, r0.cy(), -1.0));
+        assert!(!wheel(&mut ui, &v, Tab::Cut, r0.cx(), r0.cy(), 1.0, false, &mut Vec::new()), "already at the top");
+        assert!(wheel(&mut ui, &v, Tab::Cut, r0.cx(), r0.cy(), -1.0, false, &mut Vec::new()));
         assert_eq!(hit(&ui, &v, Tab::Cut, r0.cx(), r0.cy()), Some(Hit::LaneRow(1)));
         for _ in 0..100 {
-            wheel(&mut ui, &v, Tab::Cut, r0.cy(), -1.0);
+            wheel(&mut ui, &v, Tab::Cut, r0.cx(), r0.cy(), -1.0, false, &mut Vec::new());
         }
         let last = lane_row_rect(rows_shown() - 1);
         assert_eq!(hit(&ui, &v, Tab::Cut, last.cx(), last.cy()), Some(Hit::AddLane));
-        assert!(!wheel(&mut ui, &v, Tab::Cut, r0.cy(), -1.0), "at the bottom");
+        assert!(!wheel(&mut ui, &v, Tab::Cut, r0.cx(), r0.cy(), -1.0, false, &mut Vec::new()), "at the bottom");
         // Above the list the wheel does not scroll it.
-        assert!(!wheel(&mut ui, &v, Tab::Cut, 10.0, 1.0));
+        assert!(!wheel(&mut ui, &v, Tab::Cut, r0.cx(), 10.0, 1.0, false, &mut Vec::new()));
     }
 
     #[test]
@@ -1398,10 +1731,10 @@ mod tests {
         assert_eq!(press(&mut ui, &v, Tab::Cut, r.cx(), r.cy(), Button::Left, NO_SCREEN, &mut out), Press::Capture);
         assert!(matches!(out[..], [Event::SetPos { tab: Tab::Cut, at }] if (at - 15.0).abs() < 0.01), "{out:?}");
         out.clear();
-        assert!(motion(&mut ui, &v, Tab::Cut, plot.x + plot.w * 0.25, r.y - 200.0));
+        assert!(motion(&mut ui, &v, Tab::Cut, plot.x + plot.w * 0.25, r.y - 200.0, &mut Vec::new()));
         assert!(ui.hint.starts_with("Song position"), "{}", ui.hint);
         // Past the end it stops at the end.
-        motion(&mut ui, &v, Tab::Cut, plot.right() + 500.0, r.cy());
+        motion(&mut ui, &v, Tab::Cut, plot.right() + 500.0, r.cy(), &mut Vec::new());
         assert!(out.is_empty(), "one position per press and release");
         release(&mut ui, Tab::Cut, &mut out);
         assert_eq!(out, vec![Event::SetPos { tab: Tab::Cut, at: 20.0 }]);
@@ -1416,6 +1749,49 @@ mod tests {
         let mut none = plain();
         none.cut.available = false;
         assert_eq!(hit(&ui, &none, Tab::Cut, r.cx(), r.cy()), None);
+    }
+
+    /// Ctrl+wheel zooms the plot at the mouse, a click then lands on the second under it; the view bar moves the view,
+    /// its buttons zoom out and back to all of it; the lane list's wheel stays the list's.
+    #[test]
+    fn the_plot_zooms_and_a_point_lands_where_the_mouse_is() {
+        let mut v = plain();
+        let mut ui = PageUi::default();
+        let mut out = Vec::new();
+        let (x, y) = at(12.0, 0.5);
+        assert!(!wheel(&mut ui, &v, Tab::Cut, x, y, -1.0, false, &mut out), "all in view: nothing to scroll");
+        assert!(wheel(&mut ui, &v, Tab::Cut, x, y, 3.0, true, &mut out));
+        let [Event::View { tab: Tab::Cut, view: Some((a, b)) }] = out[..] else { panic!("{out:?}") };
+        assert!((b - a - 10.0 * 0.512).abs() < 0.01, "{a} {b}");
+        assert!((x_to_s(&{ let mut s = v.cut.clone(); s.view = Some((a, b)); s }, plot_rect(), x) - 12.0).abs() < 0.01, "12 s stays under the mouse");
+        v.apply(&out[0]);
+        out.clear();
+        // A point where the mouse is, on the zoomed plot.
+        press(&mut ui, &v, Tab::Cut, x, y, Button::Left, NO_SCREEN, &mut out);
+        release(&mut ui, Tab::Cut, &mut out);
+        let [Event::SetLane { points, .. }] = &out[..] else { panic!("{out:?}") };
+        assert!((points[0].beat - 12.0).abs() < 0.01, "{points:?}");
+        out.clear();
+        // The bar: drag the handle along.
+        let bar = bar_rect(plot_rect(), bar_y());
+        let th = thumb(&v.cut, bar);
+        assert_eq!(hit(&ui, &v, Tab::Cut, th.cx(), th.cy()), Some(Hit::ViewBar));
+        assert_eq!(press(&mut ui, &v, Tab::Cut, th.cx(), th.cy(), Button::Left, NO_SCREEN, &mut out), Press::Capture);
+        assert!(motion(&mut ui, &v, Tab::Cut, th.cx() + 100.0, th.cy(), &mut out));
+        let Some(Event::View { view: Some((c, d)), .. }) = out.last().cloned() else { panic!("{out:?}") };
+        assert!(c > a && ((d - c) - (b - a)).abs() < 1e-9, "the same width, further on");
+        release(&mut ui, Tab::Cut, &mut out);
+        out.clear();
+        // All of it again.
+        let z = zoom_rect(plot_rect(), bar_y(), 2);
+        assert_eq!(hit(&ui, &v, Tab::Cut, z.cx(), z.cy()), Some(Hit::Zoom(2)));
+        press(&mut ui, &v, Tab::Cut, z.cx(), z.cy(), Button::Left, NO_SCREEN, &mut out);
+        assert_eq!(out, vec![Event::View { tab: Tab::Cut, view: None }]);
+        // The scale's values never take the mouse: under the baseline's label a click adds a point as anywhere.
+        let mut w = plain();
+        w.apply(&out[0]);
+        let (bx, by) = at(19.5, Lane::Volume.neutral() + 0.02);
+        assert_eq!(hit(&ui, &w, Tab::Cut, bx, by), Some(Hit::Plot));
     }
 
     #[test]

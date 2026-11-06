@@ -930,3 +930,36 @@ mod tests {
         assert!(m.iter().any(|p| p.label == "(no other track has audio)" && !p.enabled));
     }
 }
+
+#[cfg(test)]
+mod sibilant_probe {
+    /// The S sounds found in a real take (`OS_PROBE=<file.wav>`): what the detector makes of a real voice.
+    #[test]
+    #[ignore]
+    fn probe_s_sounds() {
+        let path = std::env::var("OS_PROBE").expect("OS_PROBE");
+        let s = super::load(&path).unwrap();
+        let mono = super::mono(&s.left, &s.right);
+        let t = std::time::Instant::now();
+        let (found, model) = os_dsp::sibilant::find(&mono, s.rate, &mut |_| {});
+        eprintln!("PROBE {:.1} s of audio in {:.2} s: {} found, {model:?}", mono.len() as f64 / f64::from(s.rate), t.elapsed().as_secs_f64(), found.len());
+        let count = |n: &str| found.iter().filter(|f| f.name() == n).count();
+        eprintln!("PROBE S {} SH {} Z {} ZH {}", count("S"), count("SH"), count("Z"), count("ZH"));
+        for f in found.iter().take(40) {
+            eprintln!("PROBE {:>8.3}..{:>8.3} {:<2} sure {:.2} centre {:.0}", f.from as f64 / f64::from(s.rate), f.to as f64 / f64::from(s.rate), f.name(), f.sure, f.centre);
+        }
+        // Each sure SH made an S like the voice's own, and each sure S an SH: what they sound like after.
+        use os_dsp::sibilant::{Change, Kind};
+        for (from, into, kind) in [(Kind::Sh, Change::S, Kind::S), (Kind::S, Change::Sh, Kind::Sh)] {
+            let examples: Vec<(usize, usize)> = found.iter().filter(|f| f.kind == kind && !f.voiced).map(|f| (f.from, f.to)).collect();
+            let target = os_dsp::sibilant::spectrum_of(&mono, s.rate, &examples);
+            for f in found.iter().filter(|f| f.kind == from && !f.voiced && f.sure > 0.85).take(4) {
+                let (mut l, mut r) = (s.left.clone(), s.right.clone());
+                os_dsp::sibilant::change(&mut [&mut l, &mut r], s.rate, f.from, f.to, into, 0.9, target.as_deref(), &model);
+                let m = super::mono(&l, &r);
+                let h = os_dsp::sibilant::heard(&m, s.rate, f.from, f.to, &model).unwrap();
+                eprintln!("CHANGE {:>8.3} {} {:.0} Hz -> {} {:.0} Hz (sure {:.2})", f.from as f64 / f64::from(s.rate), f.name(), f.centre, h.name(), h.centre, h.sure);
+            }
+        }
+    }
+}

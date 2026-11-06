@@ -485,7 +485,7 @@ impl State {
     /// The mouse is at (x, y) with nothing being dragged: what can show a tooltip there. Whether what shows changed.
     fn tip_at(&mut self, x: f32, y: f32) -> bool {
         let part = part_at(self, x, y);
-        let lit = |p: Option<Part>| matches!(p, Some(Part::Tab(_) | Part::ClipTab(_) | Part::FxTab));
+        let lit = |p: Option<Part>| matches!(p, Some(Part::Tab(_) | Part::ClipTab(_) | Part::FxTab(_)));
         let tab_changed = part != self.hover_part && (lit(part) || lit(self.hover_part));
         self.hover_part = part;
         let at = part.and_then(|p| Some((part_rect(self, p)?, part_tip(self, p)?, false)));
@@ -495,7 +495,7 @@ impl State {
                 return (!self.misc_ui.hint.is_empty()).then(|| (mouse, self.misc_ui.hint.clone(), true));
             }
             use crate::clip_page::Hit;
-            let over = self.clip_shown().is_some() && !matches!(self.clip_ui.hover, None | Some(Hit::Plot | Hit::Point(_) | Hit::Ruler));
+            let over = self.clip_shown().is_some() && !matches!(self.clip_ui.hover, None | Some(Hit::Plot | Hit::Point(_) | Hit::Ruler | Hit::Picture));
             (over && !self.clip_ui.hint.is_empty()).then(|| (mouse, self.clip_ui.hint.clone(), true))
         });
         let same = match (&at, &self.tip_for) {
@@ -560,6 +560,10 @@ impl State {
     fn clip_shown(&self) -> Option<(crate::clip_page::Tab, &crate::clip_page::PageVals)> {
         Some((self.clip_tab?, self.info.clip.as_deref()?))
     }
+    /// The This clip or Source audio page showing: which tab, and its plugins or its S sounds.
+    fn clip_shown_page(&self) -> Option<(crate::clip_page::Tab, crate::clip_page::Page)> {
+        self.clip_shown().map(|(t, _)| (t, self.clip_ui.page(t)))
+    }
     /// A page of the frame's own covers the plugin's editor.
     fn over_editor(&self) -> bool {
         self.misc || self.clip_shown().is_some()
@@ -603,8 +607,8 @@ enum Part {
     Tab(usize),
     /// A sample's This clip and Source audio tabs.
     ClipTab(crate::clip_page::Tab),
-    /// The plugins and automation sub-tab of the sample's tab that is open.
-    FxTab,
+    /// A page of the sample's tab that is open: its plugins and automation, or its S sounds.
+    FxTab(crate::clip_page::Page),
     On,
     Knob(u8),
     /// The RANGE and TRACK value boxes.
@@ -686,9 +690,13 @@ fn part_tip(st: &State, p: Part) -> Option<String> {
         Part::PresetNext => "Load the next preset".into(),
         Part::Tab(i) => page(i).into(),
         Part::ClipTab(t) => t.about().into(),
-        Part::FxTab => match st.top() {
+        Part::FxTab(crate::clip_page::Page::Fx) => match st.top() {
             crate::clip_page::Tab::Cut => "Plugins and automation lines on this clip only".into(),
             crate::clip_page::Tab::Whole => "Plugins and automation lines on the whole source audio, heard on every clip of it".into(),
+        },
+        Part::FxTab(crate::clip_page::Page::Sounds) => match st.top() {
+            crate::clip_page::Tab::Cut => "S sounds: find them in this clip, and turn an S into an SH, an SH into an S, or soften one".into(),
+            crate::clip_page::Tab::Whole => "S sounds: find them in the whole source audio, and turn an S into an SH, an SH into an S, or soften one".into(),
         },
         Part::On => "Turn this channel on or off".into(),
         Part::Knob(0) => "Channel panning: drag to change, right-click for its menu".into(),
@@ -797,6 +805,7 @@ enum SubIcon {
     Page(PageIcon),
     Misc,
     Fx,
+    Sounds,
 }
 
 /// One of a sample's sub-tabs: where, what it is, its name and icon.
@@ -822,7 +831,8 @@ fn sub_tabs(st: &State) -> Vec<SubTab> {
         }
         v.push((Part::Tab(st.pages.len()), "Misc", SubIcon::Misc));
     }
-    v.push((Part::FxTab, "Plugins & automation", SubIcon::Fx));
+    v.push((Part::FxTab(crate::clip_page::Page::Fx), "Plugins & automation", SubIcon::Fx));
+    v.push((Part::FxTab(crate::clip_page::Page::Sounds), "S sounds", SubIcon::Sounds));
     let y = TITLE_H + STRIP_H + 1.0;
     let mut x = BORDER + 4.0;
     v.into_iter()
@@ -838,7 +848,7 @@ fn sub_tabs(st: &State) -> Vec<SubTab> {
 /// Whether sub-tab `part` is the one showing.
 fn sub_open(st: &State, part: Part) -> bool {
     match part {
-        Part::FxTab => st.clip_tab.is_some(),
+        Part::FxTab(pg) => st.clip_tab.is_some() && st.clip_ui.page(st.top()) == pg,
         Part::Tab(i) if i == st.pages.len() => st.misc,
         Part::Tab(i) => !st.over_editor() && st.page == i,
         _ => false,
@@ -866,6 +876,7 @@ fn sub_row(c: &mut Canvas, st: &State, w: f32) {
             SubIcon::Page(pi) => icon_at(c, page_tabler(pi), ix, cy, 16.0, ink),
             SubIcon::Misc => icon_at(c, &tb::TOOL, ix, cy, 16.0, ink),
             SubIcon::Fx => icon_at(c, &tb::ADJUSTMENTS_HORIZONTAL, ix, cy, 16.0, ink),
+            SubIcon::Sounds => icon_at(c, &tb::WAVE_SINE, ix, cy, 16.0, ink),
         }
         c.text_clip(f, ix + 11.0, (cy - lh / 2.0).round(), t.rect.right() - ix - 12.0, if open { c_text() } else { ink }, t.name);
         if open {
@@ -1330,11 +1341,11 @@ impl State {
                 self.open_top(tab);
                 Reply::Relayout
             }
-            Some(Part::FxTab) => {
+            Some(Part::FxTab(pg)) => {
                 let tab = self.top();
                 self.misc = false;
                 self.clip_tab = Some(tab);
-                self.clip_ui.hint.clear();
+                self.clip_ui.set_page(tab, pg);
                 Reply::Relayout
             }
             Some(Part::Tab(t)) => {
@@ -1454,7 +1465,9 @@ impl State {
         let (px, py) = (x - BORDER, y - self.area_y());
         if let Some((tab, vals)) = self.clip_tab.zip(self.info.clip.as_deref()) {
             let dragging = self.clip_ui.dragging();
-            let changed = crate::clip_page::motion(&mut self.clip_ui, vals, tab, px, py);
+            let mut out = Vec::new();
+            let changed = crate::clip_page::motion(&mut self.clip_ui, vals, tab, px, py, &mut out);
+            self.clip_events(out);
             if dragging {
                 return if changed { Reply::Repaint } else { Reply::None };
             }
@@ -1563,8 +1576,8 @@ impl State {
         }
     }
 
-    /// The wheel turned `notches` (up positive) over (x, y).
-    fn wheel(&mut self, x: f32, y: f32, notches: f32) -> Reply {
+    /// The wheel turned `notches` (up positive) over (x, y), Ctrl held or not.
+    fn wheel(&mut self, x: f32, y: f32, notches: f32, ctrl: bool) -> Reply {
         self.hide_tip();
         let part = part_at(self, x, y);
         if part.is_none() {
@@ -1573,7 +1586,9 @@ impl State {
             }
             let ay = self.area_y();
             if let Some((tab, vals)) = self.clip_tab.zip(self.info.clip.as_deref()) {
-                let moved = crate::clip_page::wheel(&mut self.clip_ui, vals, tab, y - ay, notches);
+                let mut out = Vec::new();
+                let moved = crate::clip_page::wheel(&mut self.clip_ui, vals, tab, x - BORDER, y - ay, notches, ctrl, &mut out);
+                self.clip_events(out);
                 return if moved { Reply::Repaint } else { Reply::None };
             }
         }
@@ -1798,9 +1813,10 @@ mod tests {
         let first = clip_tab_rect(&st, Tab::Cut);
         assert!(first.right() <= last.x && first.x >= BORDER);
         assert_ne!(Tab::Cut.name(), Tab::Whole.name());
-        // Source audio's sub-tabs: the sampler's page, Misc, its plugins and automation, under the strip.
+        // Source audio's sub-tabs: the sampler's page, Misc, its plugins and automation, its S sounds, under the strip.
         let subs = sub_tabs(&st);
-        assert_eq!(subs.iter().map(|t| t.name).collect::<Vec<_>>(), ["Sampler", "Misc", "Plugins & automation"]);
+        assert_eq!(subs.iter().map(|t| t.name).collect::<Vec<_>>(), ["Sampler", "Misc", "Plugins & automation", "S sounds"]);
+        assert!(subs.last().unwrap().rect.right() < 700.0, "they fit the window");
         for t in &subs {
             assert!(t.rect.y >= TITLE_H + STRIP_H && t.rect.bottom() <= st.area_y() - 1.0, "{:?}", t.rect);
             assert_eq!(part_at(&st, t.rect.cx(), t.rect.cy()), Some(t.part));
@@ -1864,12 +1880,12 @@ mod tests {
         assert_eq!(st.left_down(cut.cx(), cut.cy(), false, &screen), Reply::Relayout);
         assert_eq!((st.clip_tab, st.over_editor()), (Some(Tab::Cut), true));
         assert_eq!(st.shown(), (PAGE_W, PAGE_H));
-        assert_eq!(sub_tabs(&st).iter().map(|t| t.part).collect::<Vec<_>>(), [Part::FxTab]);
+        assert_eq!(sub_tabs(&st).iter().map(|t| t.part).collect::<Vec<_>>(), [Part::FxTab(crate::clip_page::Page::Fx), Part::FxTab(crate::clip_page::Page::Sounds)]);
         // Source audio: back on the sampler, where it was left.
         assert_eq!(st.left_down(whole.cx(), whole.cy(), false, &screen), Reply::Relayout);
         assert!(st.clip_tab.is_none() && !st.over_editor());
         // Its plugins and automation.
-        let fx = sub(&st, Part::FxTab);
+        let fx = sub(&st, Part::FxTab(crate::clip_page::Page::Fx));
         assert_eq!(st.left_down(fx.cx(), fx.cy(), false, &screen), Reply::Relayout);
         assert_eq!(st.clip_tab, Some(Tab::Whole));
         // Misc takes over from it.
@@ -2153,10 +2169,10 @@ mod tests {
         st.left_up(rx, y);
         assert!(st.box_text(Knob::Range).contains("1 semitones"));
         // A narrower range pulls the pitch in.
-        st.wheel(rx, y, 1.0);
+        st.wheel(rx, y, 1.0, false);
         assert_eq!(st.info.range, 2);
         st.info.pitch_cents = 200;
-        st.wheel(rx, y, -1.0);
+        st.wheel(rx, y, -1.0, false);
         assert_eq!((st.info.range, st.info.pitch_cents), (1, 100));
         st.middle_down(rx, y, &screen);
         assert_eq!(st.info.range, 2);
@@ -2166,13 +2182,13 @@ mod tests {
         st.motion(tx, y - 30.0, false);
         st.left_up(tx, y - 30.0);
         assert_eq!((st.info.track, st.info.target.as_str()), (3, "Bus 3"));
-        st.wheel(tx, y, 100.0);
+        st.wheel(tx, y, 100.0, false);
         assert_eq!(st.info.track, 4, "one per notch");
         st.left_down(tx, y, false, &screen);
         st.motion(tx, y - 10_000.0, false);
         st.left_up(tx, y);
         assert_eq!(st.info.track, 20, "the highest insert");
-        st.wheel(tx, y, 1.0);
+        st.wheel(tx, y, 1.0, false);
         assert_eq!(st.events.last(), Some(&FrameEvent::Track(20)), "no event at the limit");
         st.motion(tx, y, false);
         assert!(st.box_text(Knob::Track).starts_with("Target mixer track: Bus 20"));

@@ -4033,8 +4033,11 @@ impl App {
         self.state.clip_fx.play_tick = (self.transport.playing() && self.transport.song()).then(|| self.transport.tick());
         #[cfg(plugin_windows)]
         if !cfg!(test) {
-            self.state.clip_fx.shown = self.plugins.clip_page(&self.state.z);
+            let shown = self.plugins.clip_page(&self.state.z);
+            self.state.clip_fx.shown = shown.map(|(r, t, _)| (r, t));
+            self.state.clip_fx.shown_page = shown.map(|(_, _, p)| p);
         }
+        crate::s_sounds::tick(self);
         self.audition_tick();
         self.control_tick();
         self.plugin_tick();
@@ -7679,7 +7682,7 @@ impl App {
     /// armed), just that audio, looped (`clip_fx::audition`).
     pub(crate) fn play_alone(&self) -> Option<crate::clip_fx::Audition> {
         let s = &self.state;
-        if s.clip_fx.whole_song || s.rec.armed {
+        if (s.clip_fx.whole_song && !s.clip_fx.part_play) || s.rec.armed {
             return None;
         }
         let (row, tab) = s.clip_fx.shown?;
@@ -7720,6 +7723,7 @@ impl App {
     fn audition_tick(&mut self) {
         let now = self.state.clip_fx.audition;
         if !self.transport.playing() {
+            self.state.clip_fx.part_play = false;
             if now.is_some() {
                 self.state.clip_fx.audition = None;
                 self.invalidate();

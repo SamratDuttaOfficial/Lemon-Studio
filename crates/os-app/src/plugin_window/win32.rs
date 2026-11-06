@@ -484,8 +484,8 @@ impl FrameWindow {
 
     /// Shows the This clip or Source audio tab.
     /// The This clip or Source audio plugins and automation page it shows, if one.
-    pub fn clip_page(&self) -> Option<crate::clip_page::Tab> {
-        self.state.borrow().clip_shown().map(|(t, _)| t)
+    pub fn clip_page(&self) -> Option<(crate::clip_page::Tab, crate::clip_page::Page)> {
+        self.state.borrow().clip_shown_page()
     }
 
     pub fn show_clip_tab(&self, tab: crate::clip_page::Tab) {
@@ -825,7 +825,9 @@ unsafe extern "system" fn frame_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARA
             WM_MOUSEWHEEL => {
                 let (x, y) = client_point(hwnd, lp, w.scale, true);
                 let notches = ((wp >> 16) & 0xffff) as u16 as i16 as f32 / 120.0;
-                let r = w.state.borrow_mut().wheel(x, y, notches);
+                // MK_CONTROL in the low word: the keys held as the wheel turned.
+                let ctrl = wp & 0x0008 != 0;
+                let r = w.state.borrow_mut().wheel(x, y, notches, ctrl);
                 reply(hwnd, w, r);
                 0
             }

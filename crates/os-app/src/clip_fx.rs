@@ -14,7 +14,7 @@ use os_model::clip_fx::{self as fx, Lane};
 use os_model::{AutoPoint, Clip, ClipSource};
 
 use crate::app::{App, State};
-use crate::clip_page::{Event, LaneVals, Mark, PageVals, Pos, Side, SlotVals, Tab, SLOTS};
+use crate::clip_page::{Event, LaneVals, Mark, Page, PageVals, Pos, Side, SlotVals, Tab, SLOTS};
 use crate::control::command::Region;
 use crate::mixer::FxReq;
 use crate::playlist::{self as pl, Cmd, PItem, Popup};
@@ -59,6 +59,16 @@ pub struct ClipFxUi {
     pub pending_tab: Option<(usize, Tab)>,
     /// The plugins and automation page in front: the rack row whose window shows it, and which tab (`App::tick`).
     pub shown: Option<(usize, Tab)>,
+    /// Which page of that tab: its plugins, or its S sounds.
+    pub shown_page: Option<Page>,
+    /// The part of each row's tab in view while zoomed in (row, Source audio tab): seconds of the sample.
+    pub views: BTreeMap<(usize, bool), (f64, f64)>,
+    /// The part chosen on each row's S sounds pages, seconds of the sample.
+    pub sel: BTreeMap<(usize, bool), (f64, f64)>,
+    /// The S sounds pages: what was found, the audio read, the pictures (`crate::s_sounds`).
+    pub sounds: crate::s_sounds::Store,
+    /// "Play the part" started this playback: it plays the part chosen also while the loop switch is off.
+    pub part_play: bool,
     /// The loop switch is off: Play plays the whole song while a page shows.
     pub whole_song: bool,
     /// What playback is looping now, while it plays just one audio (`App::audition_tick`).
@@ -99,7 +109,26 @@ pub fn audition(s: &State, row: usize, tab: Tab) -> Option<Audition> {
             Clip::new(0, ticks, 0, source)
         }
     };
-    Some(Audition { row, tab, clip, range: (clip.position, clip.end().max(clip.position + 1)) })
+    let mut a = Audition { row, tab, clip, range: (clip.position, clip.end().max(clip.position + 1)) };
+    // On the S sounds page, the part chosen.
+    if let Some((from, to)) = part(s, row, tab) {
+        let tick = |at: f64| match tab {
+            Tab::Whole => whole_tick(s, &a, at),
+            Tab::Cut => {
+                let (c0, _) = clip_span(s, &clip);
+                let t = (at - c0).max(0.0) * 1000.0 / pl::to_src(s, clip.source, 1.0).max(1e-9);
+                (f64::from(clip.position) + t).round().min(f64::from(a.range.1.saturating_sub(1))) as u32
+            }
+        };
+        let (t0, t1) = (tick(from).max(a.range.0), tick(to).min(a.range.1));
+        a.range = (t0, t1.max(t0 + 1));
+    }
+    Some(a)
+}
+
+/// The part chosen on rack row `row`'s `tab` while its S sounds page is in front: what Play loops.
+fn part(s: &State, row: usize, tab: Tab) -> Option<(f64, f64)> {
+    (s.clip_fx.shown == Some((row, tab)) && s.clip_fx.shown_page == Some(Page::Sounds)).then(|| s.clip_fx.sel.get(&(row, tab == Tab::Whole)).copied()).flatten()
 }
 
 /// The project playback gets for an audition: the song as it plays with only that clip in the arrangement, its track on
@@ -119,6 +148,9 @@ pub fn audition_project(s: &State, a: &Audition) -> os_model::Project {
 /// Where an audition starts: This clip at the song position when that is in the clip, else at its start; the source audio
 /// where its ruler was last clicked.
 pub fn audition_start(s: &State, a: &Audition) -> u32 {
+    if part(s, a.row, a.tab).is_some() {
+        return a.range.0;
+    }
     match a.tab {
         Tab::Cut if (a.range.0..a.range.1).contains(&s.playlist.pos) => s.playlist.pos,
         Tab::Cut => a.range.0,
@@ -270,7 +302,7 @@ fn peaks_of(s: &State, path: &str, from_s: f64, to_s: f64) -> Arc<Vec<(f32, f32)
 }
 
 /// The part of the sample clip `c` plays, in seconds.
-fn clip_span(s: &State, c: &Clip) -> (f64, f64) {
+pub(crate) fn clip_span(s: &State, c: &Clip) -> (f64, f64) {
     let (w0, _) = pl::window(s, c);
     let from = w0.max(0.0) / 1000.0;
     (from, from + f64::from(c.length) * pl::to_src(s, c.source, 1.0) / 1000.0)
@@ -315,6 +347,7 @@ fn cut_rows(s: &State, ch: &os_model::Channel, c: &Clip, from: f64, to: f64) -> 
         row("Fades", fades),
         row("Pitch", pitch_text(ch)),
         row("Mixer", mixer_name(s, ch)),
+        row("Plays through", format!("this clip's plugins, the source audio's, then {}", mixer_name(s, ch))),
     ]
 }
 
@@ -330,6 +363,7 @@ fn whole_rows(s: &State, ch: &os_model::Channel, wave: Option<&pl::Wave>) -> Vec
     v.push(line("Pitch", pitch_text(ch)));
     v.push(line("Volume", format!("{:.0}%", ch.volume * 100.0)));
     v.push(line("Mixer", mixer_name(s, ch)));
+    v.push(line("Plays through", format!("each clip's own plugins, these, then {}", mixer_name(s, ch))));
     v
 }
 
@@ -372,6 +406,16 @@ pub fn page_vals(s: &State, row: usize) -> Option<PageVals> {
         Scope::Cut(id) => s.project.arrangement()?.clips.get(clip_at(s, id)?).copied(),
         Scope::Whole(_) => None,
     });
+    // The part of a tab in view: the zoomed part kept inside the tab's span, else all of it.
+    let view_in = |whole: bool, a: f64, b: f64| {
+        s.clip_fx.views.get(&(row, whole)).copied().filter(|(x, y)| y > x && b > a).and_then(|(x, y)| {
+            let w = (y - x).min(b - a);
+            let x = x.clamp(a, b - w);
+            (w < (b - a) * 0.999).then_some((x, x + w))
+        })
+    };
+    let whole_view = view_in(true, 0.0, total);
+    let (wv0, wv1) = whole_view.unwrap_or((0.0, total));
     let whole = Side {
         available: true,
         // In this clip if it is there, else in the first clip of this audio at the song position.
@@ -384,10 +428,13 @@ pub fn page_vals(s: &State, row: usize) -> Option<PageVals> {
         lanes: lanes_of(s, ch.whole_fx, ch.whole_fx, Tab::Whole),
         from_s: 0.0,
         to_s: total,
-        wave: path.filter(|_| wave.is_some()).map_or_else(Arc::default, |p| peaks_of(s, p, 0.0, total)),
+        view: whole_view,
+        wave: path.filter(|_| wave.is_some()).map_or_else(Arc::default, |p| peaks_of(s, p, wv0, wv1)),
+        wave_span: (wv0, wv1),
         marks,
         focus: focus_whole,
         focus_serial: serial_whole,
+        sounds: crate::s_sounds::values(s, row, Tab::Whole, (0.0, total), (wv0, wv1)),
     };
 
     // The piece.
@@ -395,6 +442,8 @@ pub fn page_vals(s: &State, row: usize) -> Option<PageVals> {
         Some(c) => {
             let (from_s, to_s) = clip_span(s, &c);
             let (focus_cut, serial_cut) = focus(false);
+            let view = view_in(false, from_s, to_s);
+            let (v0, v1) = view.unwrap_or((from_s, to_s));
             Side {
                 available: true,
                 rows: cut_rows(s, ch, &c, from_s, to_s),
@@ -402,7 +451,10 @@ pub fn page_vals(s: &State, row: usize) -> Option<PageVals> {
                 lanes: lanes_of(s, c.fx, ch.whole_fx, Tab::Cut),
                 from_s,
                 to_s,
-                wave: path.map_or_else(Arc::default, |p| peaks_of(s, p, from_s, to_s)),
+                view,
+                wave: path.map_or_else(Arc::default, |p| peaks_of(s, p, v0, v1)),
+                wave_span: (v0, v1),
+                sounds: crate::s_sounds::values(s, row, Tab::Cut, (from_s, to_s), (v0, v1)),
                 marks: Vec::new(),
                 focus: focus_cut,
                 focus_serial: serial_cut,
@@ -697,6 +749,17 @@ fn lane_menu(s: &State, scope: Scope, row: usize, x: f32, y: f32) -> Popup {
 
 /// What the page asked for.
 pub fn event(app: &mut App, row: usize, e: Event) {
+    if crate::s_sounds::event(app, row, &e) {
+        return;
+    }
+    if let Event::View { tab, view } = e {
+        let key = (row, tab == Tab::Whole);
+        match view {
+            Some(v) => app.state.clip_fx.views.insert(key, v),
+            None => app.state.clip_fx.views.remove(&key),
+        };
+        return app.invalidate();
+    }
     let tab = match &e {
         Event::Pick { tab, .. }
         | Event::SlotMenu { tab, .. }
@@ -707,7 +770,13 @@ pub fn event(app: &mut App, row: usize, e: Event) {
         | Event::AddLane { tab, .. }
         | Event::SetLane { tab, .. }
         | Event::ResetLanes { tab, .. }
-        | Event::Loop { tab, .. } => *tab,
+        | Event::Loop { tab, .. }
+        | Event::View { tab, .. }
+        | Event::Select { tab, .. }
+        | Event::ChangeS { tab, .. }
+        | Event::Strength { tab, .. }
+        | Event::FindS { tab, .. }
+        | Event::PlayPart { tab } => *tab,
     };
     if let Event::Loop { on, .. } = e {
         app.state.clip_fx.whole_song = !on;
@@ -765,7 +834,7 @@ pub fn event(app: &mut App, row: usize, e: Event) {
         Event::SetMix { slot, mix, .. } => set_mix(app, scope, slot, mix),
         Event::SetLane { lane, points, .. } => set_lane(app, scope, lane, points),
         Event::ResetLanes { lanes, .. } => reset_lanes(app, scope, &lanes),
-        Event::Loop { .. } => {}
+        Event::Loop { .. } | Event::View { .. } | Event::Select { .. } | Event::ChangeS { .. } | Event::Strength { .. } | Event::FindS { .. } | Event::PlayPart { .. } => {}
     }
 }
 
@@ -1542,6 +1611,199 @@ mod tests {
         crate::history::redo(&mut a.state);
         a.follow_ids(true, true);
         assert!(a.plugins.hosted.contains_key(&key), "redone, it is back");
+    }
+
+    /// Renders `p` as the transport plays it, through the plugins the app hosts: in real time, on a device, a few ticks
+    /// at a time.
+    fn render_app(a: &mut App, p: &os_model::Project) -> Vec<f32> {
+        let mut lib = crate::transport::host_library(None);
+        let mut e = os_engine::Engine::with_instruments(p, &mut lib, 48000, os_engine::PlayMode::Song, &a.plugins.instruments());
+        crate::project_plugins::attach_effects(&mut e, p, a.plugins.effects());
+        e.set_device(1, None);
+        let mut out = Vec::new();
+        let cap = 48000 * 4 * 2;
+        while !e.render_ticks(4, &mut out) && out.len() < cap {}
+        out
+    }
+
+    /// The left side's level over frames `a..b`.
+    fn level(out: &[f32], a: usize, b: usize) -> f32 {
+        rms(&out.chunks_exact(2).skip(a).take(b.saturating_sub(a)).map(|f| f[0]).collect::<Vec<_>>())
+    }
+
+    /// The app's own way, as the user does it: a sample dropped on the Arranger and played by its Lemon Sampler, a reverb
+    /// put on This clip, then one on the source audio, from the page. What Play sends rings on after the clip, in the
+    /// song and in the page's audition.
+    #[test]
+    fn plugins_added_on_the_page_are_heard() {
+        let mut a = App::new(None);
+        a.plugins = crate::plugins::Plugins::at_48k();
+        a.state.plugdb.rebuild(&a.plugins);
+        let wav = sine_wav("page", 1000.0, 0.5);
+        crate::playlist::add_audio_clip(&mut a.state, &wav.to_string_lossy(), 0, 0).expect("an audio clip");
+        let s = &mut a.state;
+        s.control.settle(&mut s.project);
+        for _ in 0..4 {
+            a.plugin_tick();
+        }
+        let row = a.state.project.channels.len() - 1;
+        assert!(a.plugins.descriptor(row).is_some_and(|d| d.name == crate::plugins::LEMON_SAMPLER), "the sampler plays it");
+        let id = pl::clips(&a.state).last().unwrap().id.0;
+        a.state.clip_fx.cut.insert(row, id);
+        let p = crate::rack::play_project(&a.state);
+        let dry = render_app(&mut a, &p);
+        let end = dry.chunks_exact(2).rposition(|f| f[0].abs() > 1e-4).expect("the clip sounds");
+        let tail = (end + 2400, end + 24000);
+        assert!(level(&dry, tail.0, tail.1) < 1e-5, "dry: nothing after the clip");
+
+        let reverb = a.plugins.effect_index("Lemon Reverb").unwrap();
+        run(&mut a, C::Effect { scope: Scope::Cut(id), slot: 0, index: reverb });
+        for _ in 0..4 {
+            a.plugin_tick();
+        }
+        let p = crate::rack::play_project(&a.state);
+        let song = render_app(&mut a, &p);
+        assert!(level(&song, tail.0, tail.1) > 1e-3, "This clip's reverb rings on in the song: {}", level(&song, tail.0, tail.1));
+        let au = audition(&a.state, row, Tab::Cut).unwrap();
+        let p = audition_project(&a.state, &au);
+        let alone = render_app(&mut a, &p);
+        assert!(level(&alone, tail.0, tail.1) > 1e-3, "and in the audition: {}", level(&alone, tail.0, tail.1));
+
+        // Off on the clip, on the source audio: heard on the clip all the same.
+        run(&mut a, C::Remove { scope: Scope::Cut(id), slot: 0 });
+        run(&mut a, C::Effect { scope: Scope::Whole(row), slot: 0, index: reverb });
+        for _ in 0..4 {
+            a.plugin_tick();
+        }
+        let p = crate::rack::play_project(&a.state);
+        let song = render_app(&mut a, &p);
+        assert!(level(&song, tail.0, tail.1) > 1e-3, "the source audio's reverb rings on: {}", level(&song, tail.0, tail.1));
+        let _ = std::fs::remove_file(&wav);
+    }
+
+    /// What a saved project's clips do with their plugins, through the plugins the program hosts on opening it: each
+    /// unit with plugins, and the first seconds of each clip with one played alone, with its plugins and without
+    /// (`OS_INSPECT=<project.flp> cargo test -p os-app --bin lemonstudio inspect_clip_plugins -- --ignored --nocapture`).
+    #[test]
+    #[ignore]
+    fn inspect_clip_plugins() {
+        use std::time::{Duration, Instant};
+        let path = std::path::PathBuf::from(std::env::var("OS_INSPECT").expect("OS_INSPECT"));
+        crate::transport::headless();
+        let mut a = App::new(None);
+        a.load_plugins();
+        a.plugins.set_rate(48000);
+        a.open(path);
+        a.plugins.set_offline(true);
+        let t0 = Instant::now();
+        while a.loading() && t0.elapsed() < Duration::from_secs(300) {
+            a.plugin_tick();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        for _ in 0..200 {
+            a.plugin_tick();
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        // With `OS_INSPECT_ADD`: a reverb on the first clip of a recorded take with lines of its own, as the page adds
+        // one (in this run only: nothing is saved).
+        if std::env::var_os("OS_INSPECT_ADD").is_some() {
+            let id = pl::clips(&a.state).iter().find(|c| c.fx != 0).map(|c| c.id.0).expect("a clip with a unit");
+            let row = row_of(&a.state, Scope::Cut(id)).unwrap();
+            a.state.clip_fx.cut.insert(row, id);
+            let reverb = a.plugins.effect_index("Lemon Reverb").unwrap();
+            run(&mut a, C::Effect { scope: Scope::Cut(id), slot: 0, index: reverb });
+            for _ in 0..20 {
+                a.plugin_tick();
+            }
+        }
+        // With `OS_INSPECT_ON`: every unit's slots switched on.
+        if std::env::var_os("OS_INSPECT_ON").is_some() {
+            for u in &mut a.state.project.fx_units {
+                u.track.slot_on = [true; 10];
+            }
+        }
+        let p = a.state.project.clone();
+        for (row, ch) in p.channels.iter().enumerate() {
+            let who = a.plugins.descriptor(row).map_or("engine".to_string(), |d| d.name);
+            eprintln!("CH {row} {:?} {:?} whole_fx {} -> {who}", ch.kind, ch.name, ch.whole_fx);
+        }
+        for u in &p.fx_units {
+            let slots: Vec<String> = (0..SLOTS)
+                .filter_map(|k| {
+                    let s = u.track.slots[k].as_ref()?;
+                    let hosted = a.plugins.hosted.contains_key(&fx_key(fx::track_of(u.handle), k as u8));
+                    Some(format!("{k}:{} ({}) on={} mix={:.2} hosted={hosted}", s.name, crate::project_plugins::slot_title(s), u.track.slot_on[k], u.track.slot_mix[k]))
+                })
+                .collect();
+            eprintln!("UNIT {} track {} enabled={} vol={} pan={} {:?}", u.handle, fx::track_of(u.handle), u.track.slots_enabled, u.volume.len(), u.pan.len(), slots);
+        }
+        let Some(arr) = p.arrangement() else { return };
+        let rate = 48000.0;
+        for (i, c) in arr.clips.iter().enumerate() {
+            let whole = match c.source {
+                ClipSource::Channel(ch) => p.channels.get(usize::from(ch)).map_or(0, |x| x.whole_fx),
+                _ => 0,
+            };
+            let with = |h: u32| p.fx_unit(h).is_some_and(|u| u.has_plugins());
+            if !with(c.fx) && !with(whole) {
+                continue;
+            }
+            eprintln!("CLIP {i} id {} at {} len {} track {} source {:?} fx {} whole {whole} muted {}", c.id.0, c.position, c.length, c.track, c.source, c.fx, c.muted);
+            let alone = |off: bool| {
+                let mut q = crate::rack::play_project(&a.state);
+                let arr = q.arrangement_mut().unwrap();
+                arr.clips = vec![Clip { muted: false, ..*c }];
+                arr.markers.clear();
+                for t in arr.tracks.iter_mut() {
+                    t.enabled = true;
+                }
+                if off {
+                    for h in [c.fx, whole] {
+                        if let Some(u) = q.fx_unit_mut(h) {
+                            u.track.slots_enabled = false;
+                        }
+                    }
+                }
+                q
+            };
+            let secs = 6.0;
+            let ticks = (secs * f64::from(p.ppq.max(1)) * a.state.tempo / 60.0) as u64;
+            let render = |a: &App, q: &os_model::Project| {
+                let mut lib = crate::transport::host_library(None);
+                let mut e = os_engine::Engine::with_instruments(q, &mut lib, 48000, os_engine::PlayMode::Song, &a.plugins.instruments());
+                crate::project_plugins::attach_effects(&mut e, q, a.plugins.effects());
+                e.set_span(u64::from(c.position), u64::from(c.position) + ticks);
+                let mut out = Vec::new();
+                while !e.render_ticks(4, &mut out) && out.len() < (rate * (secs + 4.0)) as usize * 2 {}
+                out
+            };
+            let (on, off) = (render(&a, &alone(false)), render(&a, &alone(true)));
+            let n = on.len().min(off.len());
+            let diff: Vec<f32> = on[..n].iter().zip(&off[..n]).map(|(x, y)| x - y).collect();
+            eprintln!("  with plugins {:.5}  without {:.5}  difference {:.5}  ({} frames)", rms(&on), rms(&off), rms(&diff), n / 2);
+            // The same plugins, in the same state, on the channel's mixer track instead: what the clip's chain should
+            // sound like.
+            let Some(u) = p.fx_unit(c.fx).filter(|u| u.has_plugins()) else { continue };
+            let ClipSource::Channel(ch) = c.source else { continue };
+            let insert = p.channels[usize::from(ch)].mixer_track;
+            let mut q = alone(true);
+            for k in 0..SLOTS {
+                let Some(slot) = u.track.slots[k].clone() else { continue };
+                let key = fx_key(fx::track_of(u.handle), k as u8);
+                let state = a.plugins.hosted[&key].plugin.lock().unwrap().save_state();
+                let name = crate::project_plugins::slot_title(&slot);
+                let index = a.plugins.effect_index(&name).unwrap();
+                let free = 9 - k as u8;
+                a.plugins.create_effect(insert, free, index, state.as_deref()).unwrap();
+                let m = q.slot_track_mut(insert).unwrap();
+                m.slots[usize::from(free)] = Some(crate::plugins::new_slot(&name));
+                m.slot_on[usize::from(free)] = u.track.slot_on[k];
+            }
+            let mixer = render(&a, &q);
+            let n = on.len().min(mixer.len());
+            let diff: Vec<f32> = on[..n].iter().zip(&mixer[..n]).map(|(x, y)| x - y).collect();
+            eprintln!("  on the mixer track {insert} instead {:.5}  difference from the clip's chain {:.5}", rms(&mixer), rms(&diff));
+        }
     }
 
     /// A project to try this on in the real program: a two-second tone cut into three clips on one playlist track, saved

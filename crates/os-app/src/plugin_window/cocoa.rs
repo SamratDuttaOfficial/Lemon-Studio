@@ -636,8 +636,8 @@ impl FrameWindow {
 
     /// Shows the This clip or Source audio tab.
     /// The This clip or Source audio plugins and automation page it shows, if one.
-    pub fn clip_page(&self) -> Option<crate::clip_page::Tab> {
-        self.f.state.borrow().clip_shown().map(|(t, _)| t)
+    pub fn clip_page(&self) -> Option<(crate::clip_page::Tab, crate::clip_page::Page)> {
+        self.f.state.borrow().clip_shown_page()
     }
 
     pub fn show_clip_tab(&self, tab: crate::clip_page::Tab) {
@@ -927,7 +927,8 @@ impl Frame {
         self.wheel.set(total - notches);
         if notches != 0.0 {
             let (x, y) = self.local(e);
-            let r = self.state.borrow_mut().wheel(x, y, notches);
+            let ctrl = e.modifierFlags().intersects(NSEventModifierFlags::Control | NSEventModifierFlags::Command);
+            let r = self.state.borrow_mut().wheel(x, y, notches, ctrl);
             self.reply(r);
         }
     }
