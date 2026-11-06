@@ -1465,7 +1465,7 @@ fn screenshot(args: &[String]) {
     }
     app.state.show_browser = browser;
     if let Some(t) = browser_tab {
-        app.state.browser_tab = t.min(3);
+        app.state.browser_tab = t.min(views::browser::HISTORY_TAB);
     }
     if let Some(w) = browser_w {
         app.state.browser_w = w;

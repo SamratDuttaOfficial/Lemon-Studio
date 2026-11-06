@@ -7,6 +7,10 @@
 //! tab, a Lemon plugin joined through the host link brings its own pages), the Misc wrench, then
 //! ON / PAN / VOL / PITCH / RANGE / TRACK. The plugin parents its editor into a child area below the strip.
 //!
+//! A sample's channel says what each page is for: the strip's tabs are This clip and Source audio, and a row of sub-tabs
+//! under them holds that tab's pages. Source audio: the sampler's pages, Misc, and the plugins and automation of the whole
+//! file, all heard on every clip of it. This clip: the plugins and automation of that one clip.
+//!
 //! This module is the frame itself, the same everywhere: its state, drawing (os-ui) and what input does to it. The
 //! native window around it is the platform's:
 //! - `win32`: docked (a child of the main window, clipped to the workspace and stacked with the app's own windows) until
@@ -115,6 +119,8 @@ pub const TITLE_H: f32 = 27.0;
 pub const STRIP_H: f32 = 46.0;
 /// Left / right / bottom inset of the editor: 1 px outline, 5 px frame, 1 px editor outline.
 pub const BORDER: f32 = 7.0;
+/// Height of a sample's row of sub-tabs, under the strip.
+pub const SUB_H: f32 = 30.0;
 /// Width of the Presets box in the title bar (its right edge is 49 px from the window's).
 const PRESETS_W: f32 = 80.0;
 
@@ -289,8 +295,11 @@ struct State {
     preset: Option<String>,
     /// Misc tab page state (tracking page, keyboard scroll, drag, hover).
     misc_ui: crate::misc_page::MiscUi,
-    /// The This clip or Source audio tab is showing instead of the plugin, and that page's state.
+    /// The This clip or Source audio tab's plugins and automation page is showing instead of the plugin. On a sample's
+    /// channel `Some(Cut)` is the This clip tab; anything else is a page of the Source audio tab.
     clip_tab: Option<crate::clip_page::Tab>,
+    /// The Source audio sub-tab last open, for when that tab is opened again.
+    whole_sub: WholeSub,
     /// The part of the frame under the mouse.
     hover_part: Option<Part>,
     /// What could show a tooltip now: where, what it says, and whether it is over a page the frame draws (else it stays in
@@ -348,6 +357,7 @@ impl State {
             preset: None,
             misc_ui: Default::default(),
             clip_tab: None,
+            whole_sub: WholeSub::Page,
             hover_part: None,
             tip_for: None,
             tip_wait: None,
@@ -475,7 +485,7 @@ impl State {
     /// The mouse is at (x, y) with nothing being dragged: what can show a tooltip there. Whether what shows changed.
     fn tip_at(&mut self, x: f32, y: f32) -> bool {
         let part = part_at(self, x, y);
-        let lit = |p: Option<Part>| matches!(p, Some(Part::Tab(_) | Part::ClipTab(_)));
+        let lit = |p: Option<Part>| matches!(p, Some(Part::Tab(_) | Part::ClipTab(_) | Part::FxTab));
         let tab_changed = part != self.hover_part && (lit(part) || lit(self.hover_part));
         self.hover_part = part;
         let at = part.and_then(|p| Some((part_rect(self, p)?, part_tip(self, p)?, false)));
@@ -502,11 +512,48 @@ impl State {
         tab_changed || was
     }
 
-    /// Shows the This clip or Source audio tab (the strip with its tabs comes with it).
+    /// Shows the This clip or Source audio tab's plugins and automation page (the strip with its tabs comes with it).
     fn open_clip_tab(&mut self, tab: crate::clip_page::Tab) {
+        if self.top() == crate::clip_page::Tab::Whole {
+            self.whole_sub = self.whole_now();
+        }
         self.strip = true;
         self.misc = false;
         self.clip_tab = Some(tab);
+        self.clip_ui.hint.clear();
+    }
+    /// The window is a sample's channel's: its strip has the This clip and Source audio tabs over a row of sub-tabs.
+    fn sample(&self) -> bool {
+        self.info.clip.is_some()
+    }
+    /// Which of a sample's two tabs is open.
+    fn top(&self) -> crate::clip_page::Tab {
+        if self.clip_tab == Some(crate::clip_page::Tab::Cut) { crate::clip_page::Tab::Cut } else { crate::clip_page::Tab::Whole }
+    }
+    /// The Source audio sub-tab showing (while that tab is open).
+    fn whole_now(&self) -> WholeSub {
+        if self.misc {
+            WholeSub::Misc
+        } else if self.clip_tab == Some(crate::clip_page::Tab::Whole) {
+            WholeSub::Fx
+        } else {
+            WholeSub::Page
+        }
+    }
+    /// Opens a sample's tab `tab`: This clip on its page, Source audio on the sub-tab it was left on.
+    fn open_top(&mut self, tab: crate::clip_page::Tab) {
+        use crate::clip_page::Tab;
+        match tab {
+            Tab::Cut => self.open_clip_tab(Tab::Cut),
+            Tab::Whole if self.top() == Tab::Cut => {
+                self.misc = self.whole_sub == WholeSub::Misc;
+                self.clip_tab = (self.whole_sub == WholeSub::Fx).then_some(Tab::Whole);
+                if self.whole_sub == WholeSub::Page {
+                    self.events.push(FrameEvent::Page(self.page.min(self.pages.len().saturating_sub(1))));
+                }
+            }
+            Tab::Whole => {}
+        }
         self.clip_ui.hint.clear();
     }
     /// The This clip or Source audio tab showing, with what it shows.
@@ -521,10 +568,21 @@ impl State {
     fn resizable(&self) -> bool {
         self.resize_min.is_some() && !self.over_editor()
     }
-    /// Top of the editor (below the strip, or the title bar, and the editor's 1 px outline).
+    /// Top of the editor (below the strip and a sample's sub-tabs, or the title bar, and the editor's 1 px outline).
     fn area_y(&self) -> f32 {
-        TITLE_H + if self.strip { STRIP_H } else { 0.0 } + 1.0
+        let strip = if self.sample() { STRIP_H + SUB_H } else { STRIP_H };
+        TITLE_H + if self.strip { strip } else { 0.0 } + 1.0
     }
+}
+
+/// A sub-tab of a sample's Source audio tab.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum WholeSub {
+    /// One of the sampler's own pages (`State::page`).
+    Page,
+    Misc,
+    /// The plugins and automation page.
+    Fx,
 }
 
 /// Hit regions of the frame (window coordinates, logical px).
@@ -541,10 +599,12 @@ enum Part {
     Presets,
     PresetPrev,
     PresetNext,
-    /// Page tab `i`; `i == pages.len()` is the Misc tab.
+    /// Page tab `i`; `i == pages.len()` is the Misc tab. On a sample's channel, sub-tabs of Source audio.
     Tab(usize),
-    /// The This clip and Source audio tabs, after the Misc tab.
+    /// A sample's This clip and Source audio tabs.
     ClipTab(crate::clip_page::Tab),
+    /// The plugins and automation sub-tab of the sample's tab that is open.
+    FxTab,
     On,
     Knob(u8),
     /// The RANGE and TRACK value boxes.
@@ -607,11 +667,13 @@ const TIP_STAY: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// What a part of the frame does.
 fn part_tip(st: &State, p: Part) -> Option<String> {
-    let page = |i: usize| match st.pages.get(i) {
-        Some(PageIcon::Plugin) => "The plugin's own controls",
-        Some(PageIcon::Sample) => "Sample settings of this channel",
-        Some(PageIcon::Envelope) => "Envelopes and modulation of this channel",
-        None => "Misc: polyphony, tracking, time and other channel settings",
+    let page = |i: usize| match (st.pages.get(i), st.sample()) {
+        (Some(PageIcon::Plugin), true) => "The sampler's own controls: heard on every clip of this audio",
+        (Some(PageIcon::Plugin), false) => "The plugin's own controls",
+        (Some(PageIcon::Sample), _) => "Sample settings of this channel",
+        (Some(PageIcon::Envelope), _) => "Envelopes and modulation of this channel",
+        (None, true) => "Misc: polyphony, tracking, time and other settings of this audio's channel, heard on every clip of it",
+        (None, false) => "Misc: polyphony, tracking, time and other channel settings",
     };
     let s: String = match p {
         Part::Close => "Close this window".into(),
@@ -624,6 +686,10 @@ fn part_tip(st: &State, p: Part) -> Option<String> {
         Part::PresetNext => "Load the next preset".into(),
         Part::Tab(i) => page(i).into(),
         Part::ClipTab(t) => t.about().into(),
+        Part::FxTab => match st.top() {
+            crate::clip_page::Tab::Cut => "Plugins and automation lines on this clip only".into(),
+            crate::clip_page::Tab::Whole => "Plugins and automation lines on the whole source audio, heard on every clip of it".into(),
+        },
         Part::On => "Turn this channel on or off".into(),
         Part::Knob(0) => "Channel panning: drag to change, right-click for its menu".into(),
         Part::Knob(1) => "Channel volume: drag to change, right-click for its menu".into(),
@@ -668,12 +734,14 @@ fn parts(st: &State) -> Vec<(Rect, Part)> {
     ]);
     if st.strip {
         let dx = w - STRIP_RIGHT;
-        for i in 0..=st.pages.len() {
-            v.push((tab_rect(i), Part::Tab(i)));
-        }
-        if st.info.clip.is_some() {
+        if st.sample() {
             for tab in [crate::clip_page::Tab::Cut, crate::clip_page::Tab::Whole] {
                 v.push((clip_tab_rect(st, tab), Part::ClipTab(tab)));
+            }
+            v.extend(sub_tabs(st).into_iter().map(|t| (t.rect, t.part)));
+        } else {
+            for i in 0..=st.pages.len() {
+                v.push((tab_rect(i), Part::Tab(i)));
             }
         }
         v.extend(strip_off(st, w).into_iter().map(|(r, name)| (r, Part::Off(name))));
@@ -714,13 +782,108 @@ fn tab_rect(i: usize) -> Rect {
 }
 
 /// Width of the This clip and Source audio tabs: a name beside an icon.
-const CLIP_TAB_W: f32 = 92.0;
+const CLIP_TAB_W: f32 = 116.0;
 
-/// The cell of the clip tab `tab`, after the page tabs.
-fn clip_tab_rect(st: &State, tab: crate::clip_page::Tab) -> Rect {
-    let first = tab_rect(st.pages.len() + 1);
+/// The cell of a sample's tab `tab`, the first two of the strip.
+fn clip_tab_rect(_st: &State, tab: crate::clip_page::Tab) -> Rect {
+    let first = tab_rect(0);
     let k = if tab == crate::clip_page::Tab::Cut { 0.0 } else { 1.0 };
-    Rect::new(first.x + 3.0 + k * (CLIP_TAB_W + 2.0), first.y, CLIP_TAB_W, first.h)
+    Rect::new(first.x + k * (CLIP_TAB_W + 2.0), first.y, CLIP_TAB_W, first.h)
+}
+
+/// What a sub-tab shows (`sub_tabs`).
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum SubIcon {
+    Page(PageIcon),
+    Misc,
+    Fx,
+}
+
+/// One of a sample's sub-tabs: where, what it is, its name and icon.
+struct SubTab {
+    rect: Rect,
+    part: Part,
+    name: &'static str,
+    icon: SubIcon,
+}
+
+/// The sub-tabs of the sample's tab that is open, left to right: under Source audio the sampler's pages, Misc, and the
+/// plugins and automation; under This clip its plugins and automation.
+fn sub_tabs(st: &State) -> Vec<SubTab> {
+    let mut v: Vec<(Part, &'static str, SubIcon)> = Vec::new();
+    if st.top() == crate::clip_page::Tab::Whole {
+        for (i, &p) in st.pages.iter().enumerate() {
+            let name = match p {
+                PageIcon::Plugin => "Sampler",
+                PageIcon::Sample => "Sample",
+                PageIcon::Envelope => "Envelopes",
+            };
+            v.push((Part::Tab(i), name, SubIcon::Page(p)));
+        }
+        v.push((Part::Tab(st.pages.len()), "Misc", SubIcon::Misc));
+    }
+    v.push((Part::FxTab, "Plugins & automation", SubIcon::Fx));
+    let y = TITLE_H + STRIP_H + 1.0;
+    let mut x = BORDER + 4.0;
+    v.into_iter()
+        .map(|(part, name, icon)| {
+            let w = (30.0 + 7.0 * name.len() as f32).round();
+            let rect = Rect::new(x, y, w, SUB_H - 2.0);
+            x += w + 4.0;
+            SubTab { rect, part, name, icon }
+        })
+        .collect()
+}
+
+/// Whether sub-tab `part` is the one showing.
+fn sub_open(st: &State, part: Part) -> bool {
+    match part {
+        Part::FxTab => st.clip_tab.is_some(),
+        Part::Tab(i) if i == st.pages.len() => st.misc,
+        Part::Tab(i) => !st.over_editor() && st.page == i,
+        _ => false,
+    }
+}
+
+/// A sample's row of sub-tabs, under the strip: in the colour of the open tab above, which runs into it; the sub-tab
+/// showing underlined. Right of them, whom the row's pages are heard on.
+fn sub_row(c: &mut Canvas, st: &State, w: f32) {
+    let p = os_theme::current();
+    let y0 = TITLE_H + STRIP_H;
+    c.fill_rect(Rect::new(BORDER - 1.0, y0, w - 2.0 * BORDER + 2.0, SUB_H + 1.0), c_editor_line());
+    c.fill_rect(Rect::new(BORDER, y0 + 1.0, w - 2.0 * BORDER, SUB_H - 1.0), c_body());
+    let f = Font::new(13);
+    let lh = c.line_height(f);
+    let mut right = BORDER;
+    for t in sub_tabs(st) {
+        let (open, hov) = (sub_open(st, t.part), st.hover_part == Some(t.part));
+        if hov && !open {
+            c.fill_rrect(t.rect.inset(1.0), 4.0, c_strip().shade(0.04));
+        }
+        let ink = if open { p.a(0x49f1b1) } else if hov { c_text() } else { c_icon() };
+        let (ix, cy) = (t.rect.x + 13.0, t.rect.cy());
+        match t.icon {
+            SubIcon::Page(pi) => icon_at(c, page_tabler(pi), ix, cy, 16.0, ink),
+            SubIcon::Misc => icon_at(c, &tb::TOOL, ix, cy, 16.0, ink),
+            SubIcon::Fx => icon_at(c, &tb::ADJUSTMENTS_HORIZONTAL, ix, cy, 16.0, ink),
+        }
+        c.text_clip(f, ix + 11.0, (cy - lh / 2.0).round(), t.rect.right() - ix - 12.0, if open { c_text() } else { ink }, t.name);
+        if open {
+            c.fill_rect(Rect::new(t.rect.x + 3.0, t.rect.bottom() - 1.0, t.rect.w - 6.0, 2.0), p.a(0x49f1b1));
+        }
+        right = t.rect.right();
+    }
+    let note = match st.top() {
+        crate::clip_page::Tab::Cut => "Heard on this clip only",
+        crate::clip_page::Tab::Whole => "Heard on every clip of this audio",
+    };
+    let nf = Font::new(12);
+    let nw = c.text_width(nf, note);
+    let end = w - BORDER - 10.0;
+    if end - nw > right + 12.0 {
+        let nh = c.line_height(nf);
+        c.text(nf, end - nw, (y0 + 1.0 + (SUB_H - 1.0) / 2.0 - nh / 2.0).round(), c_grey(), note);
+    }
 }
 
 /// How far below the strip's top a tab's shape starts: the room over it makes it read as a tab, not a button.
@@ -809,6 +972,9 @@ fn paint(c: &mut Canvas, st: &State) {
     title_bar(c, st, w);
     if st.strip {
         strip(c, st, w);
+        if st.sample() {
+            sub_row(c, st, w);
+        }
     }
     // The editor's 1 px outline; the plugin's own window covers the inside.
     let ay = st.area_y();
@@ -823,18 +989,16 @@ fn paint(c: &mut Canvas, st: &State) {
     } else if let Some((tab, v)) = st.clip_shown() {
         crate::clip_page::paint(c, &os_theme::current(), a.x, a.y, v, &st.clip_ui, tab);
     }
-    // The open tab runs through the editor's outline into the page.
+    // The open tab runs through the outline under it: into the page, or a sample's tab into its row of sub-tabs.
     if st.strip {
-        let open = if st.misc {
-            Some(tab_rect(st.pages.len()))
-        } else if let Some(t) = st.clip_tab.filter(|_| st.info.clip.is_some()) {
-            Some(clip_tab_rect(st, t))
+        let (r, y) = if st.sample() {
+            (clip_tab_rect(st, st.top()), TITLE_H + STRIP_H)
+        } else if st.misc {
+            (tab_rect(st.pages.len()), ay - 1.0)
         } else {
-            Some(tab_rect(st.page.min(st.pages.len())))
+            (tab_rect(st.page.min(st.pages.len())), ay - 1.0)
         };
-        if let Some(r) = open {
-            c.fill_rect(Rect::new(r.x + 1.0, ay - 1.0, r.w - 2.0, 1.0), c_body());
-        }
+        c.fill_rect(Rect::new(r.x + 1.0, y, r.w - 2.0, 1.0), c_body());
     }
     if st.tip.is_some() {
         frame_tip(c, st, w, h);
@@ -923,9 +1087,9 @@ fn strip(c: &mut Canvas, st: &State, w: f32) {
     let (dx, dy) = (w - STRIP_RIGHT, TITLE_H - 24.0);
     c.fill_rect(Rect::new(BORDER - 1.0, TITLE_H, w - 2.0 * BORDER + 2.0, STRIP_H), c_strip_line());
     c.fill_rect(Rect::new(BORDER, TITLE_H + 1.0, w - 2.0 * BORDER, STRIP_H - 1.0), c_strip());
-    // Page tabs, then the Misc wrench (always the last tab).
+    // Page tabs, then the Misc wrench (always the last tab). A sample's channel has its sub-tabs instead (`sub_row`).
     let n = st.pages.len();
-    for i in 0..=n {
+    for i in (0..=n).filter(|_| !st.sample()) {
         let cell = tab_rect(i);
         let active = if i == n { st.misc } else { !st.over_editor() && st.page == i };
         let col = tab_face(c, cell, active, st.hover_part == Some(Part::Tab(i)));
@@ -933,11 +1097,11 @@ fn strip(c: &mut Canvas, st: &State, w: f32) {
         icon_at(c, t, cell.cx(), cell.y + TAB_TOP + (cell.h - TAB_TOP) / 2.0, 22.0, col);
     }
     // A sample's channel: this clip and the source audio, each named beside its icon.
-    if st.info.clip.is_some() {
+    if st.sample() {
         use crate::clip_page::Tab;
         for tab in [Tab::Cut, Tab::Whole] {
             let cell = clip_tab_rect(st, tab);
-            let active = !st.misc && st.clip_tab == Some(tab);
+            let active = st.top() == tab;
             let col = tab_face(c, cell, active, st.hover_part == Some(Part::ClipTab(tab)));
             let cy = cell.y + TAB_TOP + (cell.h - TAB_TOP) / 2.0;
             let ix = cell.x + 12.0;
@@ -1163,6 +1327,11 @@ impl State {
                 Reply::Relayout
             }
             Some(Part::ClipTab(tab)) => {
+                self.open_top(tab);
+                Reply::Relayout
+            }
+            Some(Part::FxTab) => {
+                let tab = self.top();
                 self.misc = false;
                 self.clip_tab = Some(tab);
                 self.clip_ui.hint.clear();
@@ -1617,7 +1786,8 @@ mod tests {
         }
     }
 
-    /// The clip tabs are named, wide enough for their names, clear of the controls to their right at the smallest window.
+    /// A sample's tabs are named, wide enough for their names, clear of the controls to their right at the smallest
+    /// window; their pages are sub-tabs in a row of their own under the strip.
     #[test]
     fn the_clip_tabs_fit_beside_the_strip_controls() {
         use crate::clip_page::Tab;
@@ -1626,8 +1796,17 @@ mod tests {
         assert_eq!(part_at(&st, last.cx(), last.cy()), Some(Part::ClipTab(Tab::Whole)));
         assert!(last.right() < 334.0, "{last:?} before the ON light of a {} px window", STRIP_RIGHT);
         let first = clip_tab_rect(&st, Tab::Cut);
-        assert!(first.right() <= last.x && first.x >= tab_rect(st.pages.len()).right());
+        assert!(first.right() <= last.x && first.x >= BORDER);
         assert_ne!(Tab::Cut.name(), Tab::Whole.name());
+        // Source audio's sub-tabs: the sampler's page, Misc, its plugins and automation, under the strip.
+        let subs = sub_tabs(&st);
+        assert_eq!(subs.iter().map(|t| t.name).collect::<Vec<_>>(), ["Sampler", "Misc", "Plugins & automation"]);
+        for t in &subs {
+            assert!(t.rect.y >= TITLE_H + STRIP_H && t.rect.bottom() <= st.area_y() - 1.0, "{:?}", t.rect);
+            assert_eq!(part_at(&st, t.rect.cx(), t.rect.cy()), Some(t.part));
+        }
+        assert_eq!(st.area_y(), TITLE_H + STRIP_H + SUB_H + 1.0);
+        assert_eq!(state(true, "Bus 1").area_y(), TITLE_H + STRIP_H + 1.0, "a plain plugin has no row of sub-tabs");
     }
 
     fn state(strip: bool, target: &str) -> State {
@@ -1659,36 +1838,51 @@ mod tests {
             ..Side::default()
         };
         let mut st = state(true, "Bus 1");
-        st.info.clip = Some(Box::new(PageVals { cut: side(), whole: side() }));
+        st.info.clip = Some(Box::new(PageVals { cut: side(), whole: side(), looping: true }));
         st
     }
 
-    /// The strip's CUT and WHOLE tabs: after the Misc wrench, each covers the plugin's editor with its page; the page fits
-    /// the frame to itself, and a page tab brings the plugin back.
+    /// A sample's This clip and Source audio tabs hold its pages as sub-tabs: Source audio the sampler (the plugin's
+    /// editor), Misc and the plugins and automation of the whole file; This clip its own plugins and automation. A page of
+    /// the frame's covers the editor and fits the frame to itself; Source audio opens on the sub-tab it was left on.
     #[test]
     fn the_cut_and_whole_tabs_cover_the_editor() {
         use crate::clip_page::{Tab, PAGE_H, PAGE_W};
         let screen = |x: f32, y: f32| (x as i32, y as i32);
-        // A window on a channel without a sample has neither.
+        // A window on a channel without a sample has neither: its page tabs and Misc are in the strip.
         let plain = state(true, "Bus 1");
+        assert_eq!(part_at(&plain, tab_rect(1).cx(), tab_rect(1).cy()), Some(Part::Tab(1)));
         assert_eq!(part_at(&plain, tab_rect(2).cx(), tab_rect(2).cy()), None);
         let mut st = clip_state();
         let (cut, whole) = (clip_tab_rect(&st, Tab::Cut), clip_tab_rect(&st, Tab::Whole));
+        let sub = |st: &State, p: Part| sub_tabs(st).into_iter().find(|t| t.part == p).map(|t| t.rect).unwrap_or_else(|| panic!("no {p:?}"));
+        // It opens on Source audio, on the sampler: the plugin's editor.
+        assert_eq!((st.top(), st.over_editor()), (Tab::Whole, false));
         assert_eq!(part_at(&st, cut.cx(), cut.cy()), Some(Part::ClipTab(Tab::Cut)));
         assert_eq!(part_at(&st, whole.cx(), whole.cy()), Some(Part::ClipTab(Tab::Whole)));
+        // This clip: its plugins and automation, its only sub-tab.
         assert_eq!(st.left_down(cut.cx(), cut.cy(), false, &screen), Reply::Relayout);
         assert_eq!((st.clip_tab, st.over_editor()), (Some(Tab::Cut), true));
         assert_eq!(st.shown(), (PAGE_W, PAGE_H));
+        assert_eq!(sub_tabs(&st).iter().map(|t| t.part).collect::<Vec<_>>(), [Part::FxTab]);
+        // Source audio: back on the sampler, where it was left.
         assert_eq!(st.left_down(whole.cx(), whole.cy(), false, &screen), Reply::Relayout);
+        assert!(st.clip_tab.is_none() && !st.over_editor());
+        // Its plugins and automation.
+        let fx = sub(&st, Part::FxTab);
+        assert_eq!(st.left_down(fx.cx(), fx.cy(), false, &screen), Reply::Relayout);
         assert_eq!(st.clip_tab, Some(Tab::Whole));
-        // The Misc tab takes over from them, and they from it.
-        let misc = tab_rect(st.pages.len());
+        // Misc takes over from it.
+        let misc = sub(&st, Part::Tab(st.pages.len()));
         st.left_down(misc.cx(), misc.cy(), false, &screen);
         assert!(st.misc && st.clip_tab.is_none());
+        // To This clip and back: Source audio is on Misc again.
         st.left_down(cut.cx(), cut.cy(), false, &screen);
         assert!(!st.misc && st.clip_tab == Some(Tab::Cut));
-        // A page tab brings the editor back, at its own size.
-        let page = tab_rect(0);
+        st.left_down(whole.cx(), whole.cy(), false, &screen);
+        assert!(st.misc && st.clip_tab.is_none());
+        // The sampler's sub-tab brings the editor back, at its own size.
+        let page = sub(&st, Part::Tab(0));
         st.left_down(page.cx(), page.cy(), false, &screen);
         assert!(st.clip_tab.is_none() && !st.over_editor());
         assert_eq!(st.shown(), (480.0, 270.0));

@@ -397,6 +397,10 @@ impl App {
     /// playlist's in SONG mode; one with no length does not count.
     pub(crate) fn selection_loop(&self) -> Option<(u32, u32)> {
         let s = &self.state;
+        // While one audio plays alone (`App::audition`), the loop is that audio.
+        if let Some(a) = s.clip_fx.audition {
+            return Some(a.range);
+        }
         let r = if s.song_mode { s.playlist.range } else if s.shown(crate::app::Win::PianoRoll) { s.piano.range } else { None };
         r.filter(|r| r.1 > r.0)
     }
@@ -616,7 +620,7 @@ impl App {
     /// The current pattern's tick at playback tick `t`: the tick itself in PAT mode; in SONG mode where a clip of the
     /// pattern plays there. Past the end of the take's clip that clip is made longer (to the end of `t`'s bar); with
     /// no clip, a whole-pattern clip just before `t` becomes the take's and grows, else one is placed from the start
-    /// of that bar on the first free track (spec §2).
+    /// of that bar on the selected Arranger track (spec §2).
     fn rec_pattern_tick(&mut self, t: f64, song: bool) -> Option<f64> {
         if !song {
             return Some(t);
@@ -657,7 +661,7 @@ impl App {
         }
         let at = ti / bar * bar;
         let len = crate::piano::pattern_length(s, pattern).max(bar);
-        let track = crate::playlist::free_track(s, 0, at, at + len);
+        let track = crate::playlist::rec_track(s);
         let clip = os_model::Clip::new(at, len, track, ClipSource::Pattern(pattern));
         crate::playlist::arr_mut(s).clips.push(clip);
         if let Some(k) = s.rec.take.as_mut() {
@@ -1075,11 +1079,12 @@ mod tests {
     }
 
     /// SONG mode: with no clip of the pattern at the song position, one is placed from the start of that bar on the
-    /// first free track, and the note lands in it (spec §2 Taking notes).
+    /// Arranger's selected track, and the note lands in it (spec §2 Taking notes).
     #[test]
     fn places_a_clip_in_song_mode() {
         let mut app = app();
         crate::playlist::arr_mut(&mut app.state).clips.clear();
+        app.state.playlist.track = 4;
         app.toggle_record();
         let bar = f64::from(app.state.project.bar_ticks());
         key(&mut app, KeyCode::KeyZ, true, bar + 48.0, true);
@@ -1087,7 +1092,7 @@ mod tests {
         stop(&mut app);
         let clips = crate::playlist::clips(&app.state);
         assert_eq!(clips.len(), 1);
-        assert_eq!((clips[0].position, clips[0].track, clips[0].source), (bar as u32, 0, ClipSource::Pattern(1)));
+        assert_eq!((clips[0].position, clips[0].track, clips[0].source), (bar as u32, 4, ClipSource::Pattern(1)));
         assert_eq!(notes(&app), [(48, 48, 0)]);
         // Undo takes the clip away with the notes.
         crate::history::undo(&mut app.state);
@@ -1141,8 +1146,9 @@ mod tests {
         assert_eq!(notes(&app), [(408, 24, 0)]);
         let (app, bar) = take(false, f64::from(2 * bar + 16));
         assert_eq!(clips(&app), [(0, 0, bar), (0, 2 * bar, bar)]);
+        // A clip in the way on the selected track: the take's goes there all the same.
         let (app, bar) = take(true, 400.0);
-        assert_eq!(clips(&app), [(0, 0, bar), (0, bar + bar / 2, bar), (1, bar, bar)]);
+        assert_eq!(clips(&app), [(0, 0, bar), (0, bar + bar / 2, bar), (0, bar, bar)]);
     }
 
     /// SONG mode: a note held past the take's clip makes it longer while playback runs, so the written note ends inside

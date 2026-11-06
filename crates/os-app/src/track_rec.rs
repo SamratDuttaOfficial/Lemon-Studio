@@ -155,8 +155,9 @@ impl App {
         self.invalidate();
     }
 
-    /// The take's files as audio clips where it started, each on the first playlist track free there, its channel on
-    /// the mixer track it was recorded on: one undo step (or, with Auto-create audio clips off, only the files).
+    /// The take's files as audio clips where it started, the first on the selected Arranger track and the others on the
+    /// free tracks under it, each channel on the mixer track it was recorded on: one undo step (or, with Auto-create audio
+    /// clips off, only the files).
     fn track_rec_place(&mut self) {
         let Some(r) = self.track_rec.take() else { return };
         let auto = crate::settings_file::flag(AUTO_CLIPS, true);
@@ -190,9 +191,11 @@ impl App {
                 let tempo = p.tick_tempo(p.tempo.unwrap_or(140.0).max(1.0));
                 let ppq = f64::from(p.ppq.max(1));
                 let mut placed = 0;
-                for (t, path, frames, at) in &made {
+                let first = crate::playlist::rec_track(s);
+                for (k, (t, path, frames, at)) in made.iter().enumerate() {
                     let len = (*frames as f64 / f64::from(r.rate) * tempo / 60.0 * ppq).ceil() as u32;
-                    let track = crate::playlist::free_track(s, 0, *at, at + len.max(1));
+                    // The first take on the selected track, the others on the free tracks under it.
+                    let track = if k == 0 { first } else { crate::playlist::free_track(s, first + 1, *at, at + len.max(1)) };
                     if crate::playlist::add_audio_clip_in(s, &path.to_string_lossy(), track, *at, Some(*t)).is_some() {
                         placed += 1;
                     }
@@ -235,8 +238,10 @@ mod tests {
     use super::*;
     use os_engine::RecordTap;
 
-    /// Arming turns Audio on; a take of an armed track from Record and Play to Stop becomes a clip at its first tick,
-    /// its channel on that track, as "Recorded items" (spec: audio/track-io.md §2.5).
+    /// Arming turns Audio on; a take of an armed track from Record and Play to Stop becomes a clip at its first tick on
+    /// the Arranger's selected track, its channel on that mixer track, as "Recorded items" (spec: audio/track-io.md §2.5).
+    use os_model::ClipSource as ClipSourceT;
+
     #[test]
     fn an_armed_track_records_into_the_playlist() {
         let mut app = App::new(None);
@@ -254,6 +259,10 @@ mod tests {
         app.state.rec.armed = true;
         app.track_rec_tick();
         let takes = app.track_rec.as_ref().expect("a take").takes.clone();
+        // The Arranger's selected track: the take goes there, whatever is on it.
+        app.state.playlist.track = 3;
+        let over = os_model::Clip::new(0, 50_000, 3, ClipSourceT::Pattern(1));
+        crate::playlist::arr_mut(&mut app.state).clips.push(over);
         takes.push(2, 90, &[0.5; 96]);
         takes.push(1, 96, &vec![0.25; 9600]);
         takes.push(1, 97, &vec![0.25; 9600]);
@@ -274,7 +283,7 @@ mod tests {
         let name = path.file_name().unwrap().to_string_lossy().into_owned();
         assert!(path.parent().unwrap().ends_with("Recorded") && name.ends_with("_Bus 1.wav"), "{name}");
         let clip = app.state.project.arrangement().unwrap().clips.last().unwrap().clone();
-        assert_eq!(clip.position, 96);
+        assert_eq!((clip.position, clip.track), (96, 3), "on the selected track");
         assert!(app.state.history.entries().iter().any(|e| e.1 == crate::one_click::RECORDED));
         assert_eq!(app.arm_tracks(&[1], false), None);
         assert!(!app.state.project.mixer.iter().any(|m| m.armed));

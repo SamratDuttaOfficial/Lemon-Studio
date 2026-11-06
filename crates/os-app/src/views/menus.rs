@@ -318,12 +318,10 @@ const PAT_CMDS: &[Item] = &[
 ];
 
 const VIEW_ITEMS: &[Item] = &[
+    // The Arranger, the Instrument rack and the Browser are always there: they are not listed to be shown or hidden.
     head("Windows"),
-    it("Arranger", "F5").on().tick().cmd(MenuCmd::Window(Win::Playlist)),
     it("Piano roll", "F7").on().tick().cmd(MenuCmd::Window(Win::PianoRoll)),
-    it("Instrument rack", "F6").on().tick().cmd(MenuCmd::Window(Win::ChannelRack)),
     it("Mixer", "F9").on().tick().cmd(MenuCmd::Window(Win::Mixer)),
-    it("Browser", "Alt+F8").on().tick().cmd(MenuCmd::Window(Win::Browser)),
     it("Clip palette", "Ctrl+F8").on().cmd(MenuCmd::ClipPalette),
     it("Plugin palette", "F8").on().cmd(MenuCmd::PluginPalette),
     it("Tap tempo", "Ctrl+F5").tick().cmd(MenuCmd::Window(Win::Tapper)),
@@ -1319,18 +1317,27 @@ mod tests {
         }
         let save = bar[0].rows.iter().find(|r| r.label == "Save").unwrap();
         assert_eq!((save.shortcut, save.pick), ("Ctrl+S", Some((0, FILE_SAVE))));
-        let playlist = bar[VIEW].rows.iter().find(|r| r.label == "Arranger").unwrap();
-        assert_eq!(pick(VIEW, playlist.pick.unwrap().1), Action::ToggleWin(Win::Playlist));
-        assert_eq!(playlist.mark, Mark::Check(app.state.shown(Win::Playlist)));
+        // The Arranger, the Instrument rack and the Browser are always there: VIEW does not list them.
+        for always in ["Arranger", "Instrument rack", "Browser"] {
+            assert!(!bar[VIEW].rows.iter().any(|r| r.label == always && r.kind == Kind::Item), "{always}");
+        }
+        let piano = bar[VIEW].rows.iter().find(|r| r.label == "Piano roll").unwrap();
+        assert_eq!(pick(VIEW, piano.pick.unwrap().1), Action::ToggleWin(Win::PianoRoll));
+        assert_eq!(piano.mark, Mark::Check(app.state.shown(Win::PianoRoll)));
         // Patterns in use head PATTERNS, the current one marked.
         assert_eq!(bar[PATTERNS].rows[0].label, crate::typein::INPUT_LABEL, "a new project uses no pattern yet");
         app.state.project.patterns.iter_mut().find(|p| p.number == 1).expect("pattern 1").name = Some("Intro".into());
         let first = bar_model(&app.state)[PATTERNS].rows[0].clone();
         assert_eq!((first.label.as_str(), first.mark, first.pick), ("Intro", Mark::Radio(true), Some((PATTERNS, PATTERN_PICK + 1))));
-        // Live state: hiding the playlist unticks it.
-        app.state.hide(Win::Playlist);
-        let playlist = bar_model(&app.state)[VIEW].rows.iter().find(|r| r.label == "Arranger").unwrap().clone();
-        assert_eq!(playlist.mark, Mark::Check(false));
+        // Live state: showing the piano roll ticks it.
+        let was = app.state.shown(Win::PianoRoll);
+        if was {
+            app.state.hide(Win::PianoRoll);
+        } else {
+            app.state.raise(Win::PianoRoll);
+        }
+        let piano = bar_model(&app.state)[VIEW].rows.iter().find(|r| r.label == "Piano roll").unwrap().clone();
+        assert_eq!(piano.mark, Mark::Check(!was));
         let declick = bar[TOOLS_MENU].rows.iter().find(|r| r.label == DECLICK_LABEL).unwrap();
         assert_eq!((declick.enabled, declick.pick), (false, None), "no native submenus yet");
     }

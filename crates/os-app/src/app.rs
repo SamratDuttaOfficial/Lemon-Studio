@@ -260,6 +260,8 @@ pub enum Action {
     BrowserList,
     /// Title-bar up arrow: close every node of the tab.
     BrowserCollapse,
+    /// The title bar's fold button and the folded strip's open button: the browser folds to a thin strip or opens again.
+    BrowserFold,
     /// Title-bar curved arrow: Reread structure (spec: ui/browser.md §4, "Title-bar icons").
     BrowserReread,
     /// Title-bar ▸: the browser options menu (spec: ui/browser.md §4).
@@ -1009,6 +1011,7 @@ pub struct State {
     /// The empty workspace took the last click: no window has the focus (Ctrl+F12 closes them all,
     /// spec: ui/close-windows.md §2).
     pub no_focus: bool,
+    /// The browser is open; `false`: folded to its thin strip (it is always there).
     pub show_browser: bool,
     /// The tab of the Arranger's window last shown: what it opens on (`App::flip_tab`).
     pub panel_tab: Win,
@@ -1156,9 +1159,9 @@ impl State {
         self.z.iter().rev().copied().find(|&w| self.is_max(w))
     }
 
-    /// The workspace: right of the browser, below the toolbar.
+    /// The workspace: right of the browser (or of its thin strip while it is folded), below the toolbar.
     pub fn work_rect(&self) -> Rect {
-        let left = if self.show_browser { views::browser_w(self) } else { 0.0 };
+        let left = views::browser_space(self);
         let top = views::work_y(self);
         Rect::new(left, top, (self.screen.0 - left).max(0.0), (self.screen.1 - top).max(0.0))
     }
@@ -1209,7 +1212,12 @@ impl State {
         self.no_focus = false;
     }
 
+    /// Hides `w`. The Arranger's window (the Arranger and Instrument rack tabs) is always there: it can be collapsed to its
+    /// strip, never closed.
     pub fn hide(&mut self, w: Win) {
+        if w.is_tab() {
+            return;
+        }
         self.z.retain(|&o| o != w);
     }
 
@@ -4023,6 +4031,11 @@ impl App {
         s.control.settle_tick(&mut s.project, s.piano.dirty);
         crate::clip_fx::settle(self);
         self.state.clip_fx.play_tick = (self.transport.playing() && self.transport.song()).then(|| self.transport.tick());
+        #[cfg(plugin_windows)]
+        if !cfg!(test) {
+            self.state.clip_fx.shown = self.plugins.clip_page(&self.state.z);
+        }
+        self.audition_tick();
         self.control_tick();
         self.plugin_tick();
         // Playback loops over the time selection, as it is now (spec: ui/recording.md §5).
@@ -4120,7 +4133,7 @@ impl App {
         // and sent too, so an edit is always heard without stopping and starting again.
         if self.transport.playing() && !self.state.piano.dirty && self.played_check.elapsed() >= PLAYED_CHECK {
             self.played_check = std::time::Instant::now();
-            let now = crate::rack::play_project(&self.state);
+            let now = self.play_now();
             match &self.played {
                 Some(p) if *p != now => self.state.piano.dirty = true,
                 Some(_) => {}
@@ -4137,7 +4150,7 @@ impl App {
                 s.control.event(&crate::control::By::User, "edit", "", Vec::new());
             }
             // Also while Play is still starting (not `playing` yet); ignored when stopped.
-            let now = crate::rack::play_project(&self.state);
+            let now = self.play_now();
             self.transport.update(&now);
             self.played = Some(now);
         }
@@ -5883,6 +5896,7 @@ impl App {
                     | Action::MaxWin(_)
                     | Action::BrowserTab(_)
                     | Action::BrowserCollapse
+                    | Action::BrowserFold
                     | Action::BrowserReread
                     | Action::PianoUndo
                     | Action::PianoTool(_)
@@ -7661,8 +7675,88 @@ impl App {
         self.start_playback_counted(0);
     }
 
+    /// What Play plays now: while a This clip or Source audio page shows (and its loop switch is on, and Record is not
+    /// armed), just that audio, looped (`clip_fx::audition`).
+    pub(crate) fn play_alone(&self) -> Option<crate::clip_fx::Audition> {
+        let s = &self.state;
+        if s.clip_fx.whole_song || s.rec.armed {
+            return None;
+        }
+        let (row, tab) = s.clip_fx.shown?;
+        crate::clip_fx::audition(s, row, tab)
+    }
+
+    /// The project playback has now: the audition's while one plays, else the song as it plays.
+    fn play_now(&self) -> os_model::Project {
+        let s = &self.state;
+        match s.clip_fx.audition.and_then(|a| crate::clip_fx::audition(s, a.row, a.tab)) {
+            Some(a) => crate::clip_fx::audition_project(s, &a),
+            None => crate::rack::play_project(s),
+        }
+    }
+
+    /// Plays audition `a` from tick `from`, looping over it, after a count-in of `bars` bars.
+    fn play_audition(&mut self, a: crate::clip_fx::Audition, from: u32, bars: u32) {
+        if crate::init::apply(&mut self.state) {
+            self.invalidate();
+        }
+        let p = crate::clip_fx::audition_project(&self.state, &a);
+        self.state.clip_fx.audition = Some(a);
+        self.transport.set_loop(Some(a.range));
+        self.transport.play_counted(&p, PlayMode::Song, f64::from(from.clamp(a.range.0, a.range.1.saturating_sub(1))), bars);
+        self.played = Some(p);
+        self.invalidate();
+    }
+
+    /// The audition's playhead to `tick`, playing on.
+    pub(crate) fn audition_seek(&mut self, tick: u32) {
+        let Some(a) = self.state.clip_fx.audition.and_then(|a| crate::clip_fx::audition(&self.state, a.row, a.tab)) else { return };
+        self.transport.stop();
+        self.play_audition(a, tick, 0);
+    }
+
+    /// Each tick: playback follows the page in front. Playing the song when a page comes to the front, it loops that
+    /// audio instead (from where the song was, inside a clip); the page gone, it stops; stopped, the audition is over.
+    fn audition_tick(&mut self) {
+        let now = self.state.clip_fx.audition;
+        if !self.transport.playing() {
+            if now.is_some() {
+                self.state.clip_fx.audition = None;
+                self.invalidate();
+            }
+            return;
+        }
+        match (now, self.play_alone()) {
+            // The same audio: the loop follows its clip as it is trimmed or moved.
+            (Some(a), Some(w)) if a.row == w.row && a.tab == w.tab && a.clip.id == w.clip.id => {
+                if a != w {
+                    self.state.clip_fx.audition = Some(w);
+                    self.transport.set_loop(Some(w.range));
+                    self.state.piano.dirty = true;
+                }
+            }
+            (_, Some(w)) => {
+                let at = self.transport.tick().max(0.0) as u32;
+                let from = if now.is_none() && w.tab == crate::clip_page::Tab::Cut && (w.range.0..w.range.1).contains(&at) { at } else { crate::clip_fx::audition_start(&self.state, &w) };
+                self.transport.stop();
+                self.play_audition(w, from, 0);
+            }
+            (Some(_), None) => {
+                self.transport.stop();
+                self.record_stopped();
+                self.state.clip_fx.audition = None;
+                self.invalidate();
+            }
+            (None, None) => {}
+        }
+    }
+
     /// `start_playback` after a recording count-in of `bars` bars (spec: ui/recording.md §3).
     pub(crate) fn start_playback_counted(&mut self, bars: u32) {
+        if let Some(a) = self.play_alone() {
+            let from = crate::clip_fx::audition_start(&self.state, &a);
+            return self.play_audition(a, from, bars);
+        }
         let song = self.state.song_mode;
         if song && !self.one_click_starting() && self.state.project.arrangement().is_none_or(|a| a.clips.is_empty()) {
             self.state.message = Some("The arranger is empty: nothing to play as a song".into());
@@ -8540,7 +8634,16 @@ impl App {
                 self.damage_win(Win::PianoRoll);
             }
             Action::CloseWin(w) => s.hide(w),
-            Action::BrowserRow(_) | Action::BrowserTab(_) | Action::BrowserList | Action::BrowserCollapse | Action::BrowserReread | Action::BrowserMenu | Action::BrowserSearch | Action::BrowserClear | Action::BrowserSplitter => {}
+            Action::BrowserRow(_)
+            | Action::BrowserTab(_)
+            | Action::BrowserList
+            | Action::BrowserCollapse
+            | Action::BrowserFold
+            | Action::BrowserReread
+            | Action::BrowserMenu
+            | Action::BrowserSearch
+            | Action::BrowserClear
+            | Action::BrowserSplitter => {}
             Action::TypeIn(t) => crate::typein::click(s, t),
             Action::PlaylistArea | Action::MixerArea | Action::RackArea | Action::Swallow => {}
             Action::PlTool(_)
@@ -14884,8 +14987,7 @@ mod tests {
         frame(&mut app, &mut a, None);
         assert_eq!(app.state.z, vec![Win::ChannelRack]);
         app.act(Action::ToggleWin(Win::ChannelRack));
-        assert!(!app.state.shown(Win::ChannelRack), "on the front rack it hides it");
-        app.act(Action::ToggleWin(Win::ChannelRack));
+        assert!(app.state.shown(Win::ChannelRack), "it is always there: on the front rack the button leaves it");
         frame(&mut app, &mut a, None);
 
         // Name button opens the channel's Lemon Sampler (a sampler row never shows the info window); the slot selects.
@@ -18651,14 +18753,15 @@ mod tests {
             assert!(views::menus::works(views::menus::VIEW, it), "{label} is not greyed out");
         }
 
-        // F12 and the menu entry: everything but the browser.
+        // F12 and the menu entry: everything but the browser and the Arranger's window, which are always there.
+        let others = |app: &App| app.state.z.iter().copied().filter(|w| !w.is_tab()).collect::<Vec<_>>();
         app.state.z = all.clone();
         app.key(&f12, false, false);
-        assert!(app.state.z.is_empty());
+        assert!(others(&app).is_empty() && app.state.shown(Win::Playlist));
         assert!(app.state.show_browser);
         app.state.z = all.clone();
         app.menu_item(views::menus::VIEW, view("Close all windows"));
-        assert!(app.state.z.is_empty());
+        assert!(others(&app).is_empty());
 
         // Alt+F12: only the channel settings window (and hosted plugin windows).
         app.state.z = all.clone();
@@ -18672,10 +18775,10 @@ mod tests {
         app.state.z = all.clone();
         app.state.raise(Win::Mixer);
         app.key(&f12, true, false);
-        assert_eq!(app.state.z, vec![Win::Mixer]);
+        assert_eq!(others(&app), vec![Win::Mixer]);
         app.state.z = all.clone();
         app.menu_item(views::menus::VIEW, view("Close all unfocused windows"));
-        assert_eq!(app.state.z, vec![Win::PianoRoll]);
+        assert_eq!(others(&app), vec![Win::PianoRoll]);
         // A click on the empty workspace leaves no window focused: Ctrl+F12 closes them all.
         app.state.z = vec![Win::ChannelRack];
         app.state.wins[0] = WinState { rect: Rect::new(320.0, 150.0, 800.0, 400.0), maxed: false, mini: false };
@@ -18686,18 +18789,18 @@ mod tests {
         app.mouse_up();
         assert!(app.state.no_focus);
         app.key(&f12, true, false);
-        assert!(app.state.z.is_empty());
+        assert_eq!(app.state.z, vec![Win::ChannelRack], "the Arranger's window stays");
         // Opening or clicking a window focuses it again.
         app.state.raise(Win::Playlist);
         app.state.raise(Win::Mixer);
         assert!(!app.state.no_focus);
         app.key(&f12, true, false);
-        assert_eq!(app.state.z, vec![Win::Mixer]);
+        assert_eq!(app.state.z, vec![Win::Playlist, Win::Mixer]);
         // Shift+F12 (Align all channel editors) is not available yet: nothing closes.
         app.shift = true;
         app.key(&f12, false, false);
         app.shift = false;
-        assert_eq!(app.state.z, vec![Win::Mixer]);
+        assert_eq!(app.state.z, vec![Win::Playlist, Win::Mixer]);
     }
 
     /// The toolbar's song position slider (spec: ui/song-position-slider.md), with FL's measured numbers: an 8.25-bar
@@ -19536,9 +19639,9 @@ mod tests {
             (Action::Util(Util::Save), "Save as... / Save new version (Shift+Ctrl+S)"),
             (Action::MenuItem(0, views::menus::FILE_EXPORT), "Export audio... (Ctrl+R)"),
             (Action::MenuItem(views::menus::OPTIONS_MENU, views::menus::OPT_INFO), "Open the project info (F11)"),
-            (Action::ToggleWin(Win::Playlist), "Show or hide the Arranger, right-click: maximize it (F5)"),
+            (Action::ToggleWin(Win::Playlist), "Show the Arranger, right-click: maximize it (F5)"),
             (Action::ToggleWin(Win::PianoRoll), "Show or hide the Piano roll, right-click: maximize it (F7)"),
-            (Action::ToggleWin(Win::Browser), "Show or hide the Browser, right-click: Plugin palette (Alt+F8)"),
+            (Action::ToggleWin(Win::Browser), "Fold the Browser to a thin strip or open it again, right-click: Plugin palette (Alt+F8)"),
             (Action::PickerOpen, "Open the Plugin palette (F8)"),
             (Action::ProjectPicker, "Open the Clip palette, right-click: Plugin palette (Ctrl+F8)"),
             (Action::ToggleWin(Win::Touch), "Show or hide the Touch controller (Alt+F7)"),

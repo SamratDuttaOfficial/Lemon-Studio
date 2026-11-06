@@ -1082,6 +1082,20 @@ impl Plugins {
         self.hosted.get(&row).and_then(|h| h.window.as_ref()).map(|w| (w.hwnd(), w.detached()))
     }
 
+    /// The This clip or Source audio page in front: of the windows showing one, the docked one highest in `z`, else a
+    /// detached one (the one opened last).
+    #[cfg(plugin_windows)]
+    pub fn clip_page(&self, z: &[crate::app::Win]) -> Option<(usize, crate::clip_page::Tab)> {
+        let shows = |r: usize| self.hosted.get(&r).and_then(|h| h.window.as_ref()).and_then(|w| w.clip_page()).map(|t| (r, t));
+        let docked = z.iter().rev().find_map(|w| match w {
+            crate::app::Win::Hosted(r) => shows(*r),
+            _ => None,
+        });
+        docked.or_else(|| {
+            self.hosted.iter().filter(|(_, h)| h.window.as_ref().is_some_and(|w| w.detached())).max_by_key(|(_, h)| h.opened).and_then(|(&r, _)| shows(r))
+        })
+    }
+
     /// Row `row`'s window shows its This clip or Source audio tab.
     #[cfg(plugin_windows)]
     pub fn show_clip_tab(&self, row: usize, tab: crate::clip_page::Tab) {
@@ -2221,7 +2235,7 @@ mod tests {
             ],
             ..cut.clone()
         };
-        let mut page = PageVals { cut, whole };
+        let mut page = PageVals { cut, whole, looping: true };
         page.cut.pos = crate::clip_page::Pos::At(13.6);
         page.whole.pos = crate::clip_page::Pos::At(13.6);
         let mut pl = Plugins { available: builtin(), scale: 1.0, rate: 48000, ..Plugins::default() };
@@ -2231,20 +2245,26 @@ mod tests {
         pl.open_window(0, info).unwrap();
         pump(&mut pl, 400);
         let w = pl.hosted[&0].window.as_ref().unwrap().hwnd();
-        // The plugin's own pages and the Misc wrench are 45 px cells from x 7; the two named tabs follow them.
-        let pages = 2;
-        let tab_x = |i: i32| 7 + 45 * i + 22;
-        let clip_x = |i: i32| 7 + 45 * (pages + 1) + 3 + 94 * i + 46;
+        // This clip and Source audio are 116 px tabs from x 7 in the strip; Source audio's sub-tabs (Sampler, Sample, Misc,
+        // Plugins & automation) are in the row under it, from x 11.
+        let top_x = |i: i32| 7 + 118 * i + 58;
+        let sub_y = 88;
         capture(w, &dir.join("clip-tab-0-existing.bmp"));
-        click(w, clip_x(0), 50);
+        click(w, top_x(0), 50);
         pump(&mut pl, 300);
         capture(w, &dir.join("clip-tab-1-cut.bmp"));
-        click(w, clip_x(1), 50);
+        click(w, top_x(1), 50);
         pump(&mut pl, 300);
-        capture(w, &dir.join("clip-tab-2-whole.bmp"));
-        click(w, tab_x(0), 50);
+        capture(w, &dir.join("clip-tab-2-whole-sampler.bmp"));
+        click(w, 317, sub_y);
         pump(&mut pl, 300);
-        capture(w, &dir.join("clip-tab-3-back.bmp"));
+        capture(w, &dir.join("clip-tab-3-whole-fx.bmp"));
+        click(w, 199, sub_y);
+        pump(&mut pl, 300);
+        capture(w, &dir.join("clip-tab-4-whole-misc.bmp"));
+        click(w, 50, sub_y);
+        pump(&mut pl, 300);
+        capture(w, &dir.join("clip-tab-5-back.bmp"));
         pl.drop_key(0);
         pump(&mut pl, 50);
     }

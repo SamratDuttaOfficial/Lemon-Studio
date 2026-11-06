@@ -128,10 +128,12 @@ fn the_two_tabs_share_one_window() {
     assert!(crate::views::rack::visible_steps(&app.state) > 60, "it takes the space: many more steps than the old 16");
 
     // The tabs and the window's buttons stay put on both pages.
-    let at_rack = (hit(&app, &tab(Win::Playlist)), hit(&app, &Action::CloseWin(Win::ChannelRack)));
+    let at_rack = (hit(&app, &tab(Win::Playlist)), hit(&app, &Action::MaxWin(Win::ChannelRack)));
     click(&mut app, &mut c, at_rack.0);
     assert_eq!(app.state.z, vec![Win::Playlist]);
-    assert_eq!((hit(&app, &tab(Win::Playlist)), hit(&app, &Action::CloseWin(Win::Playlist))), at_rack);
+    assert_eq!((hit(&app, &tab(Win::Playlist)), hit(&app, &Action::MaxWin(Win::Playlist))), at_rack);
+    // Always there: minimize and maximize, no close button.
+    assert!(has(&app, &Action::MinWin(Win::Playlist)) && !has(&app, &Action::CloseWin(Win::Playlist)));
     // A tab press moved off it before the release does nothing.
     let t = hit(&app, &tab(Win::ChannelRack));
     app.mouse_move(t.cx(), t.cy());
@@ -142,7 +144,8 @@ fn the_two_tabs_share_one_window() {
     assert_eq!(app.state.z, vec![Win::Playlist]);
 }
 
-/// F5 and F6 go to a tab, a second press flips to the other, Ctrl+Tab flips; each also fetches a covered or closed window.
+/// F5 and F6 go to a tab, a second press flips to the other, Ctrl+Tab flips; each also fetches a covered window. The window
+/// cannot be closed.
 #[test]
 fn keys_switch_the_tabs() {
     let Some(mut c) = canvas() else { return };
@@ -179,15 +182,100 @@ fn keys_switch_the_tabs() {
     press(&mut app, tab_key(), true);
     assert_eq!(app.state.z, vec![Win::PianoRoll, Win::Playlist]);
 
-    // Closed: it comes back, Ctrl+Tab on the tab it was on.
+    // Close does nothing to it: it is always there.
     press(&mut app, f6(), false);
     app.act(Action::CloseWin(Win::ChannelRack));
-    assert!(!app.state.shown(Win::ChannelRack) && !app.state.shown(Win::Playlist));
-    press(&mut app, tab_key(), true);
     assert_eq!(app.state.z.last(), Some(&Win::ChannelRack));
-    app.act(Action::CloseWin(Win::ChannelRack));
+    app.act(Action::ToggleWin(Win::ChannelRack));
+    assert_eq!(app.state.z.last(), Some(&Win::ChannelRack), "its toolbar button only shows it");
+    app.act(Action::CloseWin(Win::Playlist));
     press(&mut app, f5(), false);
     assert_eq!(app.state.z.last(), Some(&Win::Playlist));
+}
+
+/// The browser is always there: its title bar's button folds it to a thin strip at the left edge (the windows take the
+/// room), the strip's button opens it again and a tab's icon on the strip opens it on that tab.
+#[test]
+fn the_browser_folds_to_a_thin_strip() {
+    let Some(mut c) = canvas() else { return };
+    let mut app = app();
+    app.paint(&mut c, None);
+    let open_w = crate::views::browser_w(&app.state);
+    assert_eq!(app.state.work_rect().x, open_w);
+    let fold = hit(&app, &Action::BrowserFold);
+    assert!(fold.right() <= open_w, "in the browser's title bar");
+    assert!(hint(&app, &Action::BrowserFold).starts_with("Fold the browser"));
+    click(&mut app, &mut c, fold);
+    assert!(!app.state.show_browser);
+    assert_eq!(app.state.work_rect().x, crate::views::browser::THIN_W, "the windows take the room");
+    let open = hit(&app, &Action::BrowserFold);
+    assert!(open.right() <= crate::views::browser::THIN_W && hint(&app, &Action::BrowserFold).starts_with("Open the browser"));
+    assert!(!has(&app, &Action::BrowserList), "no list while folded");
+    click(&mut app, &mut c, open);
+    assert!(app.state.show_browser && has(&app, &Action::BrowserList));
+    // Folded again, the History tab's icon opens it on that tab.
+    app.act(Action::BrowserFold);
+    app.paint(&mut c, None);
+    let history = hit(&app, &Action::BrowserTab(crate::views::browser::HISTORY_TAB));
+    click(&mut app, &mut c, history);
+    assert!(app.state.show_browser && app.state.browser_tab == crate::views::browser::HISTORY_TAB);
+    // Alt+F8 folds and opens it too.
+    let shown = app.state.show_browser;
+    app.act(Action::ToggleWin(Win::Browser));
+    assert_ne!(app.state.show_browser, shown);
+}
+
+/// The History tab: a row per step of every branch, the undone branch beside the line the project is on. A click goes to
+/// a step (on another branch too); a step carried back onto the list is copied to where the project is now, as a new step.
+#[test]
+fn the_history_tab_goes_and_copies() {
+    use crate::views::browser::{Item, HISTORY_TAB};
+    let Some(mut c) = canvas() else { return };
+    let mut app = app();
+    let steps = |app: &App| crate::rack::row_steps(&app.state, 0, 8);
+    let step = |app: &mut App, k: u32| {
+        app.act(Action::Step(0, k));
+        app.mouse_up();
+    };
+    step(&mut app, 1);
+    step(&mut app, 2);
+    app.key(&Key::Character("z".into()), true, false);
+    step(&mut app, 3);
+    let (b, cc) = (2, 3);
+    assert_eq!(app.state.history.len(), 3, "the undone step stays");
+    app.state.browser_tab = HISTORY_TAB;
+    app.paint(&mut c, None);
+    let rows = crate::views::browser::rows(&app.state);
+    assert_eq!(rows.iter().map(|r| (r.item.clone(), r.depth)).collect::<Vec<_>>(), [(Item::History(0), 0), (Item::History(1), 0), (Item::History(b), 1), (Item::History(cc), 0)]);
+    let row = |app: &App, n: usize| {
+        let i = crate::views::browser::rows(&app.state).iter().position(|r| r.item == Item::History(n)).unwrap();
+        hit(app, &Action::BrowserRow(i))
+    };
+    // A click on the other branch's step: there, the step made after the parting undone.
+    let r = row(&app, b);
+    click(&mut app, &mut c, r);
+    assert!(app.state.history.current(b));
+    let s = steps(&app);
+    assert!(s[1] && s[2] && !s[3], "{s:?}");
+    let r = row(&app, cc);
+    click(&mut app, &mut c, r);
+    let s = steps(&app);
+    assert!(s[1] && !s[2] && s[3], "{s:?}");
+    // The other branch's step carried onto the list: copied here, both kept.
+    let r = row(&app, b);
+    app.mouse_move(r.cx(), r.cy());
+    app.paint(&mut c, None);
+    app.mouse_down();
+    app.mouse_move(r.cx(), r.cy() + 40.0);
+    app.mouse_up();
+    let s = steps(&app);
+    assert!(s[1] && s[2] && s[3], "{s:?} {:?}", app.state.message);
+    assert_eq!(app.state.history.newest_done(), Some("Step seq edit (copy)"));
+    assert_eq!(app.state.history.len(), 4);
+    // One undo takes just the copy back.
+    app.key(&Key::Character("z".into()), true, false);
+    let s = steps(&app);
+    assert!(s[1] && !s[2] && s[3], "{s:?}");
 }
 
 /// A key held down does not flicker between the tabs.
@@ -1663,4 +1751,34 @@ fn every_design_paints_both_tabs() {
             assert!(has(&app, &Action::WinResize(w, crate::app::EDGE_R)));
         }
     }
+}
+
+/// Pictures of the browser's History tab with a branch, and of the folded browser
+/// (`OS_SHOT_DIR=<dir> cargo test -p os-app --bin lemonstudio history_tab_shots -- --ignored`).
+#[test]
+#[ignore]
+fn history_tab_shots() {
+    let dir = std::path::PathBuf::from(std::env::var("OS_SHOT_DIR").expect("OS_SHOT_DIR"));
+    let Some(mut c) = canvas() else { return };
+    let mut app = app();
+    let step = |app: &mut App, k: u32| {
+        app.act(Action::Step(0, k));
+        app.mouse_up();
+    };
+    for k in 0..4 {
+        step(&mut app, k);
+    }
+    for _ in 0..2 {
+        app.key(&Key::Character("z".into()), true, false);
+    }
+    step(&mut app, 6);
+    step(&mut app, 7);
+    app.key(&Key::Character("z".into()), true, false);
+    step(&mut app, 9);
+    app.state.browser_tab = crate::views::browser::HISTORY_TAB;
+    app.paint(&mut c, None);
+    c.pixmap.save_png(dir.join("history-tab.png")).unwrap();
+    app.act(Action::BrowserFold);
+    app.paint(&mut c, None);
+    c.pixmap.save_png(dir.join("browser-folded.png")).unwrap();
 }

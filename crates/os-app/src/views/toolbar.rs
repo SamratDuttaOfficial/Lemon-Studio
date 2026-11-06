@@ -909,11 +909,11 @@ fn pattern(ui: &mut Ui, c: &Ctx) {
 fn window_buttons(ui: &mut Ui, c: &Ctx, which: Range<usize>) -> bool {
     let a = c.a;
     let wins = [
-        (Icon::Playlist, Action::ToggleWin(Win::Playlist), "Show or hide the Arranger, right-click: maximize it (F5)"),
+        (Icon::Playlist, Action::ToggleWin(Win::Playlist), "Show the Arranger, right-click: maximize it (F5)"),
         (Icon::PianoRoll, Action::ToggleWin(Win::PianoRoll), "Show or hide the Piano roll, right-click: maximize it (F7)"),
-        (Icon::ChannelRack, Action::ToggleWin(Win::ChannelRack), "Show or hide the Instrument rack, right-click: maximize it (F6)"),
+        (Icon::ChannelRack, Action::ToggleWin(Win::ChannelRack), "Show the Instrument rack, right-click: maximize it (F6)"),
         (Icon::Mixer, Action::ToggleWin(Win::Mixer), "Show or hide the Mixer (F9)"),
-        (Icon::Browser, Action::ToggleWin(Win::Browser), "Show or hide the Browser, right-click: Plugin palette (Alt+F8)"),
+        (Icon::Browser, Action::ToggleWin(Win::Browser), "Fold the Browser to a thin strip or open it again, right-click: Plugin palette (Alt+F8)"),
         (Icon::Project, Action::ProjectPicker, "Open the Clip palette, right-click: Plugin palette (Ctrl+F8)"),
         (Icon::Plug, Action::PickerOpen, "Open the Plugin palette (F8)"),
         (Icon::Kick, Action::ToggleWin(Win::Tapper), "Show or hide Tap tempo (Ctrl+F5)"),

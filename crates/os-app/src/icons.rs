@@ -75,6 +75,11 @@ pub enum Icon {
     FilePreset,
     FileZip,
     FileBlank,
+    /// The undo history's tree: a line with a branch off it.
+    History,
+    /// Fold the browser away, open it again.
+    FoldLeft,
+    FoldRight,
 }
 
 /// A kick drum seen from the side on its two legs, its pedal's beater against the head (the Tempo tapper). Lemon
@@ -84,6 +89,15 @@ const KICK: TablerIcon = TablerIcon { filled: false, d: "M 13.5 10.5 C 13.5 14.3
 /// Tabler's `arrow-back-up` mirrored left to right (an undone step, spec: ui/settings-choices.md "Undo history: the
 /// four checks (2026-10-16)").
 const REDO: TablerIcon = TablerIcon { filled: false, d: "M 15 14 L 19 10 L 15 6 M 19 10 L 8 10 C 5.791 10 4 11.791 4 14 C 4 16.209 5.791 18 8 18 L 9 18" };
+
+/// A branch off a line, three steps on them: the undo history's tree (the browser's History tab).
+const BRANCH: TablerIcon = TablerIcon {
+    filled: false,
+    d: "M 9 6 C 9 7.105 8.105 8 7 8 C 5.895 8 5 7.105 5 6 C 5 4.895 5.895 4 7 4 C 8.105 4 9 4.895 9 6 Z M 9 18 C 9 19.105 8.105 20 7 20 C 5.895 20 5 19.105 5 18 C 5 16.895 5.895 16 7 16 C 8.105 16 9 16.895 9 18 Z M 19 6 C 19 7.105 18.105 8 17 8 C 15.895 8 15 7.105 15 6 C 15 4.895 15.895 4 17 4 C 18.105 4 19 4.895 19 6 Z M 7 8 L 7 16 M 17 8 C 17 12 7 11 7 16",
+};
+/// Tabler's `chevrons-left` and `chevrons-right`.
+const FOLD_LEFT: TablerIcon = TablerIcon { filled: false, d: "M 11 7 L 6 12 L 11 17 M 17 7 L 12 12 L 17 17" };
+const FOLD_RIGHT: TablerIcon = TablerIcon { filled: false, d: "M 7 7 L 12 12 L 7 17 M 13 7 L 18 12 L 13 17" };
 
 fn shape(icon: Icon) -> &'static TablerIcon {
     match icon {
@@ -149,6 +163,9 @@ fn shape(icon: Icon) -> &'static TablerIcon {
         Icon::FilePreset => &tb::FILE_SETTINGS,
         Icon::FileZip => &tb::FILE_ZIP,
         Icon::FileBlank => &tb::FILE,
+        Icon::History => &BRANCH,
+        Icon::FoldLeft => &FOLD_LEFT,
+        Icon::FoldRight => &FOLD_RIGHT,
     }
 }
 

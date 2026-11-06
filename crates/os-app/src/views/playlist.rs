@@ -262,7 +262,9 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
         None => {}
     }
     // The playhead while the song plays; otherwise it stands where the song will start from.
-    let head = if f.playing && f.song { f.tick as f32 } else { s.playlist.pos as f32 };
+    // While a source audio plays alone (`App::audition`) its playhead is on the file, not the song.
+    let alone = s.clip_fx.audition.is_some_and(|a| a.tab == crate::clip_page::Tab::Whole);
+    let head = if f.playing && f.song && !alone { f.tick as f32 } else { s.playlist.pos as f32 };
     ui.c.fill_rect(Rect::new(g.x_of(head), grid.y, 1.5, grid.h), t.playhead);
     ui.c.pop_clip();
 
@@ -736,7 +738,8 @@ fn ruler_paint(ui: &mut Ui, s: &State, g: &PGeom, ruler: Rect, f: &FrameInfo) {
     }
     // Song position: a flag ◤ on the playhead while playing the song, else on the start position (§7: its left edge
     // on the position, its top along the ruler's top).
-    let tick = if f.playing && f.song { f.tick as f32 } else { s.playlist.pos as f32 };
+    let alone = s.clip_fx.audition.is_some_and(|a| a.tab == crate::clip_page::Tab::Whole);
+    let tick = if f.playing && f.song && !alone { f.tick as f32 } else { s.playlist.pos as f32 };
     let x = g.x_of(tick);
     let (y0, k) = (ruler.y + 0.5, 9.0);
     ui.c.fill_polygon(&[(x - 0.5, y0 - 0.5), (x + k + 1.0, y0 - 0.5), (x - 0.5, y0 + k + 1.0)], t.s(0x0b1114));

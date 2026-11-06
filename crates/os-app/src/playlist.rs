@@ -2077,6 +2077,12 @@ pub fn free_track(s: &State, from: u16, a: u32, b: u32) -> u16 {
     (from..TRACKS).find(|&t| !clips(s).iter().any(|c| c.track == t && c.position < b && c.end() > a)).unwrap_or(from)
 }
 
+/// The Arranger track a recording goes on: the selected one (a track header's click, Ctrl+Up / Down), whatever is on it
+/// already.
+pub fn rec_track(s: &State) -> u16 {
+    s.playlist.track.min(TRACKS - 1)
+}
+
 /// The track below the last one that has clips.
 pub fn track_after_used(s: &State) -> u16 {
     clips(s).iter().map(|c| c.track + 1).max().unwrap_or(0).min(TRACKS - 1)

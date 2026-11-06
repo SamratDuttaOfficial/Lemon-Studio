@@ -3,10 +3,12 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
-//! The project's undo history: one list of named steps for the whole project, oldest first, after "Last reset" (the
-//! project as opened or made). An edit records a step holding what it is about to change (`record`); undo and redo
-//! swap that with the project's, so a step always holds the other side of itself: the state before it while it is
-//! done, the state after it while it is undone. Covered: a pattern's notes, control points and length (the piano roll
+//! The project's undo history: a tree of named steps for the whole project grown from "Last reset" (the project as
+//! opened or made). An edit records a step holding what it is about to change (`record`); undo and redo swap that with
+//! the project's, so a step always holds the other side of itself: the state before it while it is done, the state after
+//! it while it is undone. Undoing and then editing starts a new branch, and the undone steps stay on theirs: the
+//! browser's History tab shows the tree, goes to any step of it (`go_to`) and copies a step onto where the project is
+//! now (`copy_here`). Covered: a pattern's notes, control points and length (the piano roll
 //! and the step sequencer), the playlist (`playlist::snapshot`), knob turns, sample loads (`load_sample`), the
 //! project's initial values (`crate::init`), and with the playlist, PATTERNS > Split by channel's patterns and ADD's
 //! clip channels (`playlist::snapshot_with`). Everything the control plane's commands change (`crate::control`) is
@@ -328,18 +330,36 @@ fn knob_name(id: KnobId) -> &'static str {
     }
 }
 
+/// One step of the history tree (`History`).
 #[derive(Debug, Clone)]
-struct Step {
+struct Node {
     name: Cow<'static, str>,
+    /// What the step changes, as it is on the other side of it. "Last reset" (node 0) holds nothing.
     snap: Snap,
+    /// The step this one was made after (node 0: itself).
+    parent: usize,
+    /// The step's side before it, kept from its last undo: copying the step to another point compares it with `snap`
+    /// (`copy_here`).
+    before: Option<Snap>,
+    /// Where a redo goes from here: the step last left by an undo, or made last.
+    fwd: Option<usize>,
 }
 
-/// The project's undo history (`State::history`).
-#[derive(Debug, Default)]
+impl Node {
+    fn root() -> Node {
+        Node { name: Cow::Borrowed(LAST_RESET), snap: Snap::Several(Vec::new()), parent: 0, before: None, fwd: None }
+    }
+}
+
+/// The project's undo history (`State::history`): a tree of steps grown from "Last reset". Undoing and then editing
+/// starts a branch beside the undone steps, which stay: any step of any branch can be gone back to (`go_to`) or copied
+/// onto where the project is now (`copy_here`). Nodes are kept in the order they were made.
+#[derive(Debug)]
 pub struct History {
-    steps: Vec<Step>,
-    /// Steps `..done` are done; the rest are undone (they can be redone).
-    done: usize,
+    /// Node 0 is "Last reset"; every other is a step.
+    nodes: Vec<Node>,
+    /// Where the project is: the steps from "Last reset" to this one are done, every other is undone.
+    at: usize,
     /// The last move was an undo: with Alternate undo mode off, Ctrl+Z redoes it.
     undid: bool,
     /// What the newest step's run of changes goes to: a knob's mouse-wheel notches, the tempo tapper's taps (one step
@@ -347,6 +367,12 @@ pub struct History {
     run: Option<Run>,
     /// The newest step was recorded since the last button release (`settle` looks at it then).
     fresh: bool,
+}
+
+impl Default for History {
+    fn default() -> Self {
+        History { nodes: vec![Node::root()], at: 0, undid: false, run: None, fresh: false }
+    }
 }
 
 /// A run of changes that make one step (`History::run`).
@@ -374,10 +400,23 @@ pub enum ChannelControl {
     Track,
 }
 
+/// One row of the history tree as the browser's History tab draws it (`History::tree_rows`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct TreeRow {
+    pub node: usize,
+    /// Its branch's column: 0 for the line the project is on, one more for each branch off a branch.
+    pub col: u8,
+    /// The row of the step it was made after.
+    pub parent: Option<usize>,
+    /// Done: on the way from "Last reset" to where the project is.
+    pub done: bool,
+    pub name: String,
+}
+
 impl History {
     /// Whether a change of run `r` joins the newest step: the step is of that run and nothing came after it.
     pub fn joins(&self, r: Run) -> bool {
-        self.run == Some(r) && self.done == self.steps.len()
+        self.run == Some(r) && self.at_tip()
     }
 
     /// The newest step's run goes on with `r` (`joins`).
@@ -390,20 +429,25 @@ impl History {
         self.run = None;
     }
 
-    /// How many steps there are ("Last reset" not counted).
+    /// The project is at a step with nothing after it to redo.
+    fn at_tip(&self) -> bool {
+        self.at != 0 && !self.nodes.iter().skip(1).any(|n| n.parent == self.at)
+    }
+
+    /// How many steps there are, on every branch ("Last reset" not counted).
     #[cfg(test)]
     pub fn len(&self) -> usize {
-        self.steps.len()
+        self.nodes.len() - 1
     }
 
     /// How many steps are done (undone ones not counted).
     pub fn done(&self) -> usize {
-        self.done
+        self.path(self.at).len() - 1
     }
 
     /// The name of the newest done step.
     pub fn newest_done(&self) -> Option<&str> {
-        self.done.checked_sub(1).map(|i| &*self.steps[i].name)
+        (self.at != 0).then(|| &*self.nodes[self.at].name)
     }
 
     /// Forgets every step: the project was opened or made ("Last reset").
@@ -411,49 +455,190 @@ impl History {
         *self = History::default();
     }
 
-    /// Whether entry `p` of the list (0 = "Last reset", `k` = step `k`) is undone: drawn grey.
+    /// Whether step `p` (0 = "Last reset") is undone: drawn grey.
     pub fn undone(&self, p: usize) -> bool {
-        p > self.done
+        !self.is_done(p)
     }
 
-    /// Whether entry `p` is where the project is now.
+    /// Whether step `p` is where the project is now.
     pub fn current(&self, p: usize) -> bool {
-        p == self.done
+        p == self.at
     }
 
-    /// The entry where the project is now (0 = "Last reset").
+    /// How far along its line the project is: how many steps are done (0 at "Last reset"), as `done`.
     pub fn at(&self) -> usize {
-        self.done
+        self.done()
     }
 
-    /// The list as the browser's History folder shows it: (entry, name), oldest first from "Last reset", or newest
-    /// first with Show recent changes at the top.
+    /// The step where the project is now (0 = "Last reset"), as `tree_rows` and `entries` name steps.
+    pub fn at_node(&self) -> usize {
+        self.at
+    }
+
+    /// Whether step `p` is done: on the way from "Last reset" to where the project is.
+    pub fn is_done(&self, p: usize) -> bool {
+        let mut n = self.at;
+        loop {
+            if n == p {
+                return true;
+            }
+            if n == 0 {
+                return false;
+            }
+            n = self.nodes[n].parent;
+        }
+    }
+
+    /// "Last reset" to step `n`, oldest first.
+    fn path(&self, mut n: usize) -> Vec<usize> {
+        let mut v = vec![n];
+        while n != 0 {
+            n = self.nodes[n].parent;
+            v.push(n);
+        }
+        v.reverse();
+        v
+    }
+
+    /// The steps made right after each step, oldest first.
+    fn kids(&self) -> Vec<Vec<usize>> {
+        let mut k = vec![Vec::new(); self.nodes.len()];
+        for (i, n) in self.nodes.iter().enumerate().skip(1) {
+            k[n.parent].push(i);
+        }
+        k
+    }
+
+    /// Where a redo goes from step `n`: the step last left by an undo, else the newest made after it.
+    fn redo_child_in(&self, n: usize, kids: &[Vec<usize>]) -> Option<usize> {
+        self.nodes[n].fwd.filter(|c| kids[n].contains(c)).or_else(|| kids[n].last().copied())
+    }
+
+    fn redo_child(&self, n: usize) -> Option<usize> {
+        self.redo_child_in(n, &self.kids())
+    }
+
+    /// The line the project is on: "Last reset", the done steps, then the steps a redo goes through.
+    fn line(&self) -> Vec<usize> {
+        let kids = self.kids();
+        let mut v = self.path(self.at);
+        let mut n = self.at;
+        while let Some(c) = self.redo_child_in(n, &kids) {
+            v.push(c);
+            n = c;
+        }
+        v
+    }
+
+    /// The line the project is on as the browser's Current project ▸ History folder shows it: (step, name), oldest first
+    /// from "Last reset", or newest first with Show recent changes at the top. Other branches are in the History tab.
     pub fn entries(&self) -> Vec<(usize, &str)> {
-        let mut v: Vec<(usize, &str)> = std::iter::once(LAST_RESET).chain(self.steps.iter().map(|st| &*st.name)).enumerate().collect();
+        let mut v: Vec<(usize, &str)> = self.line().into_iter().map(|n| (n, &*self.nodes[n].name)).collect();
         if prefs::check(&prefs::RECENT_CHANGES_TOP) {
             v.reverse();
         }
         v
     }
 
-    /// Drops the oldest steps past Maximum undo levels (undone steps last).
+    /// The whole tree, a row per step: each step's branches off it under it, one column right, then the step a redo goes
+    /// to in the same column, so the line the project is on runs straight down column 0.
+    pub fn tree_rows(&self) -> Vec<TreeRow> {
+        let kids = self.kids();
+        let mut done = vec![false; self.nodes.len()];
+        for n in self.path(self.at) {
+            done[n] = true;
+        }
+        let mut out = Vec::with_capacity(self.nodes.len());
+        let mut row_of = vec![0; self.nodes.len()];
+        self.emit(0, 0, &kids, &done, &mut out, &mut row_of);
+        out
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn emit(&self, mut n: usize, col: u8, kids: &[Vec<usize>], done: &[bool], out: &mut Vec<TreeRow>, row_of: &mut [usize]) {
+        loop {
+            let parent = (n != 0).then(|| row_of[self.nodes[n].parent]);
+            row_of[n] = out.len();
+            out.push(TreeRow { node: n, col, parent, done: done[n], name: self.nodes[n].name.to_string() });
+            let main = self.redo_child_in(n, kids);
+            for &c in &kids[n] {
+                if Some(c) != main {
+                    self.emit(c, col.saturating_add(1), kids, done, out, row_of);
+                }
+            }
+            match main {
+                Some(m) => n = m,
+                None => return,
+            }
+        }
+    }
+
+    /// Drops the steps `gone` marks (never "Last reset"): what was made after one now follows its nearest kept step, and
+    /// so does the project's place.
+    fn drop_nodes(&mut self, gone: &[bool]) {
+        let n = self.nodes.len();
+        let kept = |mut i: usize| {
+            while i != 0 && gone[i] {
+                i = self.nodes[i].parent;
+            }
+            i
+        };
+        let mut map = vec![0; n];
+        let mut k = 0;
+        for (i, m) in map.iter_mut().enumerate() {
+            if !gone[i] {
+                *m = k;
+                k += 1;
+            }
+        }
+        let at = map[kept(self.at)];
+        let parents: Vec<usize> = (0..n).map(|i| map[kept(self.nodes[i].parent)]).collect();
+        let fwds: Vec<Option<usize>> = (0..n).map(|i| self.nodes[i].fwd.filter(|&f| f < n && !gone[f]).map(|f| map[f])).collect();
+        let old = std::mem::take(&mut self.nodes);
+        self.nodes = old
+            .into_iter()
+            .enumerate()
+            .filter(|(i, _)| *i == 0 || !gone[*i])
+            .map(|(i, mut node)| {
+                (node.parent, node.fwd) = (parents[i], fwds[i]);
+                node
+            })
+            .collect();
+        self.nodes[0].parent = 0;
+        self.at = at;
+    }
+
+    /// Past Maximum undo levels, the oldest steps go, one at a time: of the steps with nothing after them that are not
+    /// done, and the first done step when it is the only one after "Last reset" (it becomes part of "Last reset").
     fn trim(&mut self) {
         let max = usize::from(prefs::number(&prefs::MAX_UNDO_LEVELS));
-        while self.steps.len() > max && self.done > 0 {
-            self.steps.remove(0);
-            self.done -= 1;
+        while self.nodes.len() - 1 > max {
+            let kids = self.kids();
+            let mut done = vec![false; self.nodes.len()];
+            for n in self.path(self.at) {
+                done[n] = true;
+            }
+            let mut cands: Vec<usize> = (1..self.nodes.len()).filter(|&i| !done[i] && kids[i].is_empty()).collect();
+            if let [first] = kids[0][..] {
+                if done[first] {
+                    cands.push(first);
+                }
+            }
+            let Some(&oldest) = cands.iter().min() else { break };
+            let mut gone = vec![false; self.nodes.len()];
+            gone[oldest] = true;
+            self.drop_nodes(&gone);
         }
-        self.steps.truncate(max.max(self.done));
     }
 
     /// What Ctrl+Z does next: redo (Alternate undo mode off, after an undo) or undo.
     fn ctrl_z_redoes(&self) -> bool {
-        !prefs::check(&prefs::ALTERNATE_UNDO) && self.undid && self.done < self.steps.len()
+        !prefs::check(&prefs::ALTERNATE_UNDO) && self.undid && self.redo_child(self.at).is_some()
     }
 }
 
-/// Records step `name`: `snap` holds what the edit is about to change. Undone steps are dropped (a new action ends
-/// their branch), and the oldest step past Maximum undo levels.
+/// Records step `name`: `snap` holds what the edit is about to change. The step goes after where the project is: undone
+/// steps there stay, on a branch of their own. The oldest step past Maximum undo levels goes.
 pub fn record(s: &mut State, name: &'static str, snap: Snap) {
     record_named(s, Cow::Borrowed(name), snap);
 }
@@ -461,9 +646,11 @@ pub fn record(s: &mut State, name: &'static str, snap: Snap) {
 /// `record` with a name made at run time (a client's step: "Assistant: build drum kit").
 pub fn record_named(s: &mut State, name: Cow<'static, str>, snap: Snap) {
     let h = &mut s.history;
-    h.steps.truncate(h.done);
-    h.steps.push(Step { name, snap });
-    h.done = h.steps.len();
+    let parent = h.at;
+    h.nodes.push(Node { name, snap, parent, before: None, fwd: None });
+    let i = h.nodes.len() - 1;
+    h.nodes[parent].fwd = Some(i);
+    h.at = i;
     h.undid = false;
     h.run = None;
     h.fresh = true;
@@ -474,8 +661,8 @@ pub fn record_named(s: &mut State, name: Cow<'static, str>, snap: Snap) {
 /// and holds commands.
 pub fn extend_newest(s: &mut State, f: impl FnOnce(&mut Vec<crate::control::Command>)) {
     let h = &mut s.history;
-    if h.done > 0 && h.done == h.steps.len() {
-        if let Snap::Commands(c) = &mut h.steps[h.done - 1].snap {
+    if h.at_tip() {
+        if let Snap::Commands(c) = &mut h.nodes[h.at].snap {
             f(c);
         }
     }
@@ -485,8 +672,8 @@ pub fn extend_newest(s: &mut State, f: impl FnOnce(&mut Vec<crate::control::Comm
 /// the app found in the plugin as it put the other side in (`App::host_commands`).
 pub fn fill_plugin_side(s: &mut State, fill: u64, state: &[u8], preset: Option<&std::path::Path>) {
     use crate::control::command::Taken;
-    for st in &mut s.history.steps {
-        let Snap::Commands(v) = &mut st.snap else { continue };
+    for n in &mut s.history.nodes {
+        let Snap::Commands(v) = &mut n.snap else { continue };
         for c in v {
             if let crate::control::Command::Put(t) = c {
                 if let Taken::Plugin(_, side) = &mut **t {
@@ -509,17 +696,18 @@ pub fn done_with(s: &mut State) {
 /// another edit, as a held click's clone (`crate::hold`). The step keeps what it holds.
 pub fn rename(s: &mut State, name: &'static str) {
     let h = &mut s.history;
-    if h.fresh && h.done > 0 && h.done == h.steps.len() {
-        h.steps[h.done - 1].name = Cow::Borrowed(name);
+    if h.fresh && h.at_tip() {
+        h.nodes[h.at].name = Cow::Borrowed(name);
     }
 }
 
 /// Drops the newest step: its edit changed nothing after all.
 pub fn unrecord(s: &mut State) {
     let h = &mut s.history;
-    if h.done > 0 && h.done == h.steps.len() {
-        h.steps.pop();
-        h.done -= 1;
+    if h.at_tip() {
+        let mut gone = vec![false; h.nodes.len()];
+        gone[h.at] = true;
+        h.drop_nodes(&gone);
     }
     (h.run, h.fresh) = (None, false);
 }
@@ -528,7 +716,7 @@ pub fn unrecord(s: &mut State) {
 /// note that did not move it, a knob clicked without a turn).
 pub fn settle(s: &mut State) {
     let h = &s.history;
-    if h.fresh && h.done > 0 && h.done == h.steps.len() && h.steps[h.done - 1].snap.now(s) == h.steps[h.done - 1].snap {
+    if h.fresh && h.at_tip() && h.nodes[h.at].snap.now(s) == h.nodes[h.at].snap {
         unrecord(s);
     }
     s.history.fresh = false;
@@ -572,44 +760,49 @@ pub fn knob(s: &mut State, id: KnobId, wheel: bool) {
     }
 }
 
-fn swap(s: &mut State, i: usize) {
-    if let Snap::Commands(v) = &mut s.history.steps[i].snap {
+/// Swaps step `i`'s side with the project's. `undoing`: the side put back is the one before the step, kept for
+/// `copy_here`.
+fn swap(s: &mut State, i: usize, undoing: bool) {
+    if let Snap::Commands(v) = &mut s.history.nodes[i].snap {
         let v = std::mem::take(v);
         let other = crate::control::take_back(s, v);
-        s.history.steps[i].snap = Snap::Commands(other);
+        s.history.nodes[i].snap = Snap::Commands(other);
         s.piano.dirty = true;
         return;
     }
-    let now = s.history.steps[i].snap.now(s);
-    let old = std::mem::replace(&mut s.history.steps[i].snap, now);
+    let now = s.history.nodes[i].snap.now(s);
+    let old = std::mem::replace(&mut s.history.nodes[i].snap, now);
+    if undoing {
+        s.history.nodes[i].before = Some(old.clone());
+    }
     old.put(s);
 }
 
 /// Undoes the newest done step; its name, or `None` when nothing is done.
 pub fn undo(s: &mut State) -> Option<String> {
     let h = &mut s.history;
-    if h.done == 0 {
+    let i = h.at;
+    if i == 0 {
         return None;
     }
-    h.done -= 1;
+    let parent = h.nodes[i].parent;
+    h.nodes[parent].fwd = Some(i);
+    h.at = parent;
     (h.undid, h.run, h.fresh) = (true, None, false);
-    let i = h.done;
-    swap(s, i);
-    Some(s.history.steps[i].name.to_string())
+    swap(s, i, true);
+    Some(s.history.nodes[i].name.to_string())
 }
 
-/// Redoes the oldest undone step; its name, or `None` when nothing is undone.
+/// Redoes the step a redo goes to (the one last undone from here, else the newest made after it); its name, or `None`
+/// when nothing comes after.
 pub fn redo(s: &mut State) -> Option<String> {
+    let h = &s.history;
+    let c = h.redo_child(h.at)?;
+    swap(s, c, false);
     let h = &mut s.history;
-    if h.done == h.steps.len() {
-        return None;
-    }
-    let i = h.done;
-    swap(s, i);
-    let h = &mut s.history;
-    h.done += 1;
+    h.at = c;
     (h.undid, h.run, h.fresh) = (false, None, false);
-    Some(h.steps[i].name.to_string())
+    Some(h.nodes[c].name.to_string())
 }
 
 /// "Step seq edit" as a menu entry writes it after Undo / Redo: "step seq edit".
@@ -656,17 +849,170 @@ fn shown_in_browser(s: &mut State) {
     }
 }
 
-/// A click on entry `p` of the browser's History folder: undoes or redoes up to it.
+/// A click on step `p` of the history (any branch): undoes back to where the way to it leaves the way here, then redoes
+/// along it.
 pub fn go_to(s: &mut State, p: usize) -> Option<String> {
-    let p = p.min(s.history.steps.len());
-    while s.history.done > p {
+    let p = p.min(s.history.nodes.len() - 1);
+    let way = s.history.path(p);
+    while !way.contains(&s.history.at) {
         undo(s);
     }
-    while s.history.done < p {
-        redo(s);
+    while s.history.at != p {
+        let at = s.history.at;
+        let Some(k) = way.iter().position(|&n| n == at) else { break };
+        s.history.nodes[at].fwd = Some(way[k + 1]);
+        if redo(s).is_none() {
+            break;
+        }
     }
-    let name = if p == 0 { LAST_RESET } else { &s.history.steps[p - 1].name };
-    Some(format!("History: {}", lower(name)))
+    Some(format!("History: {}", lower(&s.history.nodes[p].name)))
+}
+
+/// Why step `p` cannot be copied to where the project is now (`copy_here`), if it cannot.
+pub fn copy_blocked(s: &State, p: usize) -> Option<&'static str> {
+    let h = &s.history;
+    let n = h.nodes.get(p).filter(|_| p != 0)?;
+    if h.is_done(p) {
+        return Some("This change is already in the project here");
+    }
+    let copyable = match &n.snap {
+        Snap::Commands(v) => commands_copyable(v),
+        a => n.before.as_ref().is_some_and(|b| merge(b, a, a).is_some()),
+    };
+    (!copyable).then_some("This kind of change can only be gone back to, not copied: click it to go there")
+}
+
+/// The commands a step redoes with can be run again elsewhere: none puts back the whole project or arrangement, or a
+/// plugin state not read yet.
+fn commands_copyable(v: &[crate::control::Command]) -> bool {
+    use crate::control::command::Taken;
+    v.iter().all(|c| match c {
+        crate::control::Command::Put(t) => match &**t {
+            Taken::Project(_) | Taken::Arrangement(_) => false,
+            Taken::Plugin(_, side) => side.fill == 0,
+            _ => true,
+        },
+        _ => true,
+    })
+}
+
+/// Step `p`, from another branch or further on this one, copied to where the project is now as a new step: what it
+/// added comes in, what it took away goes and what it changed takes its new value, the rest of the project staying as
+/// it is here. Returns the hint bar's message.
+pub fn copy_here(s: &mut State, p: usize) -> Result<String, String> {
+    if let Some(why) = copy_blocked(s, p) {
+        return Err(why.into());
+    }
+    let n = &s.history.nodes[p];
+    let label = lower(&n.name);
+    let name: Cow<'static, str> = Cow::Owned(format!("{} (copy)", n.name));
+    match n.snap.clone() {
+        Snap::Commands(redo) => {
+            let undo = crate::control::take_back(s, redo);
+            record_named(s, name, Snap::Commands(undo));
+        }
+        after => {
+            let before = n.before.clone().ok_or("Nothing to copy")?;
+            let now = after.now(s);
+            let merged = merge(&before, &after, &now).ok_or("This change cannot be copied")?;
+            if merged == now {
+                return Err(format!("\"{label}\" changes nothing here"));
+            }
+            record_named(s, name, now);
+            merged.put(s);
+        }
+    }
+    done_with(s);
+    s.piano.dirty = true;
+    Ok(format!("Copied \"{label}\" to here"))
+}
+
+/// What a step that took the project from `before` to `after` makes of `now`, for the parts it covers; `None` for a kind
+/// that cannot be copied (a whole set of patterns, a channel coming or going, the timebase).
+fn merge(before: &Snap, after: &Snap, now: &Snap) -> Option<Snap> {
+    Some(match (before, after, now) {
+        (
+            Snap::Pattern { notes: bn, controls: bc, length: bl, .. },
+            Snap::Pattern { number, notes: an, controls: ac, length: al },
+            Snap::Pattern { notes: nn, controls: nc, length: nl, .. },
+        ) => Snap::Pattern { number: *number, notes: three_way(bn, an, nn), controls: three_way(bc, ac, nc), length: if al != bl { *al } else { *nl } },
+        (Snap::Playlist(b), Snap::Playlist(a), Snap::Playlist(n)) => Snap::Playlist(Box::new(merge_playlist(b, a, n))),
+        (Snap::Knob(..), a @ Snap::Knob(..), _) | (Snap::TrackIo(..), a @ Snap::TrackIo(..), _) | (Snap::Init(..), a @ Snap::Init(..), _) => a.clone(),
+        (Snap::Sample { .. }, a @ Snap::Sample { .. }, _) => a.clone(),
+        (Snap::Several(b), Snap::Several(a), Snap::Several(n)) if b.len() == a.len() && a.len() == n.len() => {
+            Snap::Several(b.iter().zip(a).zip(n).map(|((b, a), n)| merge(b, a, n)).collect::<Option<Vec<_>>>()?)
+        }
+        _ => return None,
+    })
+}
+
+/// `now` with what went from `before` to `after` done to it: the items `after` lost go, the ones it gained come in.
+fn three_way<T: PartialEq + Clone>(before: &[T], after: &[T], now: &[T]) -> Vec<T> {
+    let mut gained: Vec<&T> = after.iter().collect();
+    let mut lost: Vec<&T> = Vec::new();
+    for x in before {
+        match gained.iter().position(|y| *y == x) {
+            Some(i) => {
+                gained.remove(i);
+            }
+            None => lost.push(x),
+        }
+    }
+    let mut out = now.to_vec();
+    for x in lost {
+        if let Some(i) = out.iter().position(|y| y == x) {
+            out.remove(i);
+        }
+    }
+    // What is there already is not added twice.
+    for x in gained {
+        if !out.contains(x) {
+            out.push(x.clone());
+        }
+    }
+    out
+}
+
+/// `merge` for the playlist: clips by their id (gone, come, or changed), markers and automation as items, tracks and
+/// stretch place by place.
+fn merge_playlist(b: &crate::playlist::Snapshot, a: &crate::playlist::Snapshot, n: &crate::playlist::Snapshot) -> crate::playlist::Snapshot {
+    let mut clips = n.0.clone();
+    for bc in &b.0 {
+        match a.0.iter().find(|x| x.id == bc.id) {
+            None => clips.retain(|x| x.id != bc.id),
+            Some(ac) if ac != bc => {
+                if let Some(x) = clips.iter_mut().find(|x| x.id == bc.id) {
+                    *x = *ac;
+                }
+            }
+            Some(_) => {}
+        }
+    }
+    clips.extend(a.0.iter().filter(|ac| !b.0.iter().any(|x| x.id == ac.id)).copied());
+    let by_place = |b: &[_], a: &[_], n: &[_]| -> Vec<_> {
+        let mut out: Vec<_> = n.to_vec();
+        for (i, (bx, ax)) in b.iter().zip(a).enumerate() {
+            if bx != ax {
+                if let Some(x) = out.get_mut(i) {
+                    *x = Clone::clone(ax);
+                }
+            }
+        }
+        out
+    };
+    let tracks = by_place(&b.2, &a.2, &n.2);
+    let stretch = {
+        let mut out = n.4.clone();
+        for (i, (bx, ax)) in b.4.iter().zip(&a.4).enumerate() {
+            if bx != ax {
+                if let Some(x) = out.get_mut(i) {
+                    *x = *ax;
+                }
+            }
+        }
+        out
+    };
+    (clips, three_way(&b.1, &a.1, &n.1), tracks, three_way(&b.3, &a.3, &n.3), stretch)
 }
 
 /// The EDIT menu's entries (spec: ui/menus.md "EDIT"): the first says what Ctrl+Z does next ("Undo step seq edit",
@@ -675,9 +1021,9 @@ pub fn go_to(s: &mut State, p: usize) -> Option<String> {
 pub fn edit_label(s: &State, redo_entry: bool) -> String {
     let h = &s.history;
     let redo_it = redo_entry || h.ctrl_z_redoes();
-    let (verb, step) = if redo_it { ("Redo", h.steps.get(h.done)) } else { ("Undo", h.done.checked_sub(1).and_then(|i| h.steps.get(i))) };
+    let (verb, step) = if redo_it { ("Redo", h.redo_child(h.at)) } else { ("Undo", (h.at != 0).then_some(h.at)) };
     match step {
-        Some(st) => format!("{verb} {}", lower(&st.name)),
+        Some(n) => format!("{verb} {}", lower(&h.nodes[n].name)),
         None => verb.into(),
     }
 }
@@ -685,12 +1031,12 @@ pub fn edit_label(s: &State, redo_entry: bool) -> String {
 /// Whether EDIT's entry has a step to act on.
 pub fn edit_enabled(s: &State, redo_entry: bool) -> bool {
     let h = &s.history;
-    if redo_entry || h.ctrl_z_redoes() { h.done < h.steps.len() } else { h.done > 0 }
+    if redo_entry || h.ctrl_z_redoes() { h.redo_child(h.at).is_some() } else { h.at != 0 }
 }
 
 /// Whether EDIT shows its Redo entry: Alternate undo mode on and a history to act on (only Undo while it is empty).
 pub fn redo_shown(s: &State) -> bool {
-    prefs::check(&prefs::ALTERNATE_UNDO) && !s.history.steps.is_empty()
+    prefs::check(&prefs::ALTERNATE_UNDO) && s.history.nodes.len() > 1
 }
 
 /// Maximum undo levels changed: the history keeps that many.
@@ -701,22 +1047,19 @@ pub fn trim(s: &mut State) {
 /// Another arrangement is shown: the playlist's steps belong to the one left (spec: ui/playlist.md §10).
 pub fn forget_playlist(s: &mut State) {
     let h = &mut s.history;
-    let mut done = 0;
-    let mut kept = Vec::with_capacity(h.steps.len());
-    for (i, st) in std::mem::take(&mut h.steps).into_iter().enumerate() {
-        if !st.snap.has_playlist() {
-            done += usize::from(i < h.done);
-            kept.push(st);
-        }
-    }
-    (h.steps, h.done, h.run) = (kept, done, None);
+    let gone: Vec<bool> = h.nodes.iter().enumerate().map(|(i, n)| i != 0 && n.snap.has_playlist()).collect();
+    h.drop_nodes(&gone);
+    h.run = None;
 }
 
 /// The timebase changed from `from` to `to` ticks per quarter: the steps' notes, control points, lengths, clips and
 /// markers follow, so no undo brings back ticks of the old timebase (a timebase step keeps its own, `Timebase`).
 pub fn rescale(s: &mut State, from: u16, to: u16) {
-    for st in &mut s.history.steps {
-        st.snap.rescale(from, to);
+    for n in &mut s.history.nodes {
+        n.snap.rescale(from, to);
+        if let Some(b) = &mut n.before {
+            b.rescale(from, to);
+        }
     }
 }
 
@@ -747,12 +1090,13 @@ mod tests {
         assert_eq!(undo(s), None);
         assert_eq!((redo(s).as_deref(), note_count(s)), (Some(STEP_SEQ_EDIT), start + 1));
         assert!(s.history.undone(2) && s.history.current(1) && !s.history.undone(1));
-        // A new action: the undone step is gone.
+        // A new action: the line goes on with it, nothing to redo; the undone step stays, on a branch of its own.
         let snap = Snap::pattern(s, s.pattern);
         record(s, "Piano roll add note", snap);
         crate::rack::set_step(s, 0, 14, true);
         assert_eq!(s.history.entries().iter().map(|e| e.1).collect::<Vec<_>>(), [LAST_RESET, STEP_SEQ_EDIT, "Piano roll add note"]);
         assert_eq!(redo(s), None);
+        assert_eq!(s.history.len(), 3, "the undone step is kept");
         // Three levels kept: the oldest go.
         prefs::set_number(&prefs::MAX_UNDO_LEVELS, 3);
         for k in 0..3 {
@@ -764,8 +1108,51 @@ mod tests {
         assert!(s.history.entries().iter().skip(1).all(|e| e.1 == "Piano roll edit"), "{:?}", s.history.entries());
         prefs::set_number(&prefs::MAX_UNDO_LEVELS, 2);
         trim(s);
-        assert_eq!((s.history.len(), s.history.done), (2, 2));
+        assert_eq!((s.history.len(), s.history.done()), (2, 2));
         prefs::set_number(&prefs::MAX_UNDO_LEVELS, prefs::MAX_UNDO_LEVELS.default);
+    }
+
+    /// Undoing and then editing keeps the undone step on a branch of its own: the tree lists it one column right of the
+    /// line the project is on; going to it undoes back to where the branches part and redoes along it; copied to where the
+    /// project is, its change joins what is there, as a step of its own that an undo takes back alone.
+    #[test]
+    fn undone_steps_stay_on_a_branch() {
+        let mut app = App::new(None);
+        let s = &mut app.state;
+        let step = |s: &mut State, k: u32| {
+            let snap = Snap::pattern(s, s.pattern);
+            record(s, STEP_SEQ_EDIT, snap);
+            crate::rack::set_step(s, 0, k, true);
+        };
+        let on = |s: &State| crate::rack::row_steps(s, 0, 8);
+        step(s, 1);
+        step(s, 2);
+        undo(s);
+        step(s, 3);
+        assert_eq!(s.history.len(), 3);
+        let rows = s.history.tree_rows();
+        let shape: Vec<(usize, u8, bool, Option<usize>)> = rows.iter().map(|r| (r.node, r.col, r.done, r.parent)).collect();
+        assert_eq!(shape, [(0, 0, true, None), (1, 0, true, Some(0)), (2, 1, false, Some(1)), (3, 0, true, Some(1))]);
+        assert_eq!(s.history.entries().iter().map(|e| e.0).collect::<Vec<_>>(), [0, 1, 3], "the folder lists the line");
+        go_to(s, 2);
+        let st = on(s);
+        assert!(st[1] && st[2] && !st[3] && s.history.current(2) && s.history.undone(3), "{st:?}");
+        go_to(s, 3);
+        let st = on(s);
+        assert!(st[1] && !st[2] && st[3]);
+        assert!(copy_blocked(s, 3).is_some(), "done already");
+        assert!(copy_blocked(s, 0).is_some() || copy_here(s, 0).is_err(), "Last reset is no change");
+        assert_eq!(copy_blocked(s, 2), None);
+        assert_eq!(copy_here(s, 2).as_deref(), Ok("Copied \"step seq edit\" to here"));
+        let st = on(s);
+        assert!(st[1] && st[2] && st[3], "{st:?}");
+        assert_eq!((s.history.len(), s.history.newest_done()), (4, Some("Step seq edit (copy)")));
+        assert!(copy_here(s, 2).is_err(), "changes nothing any more");
+        undo(s);
+        let st = on(s);
+        assert!(st[1] && !st[2] && st[3], "just the copy undone");
+        redo(s);
+        assert!(on(s)[2], "a redo goes to the step undone last");
     }
 
     /// A step whose edit changed nothing is dropped when the button comes up (a step of an earlier press stays); a
@@ -985,8 +1372,9 @@ mod tests {
         prefs::set_check(&prefs::UNDO_KNOB_TWEAKS, true);
     }
 
-    /// The browser's History: "Last reset" then the steps, oldest first; undone steps grey with the mirrored arrow; a
-    /// new action drops them; newest first with Show recent changes at the top; a click on an entry goes there (spec:
+    /// The browser's Current project ▸ History: "Last reset" then the steps of the line the project is on, oldest first;
+    /// undone steps grey with the mirrored arrow; a new action takes them off the line (to a branch of their own, which the
+    /// History tab shows); newest first with Show recent changes at the top; a click on an entry goes there (spec:
     /// ui/settings-choices.md "Undo history: the four checks (2026-10-16)", Show undo history in the browser, Show
     /// recent changes at the top).
     #[test]
@@ -1013,7 +1401,8 @@ mod tests {
         // A click on "Last reset" undoes everything; on the newest entry, redoes it all.
         let rows = crate::views::browser::rows(&app.state);
         let at = |e: usize| rows.iter().position(|r| r.item == Item::History(e)).expect("history row");
-        let (first, last) = (at(0), at(2));
+        // The knob's step was made after the undone one went to its own branch: it is step 3.
+        let (first, last) = (at(0), at(3));
         app.act(Action::BrowserRow(first));
         app.mouse_up();
         assert_eq!(steps(&app), start);
@@ -1021,7 +1410,7 @@ mod tests {
         assert!(app.drag.is_none(), "a history entry is not dragged");
         app.act(Action::BrowserRow(last));
         app.mouse_up();
-        assert!(app.state.history.current(2));
+        assert!(app.state.history.current(3) && app.state.history.undone(2));
     }
 
     /// Show undo history in the browser when undoing changes: off, Ctrl+Z leaves the browser where it is; on, the
@@ -1039,10 +1428,9 @@ mod tests {
         assert_eq!((app.state.show_browser, app.state.browser_tab, &app.state.browser_open), (false, 2, &open), "off by default");
         prefs::set_check(&prefs::UNDO_HISTORY_IN_BROWSER, true);
         ctrl_z(&mut app);
-        assert!(app.state.show_browser);
-        assert_eq!(app.state.browser_tab, 1);
-        assert!(app.state.browser_open.contains("1:Current project/History"));
-        assert_eq!(app.state.browser_sel.as_deref(), Some("1:Current project/History/0"), "where the project now is");
+        assert!(app.state.show_browser, "the folded browser opens");
+        assert_eq!(app.state.browser_tab, crate::views::browser::HISTORY_TAB, "on its History tab");
+        assert_eq!(app.state.browser_sel.as_deref(), Some("4:History/0"), "where the project now is");
         prefs::set_check(&prefs::UNDO_HISTORY_IN_BROWSER, false);
     }
 

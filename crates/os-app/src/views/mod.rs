@@ -164,6 +164,11 @@ pub fn browser_w(s: &State) -> f32 {
     s.browser_w.min(s.screen.0 / 2.0).max(BROWSER_W)
 }
 
+/// The room the browser takes at the window's left: its width open, its thin strip folded.
+pub fn browser_space(s: &State) -> f32 {
+    if s.show_browser { browser_w(s) } else { browser::THIN_W }
+}
+
 /// Paints the frame; returns the number of hits registered before the overlays (menus, popups, picker...), which cover
 /// docked plugin windows.
 pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
@@ -175,7 +180,7 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
     ui.c.set_cover(None);
 
     // Workspace (§9): the theme's picture or the watermark, then docked windows on top.
-    let left = if s.show_browser { browser_w(s) } else { 0.0 };
+    let left = browser_space(s);
     let top = work_y(s);
     let work = Rect::new(left, top, w - left, h - top);
     let docked = s.docked();
@@ -196,6 +201,9 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
     if s.show_browser {
         let r = Rect::new(0.0, top, browser_w(s), h - top);
         ui.part(Seg::Browser, r, |ui| browser::paint(ui, s, r));
+    } else {
+        let r = Rect::new(0.0, top, browser::THIN_W, h - top);
+        ui.part(Seg::Browser, r, |ui| browser::paint_thin(ui, s, r));
     }
     let _ = work;
     for (i, &win) in s.z.iter().enumerate() {
@@ -361,6 +369,11 @@ pub fn resize_zones(ui: &mut Ui, s: &State, win: Win, r: Rect) {
 
 /// Minimize / maximize / close buttons from `x0` at the title bar of a window at top `y`.
 pub fn window_buttons(ui: &mut Ui, win: Win, x0: f32, y: f32, _normal: Color, _hover: Color) {
+    some_window_buttons(ui, win, x0, y, 3);
+}
+
+/// The first `n` window buttons from `x0`: a window that is always there has no close button (`n` = 2).
+pub fn some_window_buttons(ui: &mut Ui, win: Win, x0: f32, y: f32, n: usize) {
     let mut hovered = None;
     for (i, (hint, action)) in [
         ("Minimize window", Action::MinWin(win)),
@@ -369,12 +382,13 @@ pub fn window_buttons(ui: &mut Ui, win: Win, x0: f32, y: f32, _normal: Color, _h
     ]
     .into_iter()
     .enumerate()
+    .take(n)
     {
         if ui.hit(Rect::new(x0 + i as f32 * 19.5, y + 3.0, 17.0, 17.0), action, hint) {
             hovered = Some(i);
         }
     }
-    kit::window_buttons(ui.c, ui.t, x0, y, hovered);
+    kit::window_buttons_n(ui.c, ui.t, x0, y, hovered, n);
 }
 
 /// Window frame with a title bar (§5); the bar drags the window. `buttons` = draw the window

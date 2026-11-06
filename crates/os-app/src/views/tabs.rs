@@ -6,12 +6,13 @@
 //! The strip at its top holds the tabs and the window's buttons; the page under it is the tab's own view.
 //!
 //! F5 and F6 go to a tab (a second press flips to the other one) and Ctrl+Tab flips between them. Something carried from
-//! the browser or the rack over a tab opens that tab, so it can be dropped on its page.
+//! the browser or the rack over a tab opens that tab, so it can be dropped on its page. The window is always there: it
+//! minimizes to its strip and maximizes, and has no close button.
 
 use os_ui::kit::lemon as lk;
 use os_ui::{Font, Rect};
 
-use super::{playlist, rack, window_body, window_buttons, FrameInfo, TAB_H};
+use super::{playlist, rack, some_window_buttons, window_body, FrameInfo, TAB_H};
 use crate::app::{Action, State, Ui, Win};
 use crate::icons::{self, Icon};
 
@@ -88,5 +89,6 @@ fn strip(ui: &mut Ui, s: &State, win: Win, outer: Rect) {
         let lh = ui.c.line_height(f);
         ui.c.text_clip(f, tab.x + 26.0, (tab.cy() - lh / 2.0).round(), tab.w - 30.0, ink, name);
     }
-    window_buttons(ui, win, r.right() - 64.0, r.y, t.text_dim, t.glyph);
+    // Minimize and maximize: the window is always there, so it has no close button.
+    some_window_buttons(ui, win, r.right() - 44.5, r.y, 2);
 }

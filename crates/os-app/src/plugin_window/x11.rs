@@ -399,7 +399,14 @@ impl FrameWindow {
 
     pub fn set_info(&self, info: ChannelInfo) {
         let mut st = self.f.state.borrow_mut();
+        let size = (st.size(), st.area_y());
         if st.take_info(info) {
+            // A sample's tabs came or went: the sub-tabs' row moves the editor.
+            let moved = (st.size(), st.area_y()) != size;
+            drop(st);
+            if moved {
+                self.f.layout();
+            }
             self.f.dirty.set(true);
         }
     }
@@ -481,6 +488,11 @@ impl FrameWindow {
     }
 
     /// Shows the This clip or Source audio tab.
+    /// The This clip or Source audio plugins and automation page it shows, if one.
+    pub fn clip_page(&self) -> Option<crate::clip_page::Tab> {
+        self.f.state.borrow().clip_shown().map(|(t, _)| t)
+    }
+
     pub fn show_clip_tab(&self, tab: crate::clip_page::Tab) {
         self.f.state.borrow_mut().open_clip_tab(tab);
         self.f.layout();

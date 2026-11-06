@@ -57,6 +57,10 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
   automation channel makes its own clip, a channel with notes a clip of the pattern that plays it, a sampler with no
   notes an audio clip of its sample. Ctrl+C on the rack then Ctrl+V on the Arranger does the same at the song position.
   What is carried from the browser opens a tab the same way
+- The window and the browser are always there: VIEW does not list them to show or hide, the window has no close button
+  (it minimizes to its strip and maximizes) and Close all windows leaves it. The browser's title bar button folds it to a
+  thin strip at the left edge, which the windows take the room of; the strip's button (or Alt+F8, or the toolbar's
+  browser button) opens it again, and a tab's icon on the strip opens it on that tab
 - The window is maximized at first, all the width from the browser to the window's edge, and its first restore keeps that
   width
 - Each track has its own height: drag its bottom edge in the headers (a double-click puts it back), or use the track menu's
@@ -169,16 +173,27 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
   projects expect
 - Audio clips in the playlist take their length (and redraw their waveform) whenever the sampler's
   stretch settings, the channel pitch or the tempo change
-- Plugins and automation on a piece of audio. Double-clicking an audio clip opens its channel's window as before, with
-  two more tabs in its strip (Alt+double-click opens straight on the first of them; General ▸ Input ▸ Manage shortcuts):
-  - **This clip** is the clip double-clicked: which part of the sample it plays, where it stands, its gain and fades,
-    ten plugin slots of its own, and its own automation lines.
-  - **Source audio** is the sample: its file, length and clips, ten plugin slots for all of it, and automation lines every
-    clip of it follows.
+- Plugins and automation on a piece of audio. A sample's channel window has two tabs in its strip, and a row of
+  sub-tabs under them holds each tab's pages, so it is clear what each page is heard on. Double-clicking an audio clip
+  opens the window (Alt+double-click opens straight on This clip; General ▸ Input ▸ Manage shortcuts):
+  - **This clip** is the clip double-clicked. Its one sub-tab, Plugins & automation: which part of the sample it plays,
+    where it stands, its gain and fades, ten plugin slots of its own, and its own automation lines.
+  - **Source audio** is the sample, heard on every clip of it. Its sub-tabs: the sampler's own pages, Misc, and Plugins &
+    automation (its file, length and clips, ten plugin slots for all of it, and automation lines every clip of it
+    follows). It opens on the sub-tab it was left on.
 
-  Both tabs have a time ruler over the lines and the song position's line down them. It is where playback starts or is:
-  click or drag the ruler to place it, as on the Arranger's. Where the song position is not on this audio the ruler says
-  so.
+  Both Plugins & automation pages have a time ruler over the lines and the song position's line down them. It is where
+  playback starts or is: click or drag the ruler to place it, as on the Arranger's. Where the song position is not on
+  this audio the ruler says so.
+
+  Volume and pan show their baseline before anything is drawn: a dashed line labelled "Baseline: 0 dB (as recorded)" or
+  "centre", over a scale of dB steps (or left and right). A reset button for the line shown puts it back to its baseline
+  (on This clip, back to following the source audio's line), and "Reset volume & pan" does both in one undo step.
+
+  While a Plugins & automation page is in front, Play plays just that audio, looped: This clip alone where it is, the
+  source audio as the whole file from its start (or where its ruler was clicked). Playing the song when the page comes
+  to the front, the loop takes over from inside the clip; the page closed, playback stops. The page's loop switch turns
+  this off (Play plays the whole song), and with Record armed Play plays the song.
 
   A line's points stand on the sample's own clock, so they stay with the audio when a clip is moved or trimmed. A line
   of the source audio moves every clip of the sample at the part of the sample it plays, and shows on each of them, in the
@@ -464,7 +479,8 @@ and Touch controller. Kept with the program's settings, not the project. Which w
   on, playback loops and each pass is a take (one undo step) that replaces what the pass before recorded
 - One-click audio recording (the toolbar's microphone, TOOLS): pick an input (an ASIO driver's inputs, else the
   system's input devices), the song plays with Record armed and precount, and on stop the take becomes a 32-bit WAV
-  in the data folder's `Recorded` folder plus a new audio clip channel and clip where playback started; or, picked
+  in the data folder's `Recorded` folder plus a new audio clip channel and clip where playback started, on the
+  Arranger's selected track (a track header's click, Ctrl+Up / Down); or, picked
   through Into the audio editor, the take goes into Tesla on the master track instead (see Audio editing)
 - TOOLS ▸ Cancel recording: while recording, playback stops and the takes of that playback are undone (Redo brings
   them back)
@@ -472,13 +488,20 @@ and Touch controller. Kept with the program's settings, not the project. Which w
   (arming turns Audio on in Record's filter); with Record armed, every armed track records while the song plays,
   taken at its record source (the input alone, with the mixer input, after the effects, after the EQ, after the
   fader). On stop each take is a WAV in the `Recorded` folder named after the track and, with the mixer menu's Disk
-  recording ▸ Auto-create audio clips on, an audio clip channel on that track with its clip where the take started,
-  the input's delay taken out (one undo step)
+  recording ▸ Auto-create audio clips on, an audio clip channel on that track with its clip where the take started, on
+  the Arranger's selected track (several takes: the others on the free tracks under it), the input's delay taken out
+  (one undo step). A note take in SONG mode places its pattern's clip on the selected track too
 - Input monitoring: a track's input plays through it while armed, or always, per its Monitor external input setting
 
 ## 🚧 Undo
 
 - One history for the whole project, with redo: Ctrl+Z, Ctrl+Alt+Z and the EDIT menu, which names the step
+- The history is a tree: undoing and then editing starts a new branch, and the undone steps stay on theirs. The
+  browser's History tab draws it (the line the project is on down the left, branches beside it): a click on any step
+  goes there, undoing back to where the branches part and redoing along the other; a step dragged onto the list, or its
+  right-click menu's Copy this change to now, copies just that change onto where the project is, as a new step (notes
+  and clips it added come in, what it took away goes, values it set are set). A redo goes to the branch left last.
+  Changes that cover the whole project or a channel coming and going can be gone back to but not copied
 - Covers the piano roll, the playlist, step-sequencer edits and knob turns (channel, main, mixer panning and
   stereo separation, effect mix, send levels, swing), sample loads, the project's initial values, PATTERNS ▸ Split
   by channel and ADD's audio and automation clip channels
@@ -503,8 +526,8 @@ and Touch controller. Kept with the program's settings, not the project. Which w
   slot; the redo the state as the undo found it. A preset that goes into an instance made for it is part of that
   step. Lemon Studio's choice; the original's behaviour was not looked at
 - Changes made through the control plane (see Scripting and assistants), named after the client that made them
-- The browser's Current project ▸ History lists the steps from "Last reset"; undone steps are grey, and a click
-  on one goes back or forward to it
+- The browser's Current project ▸ History lists the steps of the line the project is on from "Last reset"; undone
+  steps are grey, and a click on one goes back or forward to it. Show undo history in the browser opens the History tab
 - General settings ▸ Undo history: Maximum undo levels, Undo knob tweaks, Alternate undo mode, and showing the
   history in the browser, newest first if wanted
 - Not yet: "Put undone recordings in the recycle bin", which waits for recording. A plugin's own undo inside its

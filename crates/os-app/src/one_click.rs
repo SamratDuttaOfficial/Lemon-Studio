@@ -220,7 +220,7 @@ impl App {
         let rate = r.rate.unwrap_or(48000).max(1);
         self.state.message = Some(match r.recorder.map_or(Err("no recorder".into()), Recorder::join) {
             Ok((path, frames)) if frames * 1000 >= u64::from(rate) => {
-                let placed = if r.editor { self.take_to_editor(&path) } else { self.place_take(&path, frames, rate, r.start_tick) };
+                let placed = if r.editor { self.take_to_editor(&path) } else { self.place_take(&path, r.start_tick) };
                 match capture().dropped() {
                     0 => placed,
                     lost => format!("{placed} ({lost} frames were lost: the disk was too slow)"),
@@ -235,13 +235,10 @@ impl App {
         self.invalidate();
     }
 
-    /// The take's audio clip channel and clip at `start`, on the first track free over it: one undo step.
-    fn place_take(&mut self, path: &std::path::Path, frames: u64, rate: u32, start: u32) -> String {
+    /// The take's audio clip channel and clip at `start`, on the selected Arranger track: one undo step.
+    fn place_take(&mut self, path: &std::path::Path, start: u32) -> String {
         let s = &mut self.state;
-        let p = &s.project;
-        let tempo = p.tick_tempo(p.tempo.unwrap_or(140.0).max(1.0));
-        let len = (frames as f64 / f64::from(rate) * tempo / 60.0 * f64::from(p.ppq.max(1))).ceil() as u32;
-        let track = crate::playlist::free_track(s, 0, start, start + len.max(1));
+        let track = crate::playlist::rec_track(s);
         let text = path.to_string_lossy();
         match crate::playlist::add_audio_clip_as(s, &text, track, start, RECORDED) {
             Some(_) => format!("Recorded {}", path.file_name().map(|n| n.to_string_lossy()).unwrap_or_default()),
@@ -304,12 +301,16 @@ mod tests {
     }
 
     /// A take from the song's start to stop: a WAV in the Recorded folder, a new audio clip channel and its clip at
-    /// the start, as "Recorded items"; a take with nothing in it places nothing (spec §2 The take).
+    /// the start on the Arranger's selected track, as "Recorded items"; a take with nothing in it places nothing (spec §2
+    /// The take).
     #[test]
     fn a_take_becomes_a_clip() {
         let _one = RECORDING.lock().unwrap_or_else(|e| e.into_inner());
         let mut app = app();
         let channels = app.state.project.channels.len();
+        // The Arranger's selected track, a clip already on it: the take goes there all the same.
+        app.state.playlist.track = 2;
+        crate::playlist::arr_mut(&mut app.state).clips.push(os_model::Clip::new(0, 50_000, 2, os_model::ClipSource::Pattern(1)));
         app.one_click_begin(Input { device: "Test ASIO".into(), asio: true, first: 0, stereo: true }, None, false).unwrap();
         assert!(app.state.rec.audio && capture().on());
         app.transport.pretend_at(0.0, true);
@@ -332,7 +333,7 @@ mod tests {
         let name = path.file_name().unwrap().to_string_lossy().into_owned();
         assert!(name.starts_with("untitled_") && name.ends_with("_REC.wav"), "{name}");
         let clip = app.state.project.arrangement().unwrap().clips.last().unwrap().clone();
-        assert_eq!(clip.position, 0);
+        assert_eq!((clip.position, clip.track), (0, 2), "at the start, on the selected track");
         assert!(app.state.history.entries().iter().any(|e| e.1 == RECORDED));
         let _ = std::fs::remove_file(&path);
     }

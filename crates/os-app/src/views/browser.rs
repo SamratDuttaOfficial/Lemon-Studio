@@ -2,7 +2,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
-//! Docked browser (left): four tabs, a tree of the project / plugin database / folders / favorites, drag sources.
+//! Docked browser (left): five tabs, a tree of the project / plugin database / folders / favorites, the undo history's
+//! tree, drag sources. It is always there: its title bar's button folds it to a thin strip down the window's left edge,
+//! which opens it again (`paint_thin`).
 // spec: ui/main-window.md §4, ui/browser.md (§4 options menu, §5 search, §6 dropped folders, §10 favorites, §11 index)
 
 use std::path::{Path, PathBuf};
@@ -60,6 +62,18 @@ pub const PROJECT_DATA: &str = "Project data";
 pub const PROJECT_TAB: usize = 1;
 pub const PLUGIN_TAB: usize = 2;
 pub const FAV_TAB: usize = 3;
+/// The History tab: the undo history as a tree, every branch of it (`crate::history`).
+pub const HISTORY_TAB: usize = 4;
+/// The tabs' icons and what they show, in strip order.
+const TABS: [(Icon, &str); 5] = [
+    (Icon::Wave, "Show everything in the browser"),
+    (Icon::Page, "Show the current project's contents"),
+    (Icon::Speaker, "Show the plugin library"),
+    (Icon::Star, "Show your favorite plugins and files"),
+    (Icon::History, "Show the undo history as a tree: go back to any step of any branch, or drag a step onto the list to copy that change to now"),
+];
+/// Width of the folded browser: a strip with the button that opens it and the tabs' icons.
+pub const THIN_W: f32 = 26.0;
 
 /// The Plugin database's section listing every plugin by format (spec §2).
 pub const INSTALLED: &str = "Installed";
@@ -163,7 +177,8 @@ fn is_open(s: &State, key: &str) -> bool {
 /// The visible rows of the active tab, top to bottom (filtered while searching, spec §5).
 pub fn rows(s: &State) -> Vec<Row> {
     let all = tree(s);
-    if s.browser_search.is_empty() {
+    // The history's tree is not searched: its rows hang on each other.
+    if s.browser_search.is_empty() || s.browser_tab == HISTORY_TAB {
         return all;
     }
     let q = s.browser_search.to_lowercase();
@@ -214,6 +229,10 @@ fn tree(s: &State) -> Vec<Row> {
         0 => (0..ROOTS.len()).map(Ok).collect(),
         1 => vec![Ok(0)],
         2 => vec![Ok(1)],
+        HISTORY_TAB => {
+            history_rows(s, &mut out);
+            return out;
+        }
         _ => {
             fav_rows(s, &mut out);
             return out;
@@ -445,6 +464,15 @@ fn project_rows(s: &State, root: &str, cat: u8, out: &mut Vec<Row>) {
             }
             _ => {}
         }
+    }
+}
+
+/// The History tab's rows: a step each, in the tree's order (`History::tree_rows`), indented by its branch.
+fn history_rows(s: &State, out: &mut Vec<Row>) {
+    for r in s.history.tree_rows() {
+        let icon = if r.done { Icon::Undo } else { Icon::Redo };
+        let key = format!("{HISTORY_TAB}:History/{}", r.node);
+        out.push(Row { key, depth: r.col, label: r.name, icon, cat: 0, open: None, bright: s.history.current(r.node), item: Item::History(r.node), path: None });
     }
 }
 
@@ -772,13 +800,19 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect) {
         icons::draw(ui.c, icon, Rect::new(r.x + 1.0, 87.0 + dy, 12.0, 14.0), if hov { t.glyph } else { t.text_dim });
     }
     ui.c.text(os_ui::Font::new(14), 52.0, 85.0 + dy, t.text_dim, "Browser");
-    // Tabs (spec ui/browser.md §1): FL's five without Online content, sharing the strip.
+    // The fold button: the browser becomes a thin strip, and the windows take its room.
+    let fold = Rect::new(bw - 21.0, 85.0 + dy, 18.0, 18.0);
+    let fhov = ui.hit(fold, Action::BrowserFold, "Fold the browser to a thin strip at the left edge (Alt+F8)");
+    if fhov {
+        ui.c.stroke_rrect(fold, 2.0, 1.2, t.browser_tab_outline);
+    }
+    icons::draw(ui.c, Icon::FoldLeft, fold.inset(2.0), if fhov { t.glyph } else { t.text_dim });
+    // Tabs (spec ui/browser.md §1): FL's five without Online content, and the undo history's, sharing the strip.
     ui.c.fill_rect(Rect::span(0.0, bw - 1.0, 106.0 + dy, 141.0 + dy), t.browser_tabs);
-    const TIPS: [&str; 4] = ["Show everything in the browser", "Show the current project's contents", "Show the plugin library", "Show your favorite plugins and files"];
-    for (i, icon) in [Icon::Wave, Icon::Page, Icon::Speaker, Icon::Star].into_iter().enumerate() {
-        let cx = 25.0 + 50.0 * i as f32;
-        let rr = Rect::new(cx - 18.0, 108.0 + dy, 36.0, 30.0);
-        let hov = ui.hit(rr, Action::BrowserTab(i), TIPS[i]);
+    for (i, (icon, tip)) in TABS.into_iter().enumerate() {
+        let cx = 21.0 + 40.0 * i as f32;
+        let rr = Rect::new(cx - 17.0, 108.0 + dy, 34.0, 30.0);
+        let hov = ui.hit(rr, Action::BrowserTab(i), tip);
         if i == s.browser_tab {
             ui.c.stroke_rrect(rr, 4.0, 1.5, t.browser_tab_outline);
         }
@@ -804,7 +838,10 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect) {
     let scroll = s.browser_scroll.min((rows.len() as f32 * ROW_H - list.h).max(0.0)).max(0.0);
     let sel = s.browser_sel.as_deref();
     let mut marquee = None;
-    for (i, row) in rows.iter().enumerate() {
+    if s.browser_tab == HISTORY_TAB {
+        history_list(ui, s, &rows, list, top, scroll, bw);
+    }
+    for (i, row) in rows.iter().enumerate().filter(|_| s.browser_tab != HISTORY_TAB) {
         let y = top + ROW_H * i as f32 - scroll;
         if y + ROW_H < list.y || y > list.bottom() {
             continue;
@@ -886,6 +923,11 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect) {
     // Footer: the search field takes the width the splitter adds.
     let fy = r.bottom() - 27.0;
     ui.c.fill_rect(Rect::new(0.0, fy, bw, 27.0), t.browser_footer);
+    if s.browser_tab == HISTORY_TAB {
+        let f = os_ui::Font::new(12);
+        ui.c.text_clip(f, 13.0, fy + 6.0, bw - 18.0, t.text_dim, "Click: go there.  Drag onto the list: copy it here.");
+        return splitter(ui, r, bw);
+    }
     // Tags: not available yet, greyed out.
     let tags = Rect::new(13.0, fy + 4.0, 41.0, 20.0);
     ui.off(tags, "Tags");
@@ -908,10 +950,111 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect) {
         let hov = ui.hit(glass, Action::BrowserClear, "Clear the search");
         icons::draw(ui.c, Icon::Close, Rect::new(glass.x + 3.0, fy + 6.0, 15.0, 15.0), if hov { t.browser_search.shade(0.2) } else { t.browser_search });
     }
-    // Splitter: drags the browser's width (§9).
+    splitter(ui, r, bw);
+}
+
+/// The splitter right of the browser panel: drags the browser's width (§9).
+fn splitter(ui: &mut Ui, r: Rect, bw: f32) {
+    let t = ui.t;
     ui.c.fill_rect(Rect::new(bw, r.y, 6.0, r.h), t.splitter);
     ui.c.fill_rect(Rect::new(bw + 6.0, r.y, 2.0, r.h), t.splitter_dark);
     ui.hit(Rect::new(bw, r.y, SPLITTER, r.h), Action::BrowserSplitter, "Browser: drag to resize, double-click for the default width");
+}
+
+/// The x of a history tree column's dots.
+fn branch_x(col: u8) -> f32 {
+    23.0 + 12.0 * f32::from(col.min(12))
+}
+
+/// The History tab's list: each step a dot on its branch's line, joined to the step it was made after; the steps done
+/// (from "Last reset" to where the project is) lit, the others grey, where the project is ringed.
+#[allow(clippy::too_many_arguments)]
+fn history_list(ui: &mut Ui, s: &State, rows: &[Row], list: Rect, top: f32, scroll: f32, bw: f32) {
+    let t = ui.t;
+    let tree = s.history.tree_rows();
+    let cy = |i: usize| top + ROW_H * i as f32 - scroll + ROW_H / 2.0;
+    let seen = |i: usize| cy(i) + ROW_H >= list.y && cy(i) - ROW_H <= list.bottom();
+    let sel = s.browser_sel.as_deref();
+    // The rows and their clicks.
+    for (i, row) in rows.iter().enumerate() {
+        let y = cy(i) - ROW_H / 2.0;
+        if !seen(i) {
+            continue;
+        }
+        let rect = Rect::new(13.0, y, bw - 13.0, ROW_H);
+        let hint = match tree.get(i) {
+            Some(r) if s.history.current(r.node) => format!("{}: the project is here", row.label),
+            Some(r) if r.done => format!("{}: click to go back to here (undoes what came after)", row.label),
+            _ => format!("{}: click to go to this step, or drag it onto the list to copy just this change to now", row.label),
+        };
+        let hov = ui.hit(rect, Action::BrowserRow(i), hint);
+        let now = tree.get(i).is_some_and(|r| s.history.current(r.node));
+        if now {
+            ui.c.fill_rect(rect, t.browser_row_hi.shade(0.03));
+        } else if sel == Some(row.key.as_str()) || hov {
+            ui.c.fill_rect(rect, t.browser_row_hi);
+        }
+    }
+    // The lines, under the dots: lit between done steps.
+    for (i, r) in tree.iter().enumerate() {
+        let Some(p) = r.parent else { continue };
+        if !seen(i) && !seen(p) && !(p < i && cy(p) < list.y && cy(i) > list.bottom()) {
+            continue;
+        }
+        let (px, x) = (branch_x(tree[p].col), branch_x(r.col));
+        let col = if r.done { t.accent } else { t.text_faint.with_alpha(160) };
+        if (px - x).abs() < 0.5 {
+            ui.c.fill_rect(Rect::new(x - 0.75, cy(p), 1.5, cy(i) - cy(p)), col);
+        } else {
+            ui.c.polyline(&[(px, cy(p)), (px, cy(i) - 7.0), (x, cy(i))], 1.5, col);
+        }
+    }
+    // The dots and names.
+    for (i, r) in tree.iter().enumerate() {
+        if !seen(i) {
+            continue;
+        }
+        let (x, y) = (branch_x(r.col), cy(i));
+        let now = s.history.current(r.node);
+        if now {
+            ui.c.fill_circle(x, y, 6.0, t.accent.with_alpha(70));
+        }
+        if r.done {
+            ui.c.fill_circle(x, y, 4.0, t.accent);
+        } else {
+            ui.c.fill_circle(x, y, 4.0, t.browser_list);
+            ui.c.stroke_circle(x, y, 3.5, 1.4, t.text_faint);
+        }
+        let f = if now { os_ui::Font::new(15).bold() } else { os_ui::Font::new(15) };
+        let c = if now { t.glyph } else if r.done { t.text } else { t.text_faint };
+        let lx = x + 10.0;
+        let lh = ui.c.line_height(f);
+        ui.c.text_clip(f, lx, (y - lh / 2.0).round(), (bw - 4.0 - lx).max(0.0), c, &r.name);
+    }
+}
+
+/// The folded browser: a thin strip down the left edge with the button that opens it again and the tabs' icons, each of
+/// which opens it on that tab.
+pub fn paint_thin(ui: &mut Ui, s: &State, r: Rect) {
+    let t = ui.t;
+    ui.hit(r, Action::Swallow, "");
+    ui.c.fill_rect(r, t.browser_title);
+    ui.c.fill_rect(Rect::new(r.right() - 1.0, r.y, 1.0, r.h), t.splitter_dark);
+    let open = Rect::new(r.x + 3.0, r.y + 4.0, r.w - 6.0, 20.0);
+    let hov = ui.hit(open, Action::BrowserFold, "Open the browser again (Alt+F8)");
+    if hov {
+        ui.c.stroke_rrect(open, 3.0, 1.2, t.browser_tab_outline);
+    }
+    icons::draw(ui.c, Icon::FoldRight, open.inset(2.0), if hov { t.glyph } else { t.text_dim });
+    for (i, (icon, tip)) in TABS.into_iter().enumerate() {
+        let b = Rect::new(r.x + 2.0, r.y + 32.0 + 28.0 * i as f32, r.w - 4.0, 24.0);
+        let hov = ui.hit(b, Action::BrowserTab(i), format!("Open the browser: {}", tip.trim_start_matches("Show ").to_string()));
+        if hov || i == s.browser_tab {
+            ui.c.stroke_rrect(b, 3.0, 1.2, t.browser_tab_outline);
+        }
+        let c = if hov || i == s.browser_tab { t.glyph } else { t.glyph.shade(-0.1) };
+        icons::draw(ui.c, icon, Rect::new(b.cx() - 8.0, b.cy() - 8.0, 16.0, 16.0), c);
+    }
 }
 
 /// The splitter's width right of the browser panel.

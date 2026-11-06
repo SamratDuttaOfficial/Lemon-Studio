@@ -38,7 +38,7 @@ impl Tab {
     pub fn about(self) -> &'static str {
         match self {
             Tab::Cut => "This clip: plugins and automation for just this clip in the Arranger",
-            Tab::Whole => "Source audio: plugins and automation for the whole file, heard on every clip of it",
+            Tab::Whole => "Source audio: the sampler, Misc, plugins and automation of the whole file, heard on every clip of it",
         }
     }
 }
@@ -131,6 +131,8 @@ impl Default for Side {
 pub struct PageVals {
     pub cut: Side,
     pub whole: Side,
+    /// Play loops just this audio while the page shows (the loop switch).
+    pub looping: bool,
 }
 
 impl PageVals {
@@ -167,6 +169,11 @@ impl PageVals {
                 }
             }
             Event::SetPos { tab, at } => self.side_mut(*tab).pos = Pos::At(*at),
+            Event::ResetLanes { tab, lanes } => {
+                for l in self.side_mut(*tab).lanes.iter_mut().filter(|l| lanes.contains(&l.lane)) {
+                    l.own.clear();
+                }
+            }
             _ => {}
         }
     }
@@ -191,6 +198,10 @@ pub enum Event {
     SetLane { tab: Tab, lane: Lane, points: Vec<AutoPoint> },
     /// The time ruler was clicked or dragged: the song position goes to this second of the sample.
     SetPos { tab: Tab, at: f64 },
+    /// These lanes back to their baseline (their own points gone), in one edit: "Reset volume & pan".
+    ResetLanes { tab: Tab, lanes: Vec<Lane> },
+    /// The loop switch: whether Play plays just this audio, looped, while the page shows.
+    Loop { tab: Tab, on: bool },
 }
 
 /// Mouse buttons the page takes.
@@ -251,8 +262,12 @@ pub enum Hit {
     /// A row of the lane list: its place in `Side::lanes`.
     LaneRow(usize),
     AddLane,
-    /// The button that clears the lane shown.
+    /// The button that puts the lane shown back to its baseline.
     Clear,
+    /// "Reset volume & pan", on the automation heading.
+    ResetBoth,
+    /// The loop switch, right of the page's name.
+    Loop,
     /// A point of the lane shown.
     Point(usize),
     /// The lane editor, away from any point.
@@ -304,7 +319,32 @@ pub fn lane_row_rect(row: usize) -> Rect {
 }
 
 fn clear_rect() -> Rect {
-    Rect::new(PAGE_W - 8.0 - 92.0, INFO_H + 6.0, 92.0, 20.0)
+    Rect::new(PAGE_W - 8.0 - 116.0, INFO_H + 6.0, 116.0, 20.0)
+}
+
+/// "Reset volume & pan", at the right of the automation heading.
+fn reset_both_rect() -> Rect {
+    Rect::new(LEFT_X + LEFT_W - 124.0, LANES_Y - 22.0, 124.0, 18.0)
+}
+
+/// The loop switch, right of the page's name at the top.
+pub fn loop_rect() -> Rect {
+    Rect::new(PAGE_W - 8.0 - 196.0, 2.0, 196.0, 20.0)
+}
+
+/// What the lane shown's reset button says: the baseline it goes back to.
+fn reset_label(l: &LaneVals, tab: Tab) -> &'static str {
+    match (tab, l.inherited.is_empty(), l.lane) {
+        (Tab::Cut, false, _) => "Follow source audio",
+        (_, _, Lane::Volume) => "Reset to 0 dB",
+        (_, _, Lane::Pan) => "Reset to centre",
+        _ => "Remove line",
+    }
+}
+
+/// Whether Volume or Pan has points of its own on this tab: "Reset volume & pan" has something to do.
+fn vol_pan_own(side: &Side) -> Vec<Lane> {
+    side.lanes.iter().filter(|l| matches!(l.lane, Lane::Volume | Lane::Pan) && !l.own.is_empty()).map(|l| l.lane).collect()
 }
 
 /// The time ruler over the lane editor's plot.
@@ -381,6 +421,12 @@ pub fn hit(ui: &PageUi, vals: &PageVals, tab: Tab, x: f32, y: f32) -> Option<Hit
     if !side.available {
         return None;
     }
+    if loop_rect().contains(x, y) {
+        return Some(Hit::Loop);
+    }
+    if reset_both_rect().contains(x, y) {
+        return Some(Hit::ResetBoth);
+    }
     for k in 0..SLOTS {
         if slot_rect(k).contains(x, y) {
             let filled = side.slots.get(k).is_some_and(|s| s.name.is_some());
@@ -408,7 +454,7 @@ pub fn hit(ui: &PageUi, vals: &PageVals, tab: Tab, x: f32, y: f32) -> Option<Hit
         return Some(Hit::Ruler);
     }
     let lane = shown(ui, side, tab)?;
-    if clear_rect().contains(x, y) && !points(ui, lane).is_empty() {
+    if clear_rect().contains(x, y) {
         return Some(Hit::Clear);
     }
     let plot = plot_rect();
@@ -451,9 +497,22 @@ pub fn press(ui: &mut PageUi, vals: &PageVals, tab: Tab, x: f32, y: f32, b: Butt
             Press::Repaint
         }
         (Button::Left, Hit::Clear) => {
-            if let Some(l) = shown(ui, side, tab) {
-                out.push(Event::SetLane { tab, lane: l.lane, points: Vec::new() });
+            match shown(ui, side, tab) {
+                Some(l) if !l.own.is_empty() => out.push(Event::SetLane { tab, lane: l.lane, points: Vec::new() }),
+                _ => return Press::Nothing,
             }
+            Press::Repaint
+        }
+        (Button::Left, Hit::ResetBoth) => {
+            let lanes = vol_pan_own(side);
+            if lanes.is_empty() {
+                return Press::Nothing;
+            }
+            out.push(Event::ResetLanes { tab, lanes });
+            Press::Repaint
+        }
+        (Button::Left, Hit::Loop) => {
+            out.push(Event::Loop { tab, on: !vals.looping });
             Press::Repaint
         }
         (Button::Left, Hit::Ruler) => {
@@ -606,10 +665,30 @@ fn hint_of(ui: &PageUi, vals: &PageVals, tab: Tab, h: Option<Hit>, x: f32, y: f3
         Hit::LaneRow(i) => side.lanes.get(i).map_or(String::new(), |l| format!("Show the {} line", l.name)),
         Hit::AddLane => "Automate a parameter of a plugin here".into(),
         Hit::Ruler => "Click or drag to place the song position: playback starts here".into(),
-        Hit::Clear => match tab {
-            Tab::Cut => "Remove this clip's own line: it follows the source audio's again".into(),
-            Tab::Whole => "Remove this line".into(),
+        Hit::Clear => match shown(ui, side, tab) {
+            Some(l) if l.own.is_empty() => format!("{} is at its baseline already", l.name),
+            Some(l) if tab == Tab::Cut && !l.inherited.is_empty() => format!("Remove this clip's own {} line: it follows the source audio's again", l.name),
+            Some(l) => match l.lane {
+                Lane::Volume => "Remove this volume line: back to the baseline, 0 dB (as recorded)".into(),
+                Lane::Pan => "Remove this pan line: back to the baseline, the centre".into(),
+                Lane::Param { .. } => "Remove this line: the parameter keeps the value its plugin has".into(),
+            },
+            None => String::new(),
         },
+        Hit::ResetBoth => {
+            if vol_pan_own(side).is_empty() {
+                "Volume and pan are at their baselines already".into()
+            } else {
+                "Reset volume and pan: both back to their baselines (0 dB, centre) in one step".into()
+            }
+        }
+        Hit::Loop => {
+            if vals.looping {
+                "Play loops just this audio while this page shows: click to play the whole song instead".into()
+            } else {
+                "Play plays the whole song: click to loop just this audio while this page shows".into()
+            }
+        }
         Hit::Point(i) => {
             let Some(l) = shown(ui, side, tab) else { return String::new() };
             format!("{}  (drag to move, right-click to remove)", point_text(side, points(ui, l).get(i), l.lane))
@@ -664,6 +743,7 @@ pub fn paint(c: &mut Canvas, p: &Palette, ox: f32, oy: f32, vals: &PageVals, ui:
         return;
     }
     info(c, p, ox, oy, side, tab);
+    loop_switch(c, p, at(loop_rect()), vals.looping, tab, ui.hover == Some(Hit::Loop));
     c.fill_rect(at(Rect::new(LEFT_X, INFO_H, PAGE_W - 2.0 * LEFT_X, 1.0)), line);
     let heading = |c: &mut Canvas, y: f32, s: &str| c.text(Font::condensed(11, 4).bold(), ox + LEFT_X, oy + y, dim, s);
 
@@ -676,6 +756,11 @@ pub fn paint(c: &mut Canvas, p: &Palette, ox: f32, oy: f32, vals: &PageVals, ui:
     }
 
     heading(c, LANES_Y - 17.0, "AUTOMATION");
+    {
+        let b = at(reset_both_rect());
+        let on = !vol_pan_own(side).is_empty();
+        button(c, p, b, "Reset volume & pan", on, ui.hover == Some(Hit::ResetBoth));
+    }
     let selected = shown_lane(ui, side, tab);
     let scroll = ui.scroll[tab_at(tab)];
     for row in 0..rows_shown() {
@@ -694,16 +779,9 @@ pub fn paint(c: &mut Canvas, p: &Palette, ox: f32, oy: f32, vals: &PageVals, ui:
         let title = format!("{}", l.name);
         c.text_clip(f.bold(), ox + RIGHT_X, oy + INFO_H + 6.0, 180.0, text, &title);
         let tw = c.text_width(f.bold(), &title).min(180.0);
-        c.text_clip(Font::new(12), ox + RIGHT_X + tw + 12.0, oy + INFO_H + 8.0, PAGE_W - RIGHT_X - tw - 124.0, dim, &status_text(l, tab, side));
+        c.text_clip(Font::new(12), ox + RIGHT_X + tw + 12.0, oy + INFO_H + 8.0, PAGE_W - RIGHT_X - tw - 148.0, dim, &status_text(l, tab, side));
         let pts = points(ui, l);
-        if !pts.is_empty() {
-            let b = at(clear_rect());
-            c.fill_rrect(b, 3.0, p.s(0x2b2f31));
-            c.text_center(Font::new(12), b, text, match tab {
-                Tab::Cut => "Remove own line",
-                Tab::Whole => "Remove line",
-            });
-        }
+        button(c, p, at(clear_rect()), reset_label(l, tab), !l.own.is_empty(), ui.hover == Some(Hit::Clear));
         let pos = match &ui.drag {
             Some(Drag::Pos { at }) => Pos::At(*at),
             _ => side.pos,
@@ -858,9 +936,22 @@ fn plot(c: &mut Canvas, p: &Palette, ox: f32, oy: f32, side: &Side, l: &LaneVals
         top.extend(bottom.into_iter().rev());
         c.fill_polygon(&top, p.s(0x33393d));
     }
-    // Where the plain value stands.
+    // The scale's lines (dB for volume, left and right for pan), then the baseline: where the lane stands with no line of
+    // its own, so a line drawn starts from a value that can be read.
+    let marks = scale_marks(l.lane);
     let neutral = r.y + (1.0 - l.lane.neutral() as f32) * r.h;
-    c.fill_rect(Rect::new(r.x, neutral, r.w, 1.0), p.s(0x3a3f42));
+    for &(v, _) in &marks {
+        c.fill_rect(Rect::new(r.x, (r.y + (1.0 - v as f32) * r.h).round(), r.w, 1.0), p.s(0x262b2e));
+    }
+    let base = !matches!(l.lane, Lane::Param { .. });
+    if base {
+        let col = if pts.is_empty() && l.inherited.is_empty() { p.tx(0xc4ccd0) } else { p.tx(0x8c9296).with_alpha(200) };
+        let mut x = r.x;
+        while x < r.right() {
+            c.fill_rect(Rect::new(x, neutral.round() - 0.5, (r.right() - x).min(7.0), 1.5), col);
+            x += 11.0;
+        }
+    }
 
     // The whole audio's tab shows the cuts along the top, those with a line of their own marked.
     if tab == Tab::Whole {
@@ -902,11 +993,81 @@ fn plot(c: &mut Canvas, p: &Palette, ox: f32, oy: f32, side: &Side, l: &LaneVals
     let end_w = c.text_width(f, &end);
     c.text(f, r.right() - end_w, y, dim, &end);
     let scale_x = r.x + 4.0;
-    // Clear of the marks along the top of the Source audio tab.
-    c.text(f, scale_x, r.y + 6.0, dim, &value_text(l.lane, 1.0));
-    c.text(f, scale_x, neutral + 2.0, dim, &value_text(l.lane, l.lane.neutral()));
     let lh = c.line_height(f);
-    c.text(f, scale_x, r.bottom() - lh - 2.0, dim, &value_text(l.lane, 0.0));
+    // The scale's values beside their lines (clear of the marks along the top of the Source audio tab).
+    for &(v, ref label) in &marks {
+        let y = r.y + (1.0 - v as f32) * r.h;
+        let ty = (y - lh / 2.0).clamp(r.y + 6.0, r.bottom() - lh - 2.0);
+        if (y - neutral).abs() > 3.0 || !base {
+            c.text(f, scale_x, ty, dim, label);
+        }
+    }
+    // The baseline's own label, at its right end: what the lane is with no line.
+    if base {
+        let label = match l.lane {
+            Lane::Volume => "Baseline: 0 dB (as recorded)".to_string(),
+            _ => "Baseline: centre".to_string(),
+        };
+        let label = if tab == Tab::Cut && !l.inherited.is_empty() { format!("{label}, under the source audio's line") } else { label };
+        let lf = Font::new(11);
+        let w = c.text_width(lf, &label) + 10.0;
+        let b = Rect::new(r.right() - w - 4.0, (neutral - lh / 2.0 - 1.0).clamp(r.y + 2.0, r.bottom() - lh - 4.0), w, lh + 2.0);
+        c.fill_rrect(b, 3.0, p.s(0x0f1214).with_alpha(220));
+        c.text(lf, b.x + 5.0, b.y + 1.0, p.tx(0xc4ccd0), &label);
+        let at = if l.lane == Lane::Volume { "0 dB" } else { "Centre" };
+        c.text(f, scale_x, (neutral - lh / 2.0).clamp(r.y + 6.0, r.bottom() - lh - 2.0), p.tx(0xc4ccd0), at);
+    }
+}
+
+/// The lines of a lane's scale and what they read: dB steps for volume, left and right for pan, quarters for a parameter.
+fn scale_marks(lane: Lane) -> Vec<(f64, String)> {
+    match lane {
+        Lane::Volume => [6.0, 3.0, 0.0, -6.0, -12.0, -24.0]
+            .into_iter()
+            .filter_map(|db: f64| {
+                let want = 10f64.powf(db / 20.0);
+                let gain = |v: f64| f64::from(os_engine::lane_gain(v));
+                if gain(1.0) < want || gain(0.0) > want {
+                    return None;
+                }
+                // The value with that gain: the curve only goes up.
+                let (mut lo, mut hi) = (0.0, 1.0);
+                for _ in 0..40 {
+                    let mid = (lo + hi) / 2.0;
+                    if gain(mid) < want {
+                        lo = mid;
+                    } else {
+                        hi = mid;
+                    }
+                }
+                Some((hi, if db == 0.0 { "0 dB".to_string() } else { format!("{db:+.0} dB") }))
+            })
+            .chain(std::iter::once((0.0, "-inf dB".to_string())))
+            .collect(),
+        Lane::Pan => vec![(1.0, "100% R".into()), (0.75, "50% R".into()), (0.5, "Centre".into()), (0.25, "50% L".into()), (0.0, "100% L".into())],
+        Lane::Param { .. } => vec![(1.0, "100%".into()), (0.75, "75%".into()), (0.5, "50%".into()), (0.25, "25%".into()), (0.0, "0%".into())],
+    }
+}
+
+/// A small button of the page: greyed while it has nothing to do.
+fn button(c: &mut Canvas, p: &Palette, b: Rect, label: &str, on: bool, hov: bool) {
+    let face = if on && hov { p.s(0x3a4043) } else { p.s(0x2b2f31) };
+    c.fill_rrect(b, 3.0, face);
+    c.text_center(Font::new(12), b, if on { p.tx(0xd4dade) } else { p.tx(0x6a7074) }, label);
+}
+
+/// The loop switch: lit while Play loops just this audio.
+fn loop_switch(c: &mut Canvas, p: &Palette, b: Rect, on: bool, tab: Tab, hov: bool) {
+    let face = if on { p.a(0x49f1b1).with_alpha(if hov { 70 } else { 45 }) } else if hov { p.s(0x3a4043) } else { p.s(0x2b2f31) };
+    c.fill_rrect(b, 4.0, face);
+    let ink = if on { p.a(0x49f1b1) } else { p.tx(0x9aa2a6) };
+    c.icon(&os_ui::tabler::REPEAT, Rect::new(b.x + 6.0, b.y + 3.0, 14.0, 14.0), ink);
+    let text = match (on, tab) {
+        (true, Tab::Cut) => "Play loops this clip",
+        (true, Tab::Whole) => "Play loops the source audio",
+        (false, _) => "Play plays the whole song",
+    };
+    c.text_clip(Font::new(12), b.x + 24.0, b.y + 3.0, b.w - 28.0, if on { p.tx(0xd4dade) } else { ink }, text);
 }
 
 #[cfg(test)]
@@ -927,7 +1088,7 @@ mod tests {
     }
 
     fn vals(lanes: Vec<LaneVals>) -> PageVals {
-        PageVals { cut: side(lanes.clone()), whole: side(lanes) }
+        PageVals { cut: side(lanes.clone()), whole: side(lanes), looping: true }
     }
 
     fn plain() -> PageVals {
@@ -1024,18 +1185,62 @@ mod tests {
         assert_eq!(hit(&ui, &v, Tab::Cut, x + 1.0, y), Some(Hit::Plot));
     }
 
+    /// The reset button is always there, named after the baseline it goes back to; with nothing to reset it does nothing
+    /// and says so; with points it clears the lane shown.
     #[test]
-    fn the_clear_button_is_there_only_with_points_and_clears_the_lane_shown() {
+    fn the_reset_button_puts_the_lane_shown_back_to_its_baseline() {
         let c = clear_rect();
         let (x, y) = (c.cx(), c.cy());
         let v = plain();
         let mut ui = PageUi::default();
-        assert_eq!(hit(&ui, &v, Tab::Cut, x, y), None);
-        let v = vals(vec![lane(Lane::Volume, "Volume", &[(15.0, 0.5)], &[]), lane(Lane::Pan, "Pan", &[], &[])]);
         assert_eq!(hit(&ui, &v, Tab::Cut, x, y), Some(Hit::Clear));
         let mut out = Vec::new();
+        assert_eq!(press(&mut ui, &v, Tab::Cut, x, y, Button::Left, NO_SCREEN, &mut out), Press::Nothing);
+        assert!(out.is_empty());
+        assert!(hint_of(&ui, &v, Tab::Cut, Some(Hit::Clear), x, y).contains("baseline already"));
+        assert_eq!(reset_label(&v.cut.lanes[0], Tab::Cut), "Reset to 0 dB");
+        assert_eq!(reset_label(&v.cut.lanes[1], Tab::Cut), "Reset to centre");
+        let v = vals(vec![lane(Lane::Volume, "Volume", &[(15.0, 0.5)], &[]), lane(Lane::Pan, "Pan", &[], &[])]);
         press(&mut ui, &v, Tab::Cut, x, y, Button::Left, NO_SCREEN, &mut out);
         assert_eq!(out, vec![Event::SetLane { tab: Tab::Cut, lane: Lane::Volume, points: Vec::new() }]);
+        // A clip that follows the source audio's line goes back to following it.
+        let follows = lane(Lane::Volume, "Volume", &[(15.0, 0.5)], &[(10.0, 0.2)]);
+        assert_eq!(reset_label(&follows, Tab::Cut), "Follow source audio");
+    }
+
+    /// "Reset volume & pan" on the automation heading: both lanes back to their baselines in one edit; with neither
+    /// having a line, nothing.
+    #[test]
+    fn reset_volume_and_pan_clears_both_at_once() {
+        let r = reset_both_rect();
+        let (x, y) = (r.cx(), r.cy());
+        let mut ui = PageUi::default();
+        let mut out = Vec::new();
+        assert_eq!(hit(&ui, &plain(), Tab::Whole, x, y), Some(Hit::ResetBoth));
+        assert_eq!(press(&mut ui, &plain(), Tab::Whole, x, y, Button::Left, NO_SCREEN, &mut out), Press::Nothing);
+        let mut v = vals(vec![lane(Lane::Volume, "Volume", &[(15.0, 0.5)], &[]), lane(Lane::Pan, "Pan", &[(12.0, 0.1)], &[])]);
+        press(&mut ui, &v, Tab::Whole, x, y, Button::Left, NO_SCREEN, &mut out);
+        assert_eq!(out, vec![Event::ResetLanes { tab: Tab::Whole, lanes: vec![Lane::Volume, Lane::Pan] }]);
+        v.apply(&out[0]);
+        assert!(v.whole.lanes.iter().all(|l| l.own.is_empty()), "shown at once");
+        // The volume scale reads in dB around its baseline.
+        let marks = scale_marks(Lane::Volume);
+        let zero = marks.iter().find(|m| m.1 == "0 dB").expect("0 dB line");
+        assert!((zero.0 - Lane::Volume.neutral()).abs() < 1e-6, "the baseline is 0 dB");
+        assert!(marks.iter().any(|m| m.1 == "-6 dB") && marks.iter().any(|m| m.1 == "+3 dB"), "{marks:?}");
+    }
+
+    /// The loop switch says what Play plays and flips it.
+    #[test]
+    fn the_loop_switch_flips_what_play_plays() {
+        let r = loop_rect();
+        let mut ui = PageUi::default();
+        let mut out = Vec::new();
+        let v = plain();
+        assert!(v.looping);
+        press(&mut ui, &v, Tab::Cut, r.cx(), r.cy(), Button::Left, NO_SCREEN, &mut out);
+        assert_eq!(out, vec![Event::Loop { tab: Tab::Cut, on: false }]);
+        assert!(hint_of(&ui, &v, Tab::Cut, Some(Hit::Loop), r.cx(), r.cy()).starts_with("Play loops just this audio"));
     }
 
     #[test]

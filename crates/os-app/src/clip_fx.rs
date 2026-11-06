@@ -57,6 +57,79 @@ pub struct ClipFxUi {
     pub(crate) focus: BTreeMap<(usize, bool), (Lane, u32)>,
     /// The tab a window should show next: set by a double-click that asks for it.
     pub pending_tab: Option<(usize, Tab)>,
+    /// The plugins and automation page in front: the rack row whose window shows it, and which tab (`App::tick`).
+    pub shown: Option<(usize, Tab)>,
+    /// The loop switch is off: Play plays the whole song while a page shows.
+    pub whole_song: bool,
+    /// What playback is looping now, while it plays just one audio (`App::audition_tick`).
+    pub audition: Option<Audition>,
+    /// Where a row's Source audio loop starts, in seconds of the file: its ruler's last click.
+    pub whole_at: BTreeMap<usize, f64>,
+}
+
+/// One audio played alone and looped while its page shows: a clip as the Arranger has it (This clip), or the whole file
+/// from its start (Source audio), through its plugins and automation.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Audition {
+    pub row: usize,
+    pub tab: Tab,
+    /// The clip played: This clip's own, where it is; for the source audio a clip of the whole file at tick 0.
+    pub clip: Clip,
+    /// The loop, in ticks.
+    pub range: (u32, u32),
+}
+
+/// What Play plays while rack row `row`'s `tab` page shows: just that audio, looped. `None`: the row has no such audio
+/// (no clip shown, no file read yet).
+pub fn audition(s: &State, row: usize, tab: Tab) -> Option<Audition> {
+    let ch = s.project.channels.get(row)?;
+    if !ch.kind.is_sampler() {
+        return None;
+    }
+    let clip = match tab {
+        Tab::Cut => {
+            let Scope::Cut(id) = scope_of(s, row, Tab::Cut)? else { return None };
+            Clip { muted: false, ..*s.project.arrangement()?.clips.get(clip_at(s, id)?)? }
+        }
+        Tab::Whole => {
+            // As long as the file plays at the tempo, without a clip's own gain, fades or plugins.
+            let secs = s.playlist.wave_loaded(ch.sample_path.as_deref()?)?.secs();
+            let source = ClipSource::Channel(ch.index);
+            let ticks = (secs * 1000.0 / pl::to_src(s, source, 1.0).max(1e-9)).ceil().max(1.0) as u32;
+            Clip::new(0, ticks, 0, source)
+        }
+    };
+    Some(Audition { row, tab, clip, range: (clip.position, clip.end().max(clip.position + 1)) })
+}
+
+/// The project playback gets for an audition: the song as it plays with only that clip in the arrangement, its track on
+/// and no time markers to jump or stop at.
+pub fn audition_project(s: &State, a: &Audition) -> os_model::Project {
+    let mut p = crate::rack::play_project(s);
+    if let Some(arr) = p.arrangement_mut() {
+        arr.clips = vec![a.clip];
+        arr.markers.clear();
+        for t in arr.tracks.iter_mut().filter(|t| t.number == u32::from(a.clip.track) + 1) {
+            t.enabled = true;
+        }
+    }
+    p
+}
+
+/// Where an audition starts: This clip at the song position when that is in the clip, else at its start; the source audio
+/// where its ruler was last clicked.
+pub fn audition_start(s: &State, a: &Audition) -> u32 {
+    match a.tab {
+        Tab::Cut if (a.range.0..a.range.1).contains(&s.playlist.pos) => s.playlist.pos,
+        Tab::Cut => a.range.0,
+        Tab::Whole => s.clip_fx.whole_at.get(&a.row).map_or(0, |&at| whole_tick(s, a, at)),
+    }
+}
+
+/// The tick of second `at` of the file in a source audio audition.
+fn whole_tick(s: &State, a: &Audition, at: f64) -> u32 {
+    let t = at.max(0.0) * 1000.0 / pl::to_src(s, a.clip.source, 1.0).max(1e-9);
+    (t.round() as u32).min(a.range.1.saturating_sub(1))
 }
 
 /// The clip with id `id` in the current arrangement: its place.
@@ -283,8 +356,16 @@ pub fn page_vals(s: &State, row: usize) -> Option<PageVals> {
         .collect();
     let focus = |whole: bool| s.clip_fx.focus.get(&(row, whole)).copied().unwrap_or((Lane::Volume, 0));
     let (focus_whole, serial_whole) = focus(true);
-    // The song position, or the playhead while the song plays: what the tabs' line shows.
+    // The song position, or the playhead while the song plays: what the tabs' line shows. A source audio audition plays
+    // the file from tick 0: there the line is its playhead; stopped, where it starts.
     let t = s.clip_fx.play_tick.unwrap_or_else(|| f64::from(s.playlist.pos));
+    let whole_play = s.clip_fx.audition.filter(|a| a.row == row && a.tab == Tab::Whole).map(|a| {
+        let at = s.clip_fx.play_tick.unwrap_or(0.0).clamp(0.0, f64::from(a.range.1));
+        at * pl::to_src(s, a.clip.source, 1.0) / 1000.0
+    });
+    let whole_stopped = (s.clip_fx.audition.is_none() && s.clip_fx.shown == Some((row, Tab::Whole)) && !s.clip_fx.whole_song)
+        .then(|| s.clip_fx.whole_at.get(&row).copied())
+        .flatten();
     let inside = |c: &Clip| f64::from(c.position) <= t && t < f64::from(c.end());
     let second = |c: &Clip| clip_span(s, c).0 + (t - f64::from(c.position)) * pl::to_src(s, c.source, 1.0) / 1000.0;
     let piece = scope_of(s, row, Tab::Cut).and_then(|sc| match sc {
@@ -294,7 +375,10 @@ pub fn page_vals(s: &State, row: usize) -> Option<PageVals> {
     let whole = Side {
         available: true,
         // In this clip if it is there, else in the first clip of this audio at the song position.
-        pos: piece.filter(inside).or_else(|| clips.iter().find(|c| inside(c)).copied()).map_or(Pos::Away, |c| Pos::At(second(&c))),
+        pos: match whole_play.or(whole_stopped) {
+            Some(at) => Pos::At(at),
+            None => piece.filter(inside).or_else(|| clips.iter().find(|c| inside(c)).copied()).map_or(Pos::Away, |c| Pos::At(second(&c))),
+        },
         rows: whole_rows(s, ch, wave.as_deref()),
         slots: slots_of(s, ch.whole_fx),
         lanes: lanes_of(s, ch.whole_fx, ch.whole_fx, Tab::Whole),
@@ -333,7 +417,7 @@ pub fn page_vals(s: &State, row: usize) -> Option<PageVals> {
         }
         None => Side::default(),
     };
-    Some(PageVals { cut, whole })
+    Some(PageVals { cut, whole, looping: !s.clip_fx.whole_song })
 }
 
 /// The song position for second `at` of rack row `row`'s sample, from `tab`: in this clip on its tab, clamped to it. On the
@@ -614,8 +698,42 @@ fn lane_menu(s: &State, scope: Scope, row: usize, x: f32, y: f32) -> Popup {
 /// What the page asked for.
 pub fn event(app: &mut App, row: usize, e: Event) {
     let tab = match &e {
-        Event::Pick { tab, .. } | Event::SlotMenu { tab, .. } | Event::OpenSlot { tab, .. } | Event::ToggleSlot { tab, .. } | Event::SetPos { tab, .. } | Event::SetMix { tab, .. } | Event::AddLane { tab, .. } | Event::SetLane { tab, .. } => *tab,
+        Event::Pick { tab, .. }
+        | Event::SlotMenu { tab, .. }
+        | Event::OpenSlot { tab, .. }
+        | Event::ToggleSlot { tab, .. }
+        | Event::SetPos { tab, .. }
+        | Event::SetMix { tab, .. }
+        | Event::AddLane { tab, .. }
+        | Event::SetLane { tab, .. }
+        | Event::ResetLanes { tab, .. }
+        | Event::Loop { tab, .. } => *tab,
     };
+    if let Event::Loop { on, .. } = e {
+        app.state.clip_fx.whole_song = !on;
+        app.state.message = Some(if on { "Play loops just this audio while its page shows" } else { "Play plays the whole song" }.into());
+        return app.invalidate();
+    }
+    // The ruler during an audition moves the loop's playhead; on the source audio, stopped, where the loop starts.
+    if let Event::SetPos { at, .. } = e {
+        if tab == Tab::Whole && !app.state.clip_fx.whole_song {
+            app.state.clip_fx.whole_at.insert(row, at);
+        }
+        if let Some(a) = app.state.clip_fx.audition.filter(|a| a.row == row && a.tab == tab) {
+            let tick = match tab {
+                Tab::Cut => pos_tick(&app.state, row, tab, at).unwrap_or(a.range.0),
+                Tab::Whole => whole_tick(&app.state, &a, at),
+            };
+            if tab == Tab::Cut {
+                app.state.playlist.pos = tick;
+            }
+            app.audition_seek(tick);
+            return app.invalidate();
+        }
+        if tab == Tab::Whole && !app.state.clip_fx.whole_song && app.state.clip_fx.shown == Some((row, Tab::Whole)) {
+            return app.invalidate();
+        }
+    }
     let Some(scope) = scope_of(&app.state, row, tab) else { return };
     match e {
         Event::Pick { slot, x, y, .. } => {
@@ -646,7 +764,26 @@ pub fn event(app: &mut App, row: usize, e: Event) {
         },
         Event::SetMix { slot, mix, .. } => set_mix(app, scope, slot, mix),
         Event::SetLane { lane, points, .. } => set_lane(app, scope, lane, points),
+        Event::ResetLanes { lanes, .. } => reset_lanes(app, scope, &lanes),
+        Event::Loop { .. } => {}
     }
+}
+
+/// "Reset volume & pan": those lanes of `scope` lose their own points, back to their baselines. One undo step.
+fn reset_lanes(app: &mut App, scope: Scope, lanes: &[Lane]) {
+    crate::control::edit_app(app, "Reset automation", Region::Project, |app| {
+        let s = &mut app.state;
+        let h = unit_of(s, scope)?;
+        let u = s.project.fx_unit_mut(h)?;
+        for &l in lanes {
+            u.lane_mut(l).clear();
+        }
+        u.params.retain(|l| !l.points.is_empty());
+        s.piano.dirty = true;
+        Some(())
+    });
+    app.state.message = Some("Volume and pan back to their baselines".into());
+    app.invalidate();
 }
 
 /// Each tick: a clip copied or split, a channel cloned, shares a unit with its original; the copy gets its own, with its
@@ -713,6 +850,92 @@ mod tests {
     fn lanes(a: &App, id: u32) -> Vec<AutoPoint> {
         let c = pl::clips(&a.state).iter().find(|c| c.id.0 == id).copied().unwrap();
         a.state.project.fx_unit(c.fx).map_or(Vec::new(), |u| u.volume.clone())
+    }
+
+    /// While a page shows, Play plays just its audio, looped: This clip alone where it is, the source audio as one clip of
+    /// the whole file from tick 0. The loop switch off, or Record armed, Play plays the song.
+    #[test]
+    fn a_shown_page_plays_its_audio_alone_and_looped() {
+        let (mut a, row, x, _) = app();
+        a.state.clip_fx.cut.insert(row, x);
+        assert!(a.play_alone().is_none(), "no page shows");
+        a.state.clip_fx.shown = Some((row, Tab::Cut));
+        let au = a.play_alone().expect("this clip plays alone");
+        let c = *pl::clips(&a.state).iter().find(|c| c.id.0 == x).unwrap();
+        assert_eq!((au.clip.id, au.range), (c.id, (c.position, c.end())));
+        let p = audition_project(&a.state, &au);
+        assert_eq!(p.arrangement().unwrap().clips, vec![Clip { muted: false, ..c }], "the other clip is not heard");
+        assert_eq!(p.arrangement().unwrap().markers.len(), 0);
+        // It loops over the clip, and starts where the song position is in it.
+        a.state.clip_fx.audition = Some(au);
+        assert_eq!(a.selection_loop(), Some(au.range));
+        a.state.playlist.pos = c.position + 10;
+        assert_eq!(audition_start(&a.state, &au), c.position + 10);
+        a.state.playlist.pos = c.end() + 500;
+        assert_eq!(audition_start(&a.state, &au), c.position);
+        a.state.clip_fx.audition = None;
+        // The loop switch off: the song.
+        event(&mut a, row, Event::Loop { tab: Tab::Cut, on: false });
+        assert!(a.play_alone().is_none() && !page_vals(&a.state, row).unwrap().looping);
+        event(&mut a, row, Event::Loop { tab: Tab::Cut, on: true });
+        a.state.rec.armed = true;
+        assert!(a.play_alone().is_none(), "recording goes into the song");
+        a.state.rec.armed = false;
+        // The source audio: the whole file, once it is read, from where its ruler was clicked.
+        a.state.clip_fx.shown = Some((row, Tab::Whole));
+        let _ = page_vals(&a.state, row);
+        if let Some(w) = a.play_alone() {
+            assert_eq!((w.tab, w.range.0, w.clip.fx), (Tab::Whole, 0, 0));
+            assert!(w.range.1 >= c.length, "the whole file: at least as long as a clip of it");
+            event(&mut a, row, Event::SetPos { tab: Tab::Whole, at: 1.0 });
+            assert!(audition_start(&a.state, &w) > 0);
+        }
+    }
+
+    /// Playback follows the page in front: Play loops its audio; the song playing when the page comes to the front loops
+    /// it instead; the page gone, playback stops; stopped, the loop is over.
+    #[test]
+    fn playback_follows_the_page_in_front() {
+        let (mut a, row, x, _) = app();
+        a.state.clip_fx.cut.insert(row, x);
+        a.state.clip_fx.shown = Some((row, Tab::Cut));
+        a.start_playback();
+        let au = a.state.clip_fx.audition.expect("Play loops the clip");
+        assert_eq!((au.tab, au.clip.id.0), (Tab::Cut, x));
+        // The page goes: playback stops.
+        a.transport.pretend_at(f64::from(au.range.0), true);
+        a.state.clip_fx.shown = None;
+        a.tick();
+        assert!(!a.transport.playing() && a.state.clip_fx.audition.is_none());
+        // The song playing when the page comes to the front: the clip loops instead.
+        a.transport.pretend_at(10.0, true);
+        a.state.clip_fx.shown = Some((row, Tab::Cut));
+        a.tick();
+        assert_eq!(a.state.clip_fx.audition.map(|w| w.clip.id.0), Some(x));
+        assert_eq!(a.selection_loop(), Some(au.range), "looping over the clip");
+        // Stopped: the loop is over, and Play with the switch off plays the song.
+        a.transport.stop();
+        a.tick();
+        assert!(a.state.clip_fx.audition.is_none());
+        a.state.clip_fx.whole_song = true;
+        a.start_playback();
+        assert!(a.state.clip_fx.audition.is_none());
+        a.transport.stop();
+    }
+
+    /// "Reset volume & pan" is one undo step.
+    #[test]
+    fn reset_volume_and_pan_is_one_step() {
+        let (mut a, row, x, _) = app();
+        a.state.clip_fx.cut.insert(row, x);
+        event(&mut a, row, Event::SetLane { tab: Tab::Cut, lane: Lane::Volume, points: vec![point(0.0, 0.5)] });
+        event(&mut a, row, Event::SetLane { tab: Tab::Cut, lane: Lane::Pan, points: vec![point(0.0, 0.2)] });
+        event(&mut a, row, Event::ResetLanes { tab: Tab::Cut, lanes: vec![Lane::Volume, Lane::Pan] });
+        let v = page_vals(&a.state, row).unwrap();
+        assert!(v.cut.lanes.iter().all(|l| l.own.is_empty()));
+        undo(&mut a);
+        let v = page_vals(&a.state, row).unwrap();
+        assert!(v.cut.lanes[0].own.len() == 1 && v.cut.lanes[1].own.len() == 1, "both back with one undo");
     }
 
     /// Both tabs show where the song position is, playing or not, and their rulers place it: on the clip's own tab in that

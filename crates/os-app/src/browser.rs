@@ -27,9 +27,18 @@ impl App {
         }
         let s = &mut self.state;
         match *a {
+            // From the folded strip too: the browser opens on that tab.
             Action::BrowserTab(i) => {
                 s.browser_tab = i;
                 s.browser_scroll = 0.0;
+                s.show_browser = true;
+                if i == view::HISTORY_TAB {
+                    reveal_now(s);
+                }
+            }
+            Action::BrowserFold => {
+                s.show_browser = !s.show_browser;
+                s.browser_drag = None;
             }
             Action::BrowserCollapse => {
                 let tab = format!("{}:", s.browser_tab);
@@ -49,6 +58,12 @@ impl App {
                 s.browser_search.clear();
                 s.browser_search_focus = false;
                 s.browser_scroll = 0.0;
+            }
+            // A step of the History tab: the release goes there, or a drag copies it (`browser_drop`).
+            Action::BrowserRow(i) if s.browser_tab == view::HISTORY_TAB => {
+                let Some(row) = view::rows(s).into_iter().nth(i) else { return true };
+                s.browser_sel = Some(row.key.clone());
+                self.drag = Some(Drag::Browser { item: row.item, label: format!("Copy: {}", row.label), m0: self.mouse, started: false });
             }
             Action::BrowserRow(i) => {
                 let Some(row) = view::rows(s).into_iter().nth(i) else { return true };
@@ -417,6 +432,20 @@ impl App {
     pub(crate) fn browser_drop(&mut self, item: Item, started: bool) {
         self.state.browser_drag = None;
         self.invalidate();
+        // A step of the History tab: a click goes there; dropped back on the list, it is copied to where the project is.
+        if let Item::History(e) = item {
+            let over = self.over_browser();
+            let s = &mut self.state;
+            s.message = if !started {
+                crate::history::go_to(s, e)
+            } else if over && s.browser_tab == view::HISTORY_TAB {
+                Some(crate::history::copy_here(s, e).unwrap_or_else(|why| why))
+            } else {
+                Some("Drop the step on the History list to copy it to now".into())
+            };
+            reveal_now(&mut self.state);
+            return;
+        }
         if !started {
             return;
         }
@@ -571,6 +600,10 @@ impl App {
                 Item::History(e) => return crate::history::go_to(s, e),
                 _ => {}
             },
+            RowCmd::CopyHere => {
+                let Item::History(e) = row.item else { return None };
+                return Some(crate::history::copy_here(s, e).unwrap_or_else(|why| why));
+            }
             RowCmd::Pattern(pc) => {
                 let Item::Pattern(n) = row.item else { return None };
                 s.pattern = n;
@@ -832,6 +865,8 @@ pub enum RowCmd {
     Toggle,
     /// What a click on the row does: the pattern or channel selected, the project taken to the history step.
     Activate,
+    /// A step of the History tab copied to where the project is now (`history::copy_here`).
+    CopyHere,
     /// The row's pattern made current, then this PATTERNS command.
     Pattern(crate::patterns::Cmd),
     /// The channel's window (its plugin's, Lemon Sampler's, or the channel settings).
@@ -909,7 +944,14 @@ pub fn row_menu(s: &crate::app::State, row: &view::Row) -> Vec<PItem> {
         }
         Item::Generator(index) => items.push(PItem::new("Add to instrument rack", Cmd::Plugin(crate::plugin_menu::PlugCmd::Generator { index, after: None }))),
         Item::Effect(index) => items.push(PItem::new("Add to selected mixer track", Cmd::Plugin(crate::plugin_menu::PlugCmd::Effect { index, slot: None }))),
-        Item::History(_) => items.push(r("Go to this step", RowCmd::Activate)),
+        Item::History(e) => {
+            items.push(r("Go to this step", RowCmd::Activate));
+            // The History tab's steps of other branches can be copied to where the project is.
+            if s.browser_tab == view::HISTORY_TAB {
+                let it = r("Copy this change to now", RowCmd::CopyHere);
+                items.push(if crate::history::copy_blocked(s, e).is_none() { it } else { it.off() });
+            }
+        }
         // Into the selected channel's plugin (spec: plugins/presets.md "Browser").
         Item::Preset(ref p) => {
             let key = s.selected_channel;
@@ -1002,19 +1044,22 @@ pub(crate) fn select(s: &mut crate::app::State, key: &str) {
     }
 }
 
-/// Ctrl+Z with "Show undo history in the browser when undoing changes": the browser shows Current project ▸ History,
-/// opened, where the project now is selected (spec: ui/settings-choices.md "Undo history: the four checks
-/// (2026-10-16)"). The All tab shows it too; the others switch to the project's.
+/// Ctrl+Z with "Show undo history in the browser when undoing changes": the browser opens on its History tab, where the
+/// project now is selected and in view (spec: ui/settings-choices.md "Undo history: the four checks (2026-10-16)"; the
+/// History tab is Lemon Studio's).
 pub(crate) fn show_history(s: &mut crate::app::State) {
     s.show_browser = true;
-    if s.browser_tab > 1 {
-        s.browser_tab = 1;
-    }
+    s.browser_tab = view::HISTORY_TAB;
     s.browser_search.clear();
-    let root = format!("{}:Current project", s.browser_tab);
-    let folder = format!("{root}/History");
-    s.browser_sel = Some(format!("{folder}/{}", s.history.at()));
-    s.browser_open.extend([root, folder]);
+    reveal_now(s);
+}
+
+/// On the History tab: where the project now is, selected and scrolled into view.
+pub(crate) fn reveal_now(s: &mut crate::app::State) {
+    if s.browser_tab != view::HISTORY_TAB {
+        return;
+    }
+    s.browser_sel = Some(format!("{}:History/{}", view::HISTORY_TAB, s.history.at_node()));
     reveal(s);
 }
 
